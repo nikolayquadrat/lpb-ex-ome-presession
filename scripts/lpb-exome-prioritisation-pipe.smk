@@ -98,7 +98,7 @@ ARTIFACT_GNOMAD_AF_MAX  = 0.001
 
 # Helper script for picking unrelated representatives (greedy graph algorithm).
 # Place alongside the tier-candidates script under /tmp/scripts/.
-pick_representatives_py = "/tmp/scripts/2026-05-01-pick-representatives.py"
+pick_representatives_py = "/tmp/scripts/lpb-exome-prioritisation-pick-family-representatives.py"
 
 # -----------------------------------------------------------------------------
 # Sample discovery
@@ -783,7 +783,7 @@ rule r12_tier_candidates:
         tier_c          = "/tmp/fastq/12_tiered/{sample}_tierC_gene_panels.tsv",
         master          = "/tmp/fastq/12_tiered/{sample}_master.tsv",
     params:
-        script          = "/tmp/scripts/2026-04-29-tier-candidates.py",
+        script          = "/tmp/scripts/lpb-exome-prioritisation-tier-candidates.py",
     singularity: "docker://quay.io/biocontainers/pandas:1.5.2"
     shell:
         """
