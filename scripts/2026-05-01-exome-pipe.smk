@@ -49,13 +49,14 @@ capture_intervals   = "/tmp/annotation/agilent/S33266436_Regions.padded100.inter
 # but keep one version for consistency). The "merged" cache (GENCODE + RefSeq)
 # is convenient; the "gencode" cache is smaller.
 vep_cache_dir       = "/tmp/annotation/vep/cache_grch38"
-vep_plugin_dir      = "/tmp/annotation/vep/plugins"
+vep_plugin_dir      = "/tmp/annotation/vep/plugins/flat"
 
 # Plugin data files (download separately, see README)
 spliceai_snv        = "/tmp/annotation/vep/plugin_data/spliceai_scores.raw.snv.hg38.vcf.gz"
 spliceai_indel      = "/tmp/annotation/vep/plugin_data/spliceai_scores.raw.indel.hg38.vcf.gz" # manually
 alphamissense_tsv   = "/tmp/annotation/vep/plugin_data/AlphaMissense_hg38.tsv.gz"
 loftee_dir          = "/tmp/annotation/vep/plugin_data/loftee_hg38"
+loftee_path_string  = "loftee_path:/tmp/annotation/vep/plugins/loftee_grch38"
 cadd_snv            = "/tmp/annotation/vep/plugin_data/whole_genome_SNVs.tsv.gz"
 cadd_indel          = "/tmp/annotation/vep/plugin_data/gnomad.genomes.r4.0.indel.tsv.gz"
 revel_tsv           = "/tmp/annotation/vep/plugin_data/new_tabbed_revel_grch38.tsv.gz" # manually
@@ -119,8 +120,7 @@ rule all:
         expand("/tmp/fastq/12_tiered/{sample}_tierB_missense.tsv",   sample=samples),
         expand("/tmp/fastq/12_tiered/{sample}_tierC_gene_panels.tsv",sample=samples),
         expand("/tmp/fastq/12_tiered/{sample}_master.tsv",           sample=samples),
-        # (3) QC: kinship table + artifact blacklist (built once per cohort,
-        #     surfaced for inspection)
+        # (3) QC: kinship table + artifact blacklist (built once per cohort, surfaced for inspection)
         "/tmp/qc/cohort_kinship.kin0",
         "/tmp/qc/representatives.txt",
         "/tmp/qc/representatives.log",
@@ -699,6 +699,7 @@ rule r11_vep_annotate_cohort:
         cache_dir   = vep_cache_dir,
         plugin_dir  = vep_plugin_dir,
         loftee_dir  = loftee_dir,
+        loftee_path_string  = loftee_path_string,
     threads: 4
     singularity: "docker://ensemblorg/ensembl-vep:release_112.0"
     shell:
@@ -720,7 +721,7 @@ rule r11_vep_annotate_cohort:
             --check_existing --no_check_alleles \
             --plugin SpliceAI,snv={input.spliceai_snv},indel={input.spliceai_indel} \
             --plugin AlphaMissense,file={input.alphamissense} \
-            --plugin LoF,loftee_path:{params.loftee_dir},\
+            --plugin LoF,{params.loftee_path_string},\
 human_ancestor_fa:{params.loftee_dir}/human_ancestor.fa.gz,\
 conservation_file:{params.loftee_dir}/loftee.sql,\
 gerp_bigwig:{params.loftee_dir}/gerp_conservation_scores.homo_sapiens.GRCh38.bw \
@@ -734,6 +735,20 @@ fields=AF%AF_nfe%AF_afr%AF_amr%AF_eas%AF_sas%AF_fin%AF_asj%nhomalt \
             --custom file={input.clinvar},short_name=ClinVar,format=vcf,type=exact,\
 fields=CLNSIG%CLNREVSTAT%CLNDN%CLNDISDB \
         > {output.tsv}
+        """
+
+rule r11b_vep_validate:
+    input: "/tmp/fastq/11_vep/cohort.vep.tsv.gz"
+    output: touch("/tmp/fastq/11_vep/.validated")
+    shell:
+        r"""
+        cols=$(zcat {input} | grep -m1 ^#Uploaded_variation | tr '\t' '\n')
+        for required in am_pathogenicity REVEL LoF SpliceAI_pred_DS_AG; do
+            if ! echo "$cols" | grep -q "^${{required}}$"; then
+                echo "ERROR: VEP output missing required column $required" >&2
+                exit 1
+            fi
+        done
         """
 
 # =============================================================================
