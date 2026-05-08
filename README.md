@@ -32,7 +32,7 @@ Ensembl VEP cache release 112 was downloaded from ftp.ensembl.org. VEP plugin so
 - **dbNSFP** v5.3.1a ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. Was supplied *manually* from genos.us and verified against its upstream MD5 checksum.
 
 #### Population-frequency annotation
-gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X and Y; ~184 GB total). A helper script (gnomad_strip_concat.sh) was generated and auto-invoked to strip each per-chromosome VCF to relevant AF columns (AF, AF_nfe, AF_afr, AF_amr, AF_eas, AF_sas, AF_fin, AF_asj, nhomalt, AC, AN) using bcftools 1.19 in parallel (8 chromosomes concurrently with GNU parallel), concatenating the stripped files into a single bgzipped VCF (~30 GB final), and removing per-chromosome originals as each was processed to bound peak disk usage. ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/<YEAR>/clinvar_<YYYYMMDD>.vcf.gz) for run reproducibility. The gnomAD v4.1 constraint metrics table was downloaded from the gnomAD release directory.
+gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X and Y; ~184 GB total). A helper script (gnomad_strip_concat.sh) was generated and auto-invoked to strip each per-chromosome VCF to relevant AF columns (AF, AF_nfe, AF_afr, AF_amr, AF_eas, AF_sas, AF_fin, AF_asj, nhomalt, AC, AN) using bcftools 1.19 in parallel (8 chromosomes concurrently with GNU parallel), concatenating the stripped files into a single bgzipped VCF (~30 GB final), and removing per-chromosome originals as each was processed to bound peak disk usage. ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/2026/clinvar_20260426.vcf.gz) for run reproducibility. The gnomAD v4.1 constraint metrics table was downloaded from the gnomAD release directory.
 
 #### Gene panels
 *all downloaded manually*<br>
@@ -67,6 +67,8 @@ snakemake --snakefile /tmp/repo/lpb-exome-prioritisation-pipe.smk \
     --rerun-incomplete -n
 ```
 
+Yes, containers in the snakemake container is a choice.
+
 ### Under the hood
 #### Read processing and alignment
 Adapter and quality trimming was performed with fastp 0.23.4 using default Illumina-adapter detection. Trimmed reads were aligned to GRCh38 (with ALT contigs) using BWA-MEM2 v2.2.1 (rule r02a_bwamem2_align), with read-group tags injected for sample identification. Alignments were coordinate-sorted and indexed with samtools 1.19. PCR/optical duplicates were marked using GATK MarkDuplicatesSpark (GATK 4.5.0.0), which performs sorting and duplicate marking in a single Spark-parallelized pass.
@@ -84,6 +86,7 @@ Following GATK best practices for small cohorts, SNVs and indels were extracted 
 The cohort VCF was left-aligned and multiallelics were split using bcftools norm -m -any --check-ref w against the reference FASTA (rule r09_normalize).
 
 #### Internal artifact filtering
+*this step requires an exome panel, at least couple dozens samples*<br>
 Four rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) with autosome restriction and MAF/genotype-rate filters (--maf 0.05 --geno 0.05 --hwe 1e-6) produced a BED file from the cohort VCF (r09b_make_plink_bed); KING-format kinship coefficients were computed via --make-king-table (r09c_kinship_table). A custom Python helper (*scripts\lpb-exome-prioritisation-pick-family-representatives.py*) performed connected-component analysis on related-pair edges (KING kinship ≥ 0.0442, the third-degree-relative threshold), retaining one lexicographically-first representative per family (r09d_pick_representatives). The cohort VCF was then subset to representatives and re-tagged with bcftools +fill-tags AC,AN; sites with AC ≥ 2 among representatives that were absent or rare (AF < 0.001) in gnomAD v4.1 were flagged as artifact-suspect tuples (r09e_artifact_blacklist). This procedure removes recurrent batch / mapping / sample-prep artifacts that gnomAD-AF filtering alone cannot detect, while avoiding false positives from variants shared across related samples.
 
 #### Per-sample VCF extraction
@@ -97,3 +100,54 @@ A Python script classifies per-sample variants into three tiers (rule r12_tier_c
 - **Tier B** captures rank-only damaging missense candidates in constrained genes (gnomAD LOEUF < 0.35) by AlphaMissense likely-pathogenic class (score ≥ 0.564) or REVEL ≥ 0.75.
 - **Tier C** captures any rare protein-altering variant in a curated gene set (SCHEMA at FDR ≤ 0.25, BipEx, ASC, or DDG2P confidence ≥ 2). Per-panel boolean membership flags and panel-specific annotation columns (e.g., SCHEMA Q meta, OR for protein-truncating variants; DDG2P mode-of-inheritance and aggregated phenotypes) are appended to all output tables.
 Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
+
+## RNA-seq for DROP pipe
+*scripts\lpb-rnaseq-pipe.smk*
+
+```mermaid
+flowchart TB
+	id0[all]
+	id1[r03f_markduplicates]
+	id2[r03d_STAR_mapping_GTEx]
+	id3[r02a_trim_galore]
+	id4[r03a_STAR_index]
+	id5[r03e_index_bam]
+	id6[r03h_mapping_stat]
+	id7[r04d_qc_summary]
+	id8[r04c_picard_rnaseq_metrics]
+	id9[r03g_index_md_bam]
+	id10[r04a_make_refflat]
+	id11[r04b_make_rrna_intervals]
+	style id0 fill:#D95757,stroke-width:2px,color:#333333
+	style id1 fill:#82D957,stroke-width:2px,color:#333333
+	style id2 fill:#D9D957,stroke-width:2px,color:#333333
+	style id3 fill:#D98257,stroke-width:2px,color:#333333
+	style id4 fill:#D9AD57,stroke-width:2px,color:#333333
+	style id5 fill:#ADD957,stroke-width:2px,color:#333333
+	style id6 fill:#57D982,stroke-width:2px,color:#333333
+	style id7 fill:#5782D9,stroke-width:2px,color:#333333
+	style id8 fill:#57ADD9,stroke-width:2px,color:#333333
+	style id9 fill:#57D957,stroke-width:2px,color:#333333
+	style id10 fill:#57D9AD,stroke-width:2px,color:#333333
+	style id11 fill:#57D9D9,stroke-width:2px,color:#333333
+	id2 --> id0
+	id1 --> id0
+	id7 --> id0
+	id6 --> id0
+	id5 --> id1
+	id2 --> id1
+	id4 --> id2
+	id3 --> id2
+	id2 --> id5
+	id2 --> id6
+	id8 --> id7
+	id10 --> id8
+	id9 --> id8
+	id1 --> id8
+	id11 --> id8
+	id1 --> id9
+	id2 --> id11
+```
+
+## AI disclosure
+Script were produced with assistance from Claude Opus 4.7
