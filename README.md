@@ -105,7 +105,7 @@ Outputs comprise three tier-specific TSVs and a master TSV containing all rare-v
 *scripts\lpb-rnaseq-pipe.smk*
 
 ```mermaid
-flowchart TB
+flowchart LR
 	id0[all]
 	id1[r03f_markduplicates]
 	id2[r03d_STAR_mapping_GTEx]
@@ -118,18 +118,6 @@ flowchart TB
 	id9[r03g_index_md_bam]
 	id10[r04a_make_refflat]
 	id11[r04b_make_rrna_intervals]
-	style id0 fill:#D95757,stroke-width:2px,color:#333333
-	style id1 fill:#82D957,stroke-width:2px,color:#333333
-	style id2 fill:#D9D957,stroke-width:2px,color:#333333
-	style id3 fill:#D98257,stroke-width:2px,color:#333333
-	style id4 fill:#D9AD57,stroke-width:2px,color:#333333
-	style id5 fill:#ADD957,stroke-width:2px,color:#333333
-	style id6 fill:#57D982,stroke-width:2px,color:#333333
-	style id7 fill:#5782D9,stroke-width:2px,color:#333333
-	style id8 fill:#57ADD9,stroke-width:2px,color:#333333
-	style id9 fill:#57D957,stroke-width:2px,color:#333333
-	style id10 fill:#57D9AD,stroke-width:2px,color:#333333
-	style id11 fill:#57D9D9,stroke-width:2px,color:#333333
 	id2 --> id0
 	id1 --> id0
 	id7 --> id0
