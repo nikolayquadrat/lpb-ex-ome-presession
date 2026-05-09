@@ -148,7 +148,7 @@ rule r02a_trim_galore:
     input:
         get_fastq_path,
     output:
-        R1 = "/tmp/data/02_trimmed_fastq/{sample}_R1_val_1.fq.gz",
+        R1 = temp("/tmp/data/02_trimmed_fastq/{sample}_R1_val_1.fq.gz"),
     singularity: TRIM_CONTAINER
     shell:
         r"""
