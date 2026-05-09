@@ -1431,7 +1431,7 @@ G. LOFTEE network workaround (if section 5d failed)
      # rsync / s3 cp the tarball back to the target host
 
 ==============================================================================
-ALSO AUTOMATED FOR YOU
+ALSO AUTOMATED
 ==============================================================================
   - apt-package installation (when sudo+apt available)
   - VEP plugin .pm flattening into single directory at:
