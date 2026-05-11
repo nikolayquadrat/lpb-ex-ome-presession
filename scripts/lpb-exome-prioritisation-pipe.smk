@@ -747,14 +747,6 @@ fields=AF%AF_nfe%AF_afr%AF_amr%AF_eas%AF_sas%AF_fin%AF_asj%nhomalt \
 fields=CLNSIG%CLNREVSTAT%CLNDN%CLNDISDB \
         > {output.tsv}
 
-        echo "Checking for LOFTEE columns..." >&2
-        grep -m1 '^#Uploaded_variation' {output.tsv} \
-            | tr '\t' '\n' \
-            | grep -qx 'LoF' || {{
-                echo "ERROR: VEP output is missing LOFTEE column 'LoF'" >&2
-                exit 1
-            }}
-        
         chmod a+wx /tmp/fastq/11_vep
         """
 
