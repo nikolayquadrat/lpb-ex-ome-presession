@@ -68,8 +68,8 @@ clinvar_vcf         = "/tmp/annotation/vep/custom/clinvar.vcf.gz"
 
 # Gene panels for Tier C prioritization
 schema_genes        = "/tmp/data/SCHEMA_gene_results_with_hgnc.tsv"
-bipex_genes         = "/tmp/data/BipEx_gene_results.tsv"
-asc_genes           = "/tmp/data/ASC_gene_results.tsv"
+bipex_genes         = "/tmp/data/BipEx_gene_results_with_hgnc.tsv"
+asc_genes           = "/tmp/data/ASC_gene_results_with_hgnc.tsv"
 ndd_genes           = "/tmp/data/DDG2P_panel.tsv"
 loeuf_table         = "/tmp/data/gnomad_v4.1_constraint_metrics.tsv"
 
@@ -104,8 +104,9 @@ pick_representatives_py = "/tmp/scripts/lpb-exome-prioritisation-pick-family-rep
 # Sample discovery
 # -----------------------------------------------------------------------------
 samples ,= glob_wildcards("/tmp/fastq/{sample}_R1_001.fastq.gz")
-# samples = [s for s in samples if s not in ['e2-35-combined', 'e2-37-combined', 'e2-38-combined']]
-# print("Samples:", samples)
+samples = [s for s in samples if s not in ['e1-19-combined']] # testing
+samples = ['e1-19-combined', 'e1-1-combined', 'e1-3-combined'] # testing
+print("Samples:", samples)
 
 # -----------------------------------------------------------------------------
 # Targets -- only what DROP needs
@@ -277,7 +278,7 @@ rule r04a_bqsr_table:
             -O {output.table}
         """
 
-rule r04b_apply_bqsr:
+rule r04b_apply_bqsr: # probably redundant, present in GATK best practices but absent in DRAGEN
     input:
         bam     = "/tmp/fastq/03_markdup/{sample}.markdup.bam",
         bai     = "/tmp/fastq/03_markdup/{sample}.markdup.bam.bai",
@@ -655,12 +656,15 @@ rule r10_per_sample_vcf:
     output:
         vcf = "/tmp/fastq/10_per_sample_vcf/{sample}.vcf.gz",
         tbi = "/tmp/fastq/10_per_sample_vcf/{sample}.vcf.gz.tbi",
+    params:
+        unsorted_vcf = lambda wc: "/tmp/fastq/10_per_sample_vcf/" + wc.sample + ".uncorted.vcf.gz",
     singularity: "docker://quay.io/biocontainers/bcftools:1.19--h8b25389_0"
     shell:
         """
         bcftools view -s {wildcards.sample} -Ou {input.vcf} \
         | bcftools view -e 'GT="0/0" || GT="./." || GT="0|0" || GT=".|."' \
-            -Oz -o {output.vcf}
+            -Oz -o {params.unsorted_vcf}
+        bcftools sort -Oz -o {output.vcf} {params.unsorted_vcf}
         bcftools index -t {output.vcf}
         """
 
@@ -692,6 +696,13 @@ rule r11_vep_annotate_cohort:
         dbnsfp          = dbnsfp_gz,
         gnomad          = gnomad_v4_exomes,
         clinvar         = clinvar_vcf,
+
+        # LOFTEE code and data
+        lof_pm          = "/tmp/annotation/vep/plugins/flat/LoF.pm",
+        lof_src_pm      = "/tmp/annotation/vep/plugins/loftee_grch38/LoF.pm",
+        lof_ancestor    = "/tmp/annotation/vep/plugin_data/loftee_hg38/human_ancestor.fa.gz",
+        lof_sql         = "/tmp/annotation/vep/plugin_data/loftee_hg38/loftee.sql",
+        lof_gerp        = "/tmp/annotation/vep/plugin_data/loftee_hg38/gerp_conservation_scores.homo_sapiens.GRCh38.bw",
     output:
         tsv     = "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
         stats   = "/tmp/fastq/11_vep/cohort.vep.stats.html",
@@ -713,6 +724,7 @@ rule r11_vep_annotate_cohort:
             --dir_plugins {params.plugin_dir} \
             --assembly GRCh38 \
             --fork {threads} \
+            --buffer_size 20000 \
             --force_overwrite \
             --tab --compress_output gzip \
             --symbol --canonical --biotype --hgvs --numbers \
@@ -721,10 +733,7 @@ rule r11_vep_annotate_cohort:
             --check_existing --no_check_alleles \
             --plugin SpliceAI,snv={input.spliceai_snv},indel={input.spliceai_indel} \
             --plugin AlphaMissense,file={input.alphamissense} \
-            --plugin LoF,{params.loftee_path_string},\
-human_ancestor_fa:{params.loftee_dir}/human_ancestor.fa.gz,\
-conservation_file:{params.loftee_dir}/loftee.sql,\
-gerp_bigwig:{params.loftee_dir}/gerp_conservation_scores.homo_sapiens.GRCh38.bw \
+            --plugin "LoF,{params.loftee_path_string},human_ancestor_fa:{params.loftee_dir}/human_ancestor.fa.gz,conservation_file:{params.loftee_dir}/loftee.sql,gerp_bigwig:{params.loftee_dir}/gerp_conservation_scores.homo_sapiens.GRCh38.bw" \
             --plugin CADD,{input.cadd_snv},{input.cadd_indel} \
             --plugin REVEL,{input.revel} \
             --plugin dbNSFP,{input.dbnsfp},MutationTaster_pred,PROVEAN_pred,\
@@ -735,6 +744,7 @@ fields=AF%AF_nfe%AF_afr%AF_amr%AF_eas%AF_sas%AF_fin%AF_asj%nhomalt \
             --custom file={input.clinvar},short_name=ClinVar,format=vcf,type=exact,\
 fields=CLNSIG%CLNREVSTAT%CLNDN%CLNDISDB \
         > {output.tsv}
+        chmod a+wx /tmp/fastq/11_vep
         """
 
 rule r11b_vep_validate:
@@ -801,4 +811,6 @@ rule r12_tier_candidates:
             --out_tier_b {output.tier_b} \
             --out_tier_c {output.tier_c} \
             --out_master {output.master}
+            
+        chmod a+wx /tmp/fastq/12_tiered
         """
