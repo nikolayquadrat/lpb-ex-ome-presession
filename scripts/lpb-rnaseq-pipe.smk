@@ -133,7 +133,7 @@ rule all:
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
-# Trimming (kept identical to your existing pipeline for consistency)
+# Trimming
 # -----------------------------------------------------------------------------
 # Note: GTEx itself does NOT trim. They feed raw FASTQ to STAR. Trimming is
 # generally OK for STAR but produces slightly different alignments than GTEx.
@@ -541,13 +541,6 @@ rule r04d_qc_summary:
       - HISTOGRAM section: normalized coverage by percentile of transcript
         position (0=5'-end, 100=3'-end); we don't aggregate this here but
         leave the per-sample file available for plotting.
-
-    The output table makes it easy to spot:
-      - Samples with high MEDIAN_3PRIME_BIAS (RNA degradation candidates)
-      - Samples with high PCT_RIBOSOMAL_BASES (rRNA depletion failure)
-      - Samples with low PCT_MRNA_BASES (DNA contamination or pre-mRNA
-        dominance)
-      - Samples with low PCT_USABLE_BASES (general QC poor)
     """
     input:
         metrics_files = expand("/tmp/data/04_qc/{sample}/{sample}.rnaseq_metrics.txt",
@@ -601,34 +594,7 @@ rule r04d_qc_summary:
 
         # Write summary
         with open(output.summary, "w") as fout:
-            fout.write("sample\t" + "\t".join(cols_of_interest) +
-                       "\tflag_3prime_bias_high\tflag_rrna_high\tflag_mrna_low\n")
-            for sample in sorted(rows):
-                row = rows[sample]
-                # Flagging logic (heuristic; tune to your cohort):
-                #   3' bias > median + 3*MAD -> degradation candidate
-                #   rRNA > 10% -> rRNA depletion failure
-                #   PCT_MRNA_BASES < 0.6 -> DNA / pre-mRNA contamination
-                try:
-                    b3 = float(row.get("MEDIAN_3PRIME_BIAS", "0") or 0)
-                    flag_3p = "YES" if (mad_3p_bias > 0 and
-                                        b3 > med_3p_bias + 3*mad_3p_bias) else ""
-                except ValueError:
-                    flag_3p = "?"
-                try:
-                    rb = float(row.get("PCT_RIBOSOMAL_BASES", "0") or 0)
-                    flag_rrna = "YES" if rb > 0.10 else ""
-                except ValueError:
-                    flag_rrna = "?"
-                try:
-                    pm = float(row.get("PCT_MRNA_BASES", "0") or 0)
-                    flag_mrna = "YES" if pm < 0.60 else ""
-                except ValueError:
-                    flag_mrna = "?"
-
-                vals = [row.get(c, "") for c in cols_of_interest]
-                fout.write(f"{sample}\t" + "\t".join(vals) +
-                           f"\t{flag_3p}\t{flag_rrna}\t{flag_mrna}\n")
+            fout.write("sample\t" + "\t".join(cols_of_interest) + "\n")
 
 
 # =============================================================================
