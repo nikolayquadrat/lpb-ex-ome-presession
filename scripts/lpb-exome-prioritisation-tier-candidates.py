@@ -79,6 +79,7 @@ ALPHAMIS_LIKELY_PATH = 0.564    # AlphaMissense likely_pathogenic threshold
 REVEL_THRESHOLD      = 0.75     # ensemble missense threshold
 LOEUF_THRESHOLD      = 0.35     # gnomAD constraint: constrained genes
 SCHEMA_FDR_MAX       = 0.25     # include sub-significant SCHEMA genes
+ASC_FDR_MAX          = 0.25     # include sub-significant ASC genes
 
 LOF_CONSEQUENCES = {
     "stop_gained",
@@ -766,15 +767,40 @@ def main():
     # column conventions across releases. We list several common candidates
     # and let load_gene_annotations skip the ones that don't exist in the
     # actual file. Empty placeholder files yield empty annotations.
+    # BipEx and ASC TSVs from the Broad exome browsers are keyed only on
+    # Ensembl gene_id, so they have been pre-joined with HGNC symbols via
+    # join_bipex_asc_with_hgnc.sh. The pre-join also collapses multiple-
+    # group rows to one row per gene (BipEx: "Bipolar Disorder" group;
+    # ASC: "All" group) and surfaces the columns we actually use.
+    
+    # BipEx has no broad published FDR gene panel in this browser table.
+    # Keep the full table for annotations, but do not use all tested genes
+    # as Tier C prior genes.
     bipex_set, bipex_annot = load_gene_annotations(
         args.bipex_genes, prefix="BipEx",
-        report_columns=["case_lof", "ctrl_lof", "fisher_p_lof",
-                        "fisher_OR_lof", "fisher_p_dmis"],
+        gene_col="hgnc_symbol",
+        report_columns=[
+            "ptv_case_count", "ptv_control_count",
+            "ptv_fisher_gnom_non_psych_pval", "ptv_fisher_gnom_non_psych_OR",
+            "damaging_missense_case_count", "damaging_missense_control_count",
+            "damaging_missense_fisher_gnom_non_psych_pval",
+            "damaging_missense_fisher_gnom_non_psych_OR",
+        ],
     )
+
+    # Empty set means BipEx does not contribute to Tier C.
+    bipex_set = set()
+
     asc_set, asc_annot = load_gene_annotations(
         args.asc_genes, prefix="ASC",
-        report_columns=["case_lof", "ctrl_lof", "fisher_p_lof",
-                        "fisher_OR_lof", "qvalue"],
+        gene_col="hgnc_symbol",
+        fdr_col="qval", fdr_max=ASC_FDR_MAX, # filter fdr
+        report_columns=[
+            "xcase_dn_ptv", "xcont_dn_ptv",
+            "xcase_dn_misb", "xcont_dn_misb",  # damaging missense de novo
+            "xcase_dn_misa", "xcont_dn_misa", # other missense de novo
+            "qval",
+        ],
     )
 
     # DDG2P (PanelApp): the most clinically meaningful columns are the
@@ -851,9 +877,12 @@ def main():
 
     # Per-panel boolean membership flags -- handy for filtering reports
     rare["in_SCHEMA"] = rare["SYMBOL"].isin(schema_set)
-    rare["in_BipEx"]  = rare["SYMBOL"].isin(bipex_set)
-    rare["in_ASC"]    = rare["SYMBOL"].isin(asc_set)
-    rare["in_DDG2P"]  = rare["SYMBOL"].isin(ndd_set)
+
+    # Annotation-only flag: gene is present in the BipEx browser/result table.
+    rare["has_BipEx_annotation"] = rare["SYMBOL"].isin(bipex_set)
+
+    rare["in_ASC"]   = rare["SYMBOL"].isin(asc_set)
+    rare["in_DDG2P"] = rare["SYMBOL"].isin(ndd_set)
 
     # Attach per-panel annotation columns (panel-prefixed) by joining each
     # annotation table on SYMBOL. Genes not in a given panel get NaN for
@@ -910,7 +939,7 @@ def main():
             front_candidates.append(c)
 
     # Per-panel boolean flags
-    front_candidates += ["in_SCHEMA", "in_BipEx", "in_ASC", "in_DDG2P"]
+    front_candidates += ["in_SCHEMA", "has_BipEx_annotation", "in_ASC", "in_DDG2P"]
 
     # Per-panel annotation columns, grouped by panel for readability
     for prefix in ("SCHEMA", "BipEx", "ASC", "DDG2P"):
