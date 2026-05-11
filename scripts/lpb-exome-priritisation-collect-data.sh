@@ -663,16 +663,24 @@ flatten_plugins() {
         done
     fi
 
-    # Copy LOFTEE Perl modules. LOFTEE ships LoF.pm at the repo root,
-    # plus helper modules in subdirectories (e.g. context, splice). VEP
-    # only needs the top-level .pm files; the helpers are loaded via
-    # 'loftee_path:' at runtime (see the VEP rule's --plugin LoF arg).
+    # Copy LOFTEE plugin and compile-time helper scripts.
+    # LoF.pm uses Perl require() for helper .pl files such as utr_splice.pl.
+    # These must be visible in VEP's @INC, which includes --dir_plugins.
     local n_loftee=0
     if [[ -d "$VEP_PLUGINS/loftee_grch38" ]]; then
-        for pm in "$VEP_PLUGINS/loftee_grch38"/*.pm; do
-            [[ -e "$pm" ]] || continue
-            cp -f "$pm" "$flat/$(basename "$pm")"
+        for f in "$VEP_PLUGINS/loftee_grch38"/*.pm \
+                "$VEP_PLUGINS/loftee_grch38"/*.pl; do
+            [[ -e "$f" ]] || continue
+            cp -f "$f" "$flat/$(basename "$f")"
             n_loftee=$((n_loftee + 1))
+        done
+
+        # Subdirectories required by LoF.pm at compile/runtime.
+        for d in maxEntScan; do
+            if [[ -d "$VEP_PLUGINS/loftee_grch38/$d" ]]; then
+                cp -a "$VEP_PLUGINS/loftee_grch38/$d" "$flat/"
+                n_loftee=$((n_loftee + 1))
+            fi
         done
     fi
 
