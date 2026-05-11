@@ -1171,11 +1171,11 @@ section "7. Gene panels & gnomAD constraint"
 cd "$DATA_DIR"
 
 manual_needed "SCHEMA_gene_results.tsv" \
-    "https://schema.broadinstitute.org/results -> 'Download' button -> save into $DATA_DIR"
+    "https://schema.broadinstitute.org/results -> 'Download' button -> save into $DATA_DIR. Re-run THIS script - it auto-joins HGNC symbols."
 manual_needed "BipEx_gene_results.tsv" \
-    "https://bipex.broadinstitute.org/results -> 'Download' button -> save into $DATA_DIR"
+    "https://bipex.broadinstitute.org/downloads -> 'BipEx gene results (TSV)' -> save into $DATA_DIR. Re-run THIS script - it auto-joins HGNC symbols and filters to the canonical group (BIPEX_GROUP, default 'Bipolar Disorder')."
 manual_needed "ASC_gene_results.tsv" \
-    "https://asc.broadinstitute.org/results -> 'Download' button -> save into $DATA_DIR"
+    "https://asc.broadinstitute.org/downloads -> 'ASC gene results (TSV)' -> save into $DATA_DIR. Re-run THIS script - it auto-joins HGNC symbols."
 
 # DDG2P via PanelApp
 PANELAPP_TSV="https://panelapp.genomicsengland.co.uk/panels/484/download/All/"
@@ -1276,6 +1276,197 @@ elif [[ -f SCHEMA_gene_results.tsv && -f gnomad_v${GNOMAD_RELEASE}_constraint_me
     fi
 fi
 expect_file "$DATA_DIR/SCHEMA_gene_results_with_hgnc.tsv"
+
+# -----------------------------------------------------------------------------
+# BipEx and ASC HGNC join + group filter
+# -----------------------------------------------------------------------------
+# BipEx_gene_results.tsv and ASC_gene_results.tsv from the Broad exome
+# browsers are keyed only on Ensembl gene_id (no HGNC symbol column) and
+# contain multiple rows per gene -- one per analysis stratum (BipEx: BD /
+# BD1 / BD2; ASC: typically just "All", but other strata may exist in
+# future releases). tier_candidates.py needs a single row per gene with an
+# hgnc_symbol column matching VEP's SYMBOL output. This post-processor:
+#
+#   - drops summary / non-ENSG rows
+#   - filters to the canonical group per panel (configurable below)
+#   - joins gene_id -> hgnc_symbol via the gnomAD constraint table
+#   - keeps only the ID/group + analysis columns we use downstream
+#   - de-duplicates so each gene appears at most once
+#
+# The two output files (BipEx_gene_results_with_hgnc.tsv and
+# ASC_gene_results_with_hgnc.tsv) are what tier_candidates.py reads via
+# the --bipex_genes / --asc_genes CLI arguments.
+#
+# To change which group rows are kept (e.g. BD1-only for a bipolar-I-
+# specific gene set), edit the BIPEX_GROUP / ASC_GROUP arrays below.
+# The values here are the canonical / paper-cited groups.
+BIPEX_GROUP=("Bipolar Disorder")
+ASC_GROUP=()  # empty = no filter; ASC currently has only "All"
+ 
+panel_hgnc_join() {
+    local input="$1"; local output="$2"; local panel_name="$3"
+    local group_filter="$4"  # space-separated literal group names, may be empty
+    shift 4
+    local report_cols=("$@")
+ 
+    # Export to subprocess env -- bash arrays don't traverse into python heredocs
+    INPUT="$input" OUTPUT="$output" PANEL="$panel_name" \
+    GROUP_FILTER="$group_filter" \
+    REPORT_COLS="${report_cols[*]}" \
+    CONSTRAINT_TSV="gnomad_v${GNOMAD_RELEASE}_constraint_metrics.tsv" \
+    python3 - <<'PYEOF'
+import csv, os, sys
+ 
+panel       = os.environ["PANEL"]
+input_path  = os.environ["INPUT"]
+output_path = os.environ["OUTPUT"]
+constraint  = os.environ["CONSTRAINT_TSV"]
+group_filt  = [g for g in os.environ["GROUP_FILTER"].split("\t") if g]
+report_cols = [c for c in os.environ["REPORT_COLS"].split() if c]
+ 
+# Build gene_id -> hgnc_symbol mapping from the constraint table
+ensg_to_hgnc = {}
+with open(constraint) as f:
+    r = csv.DictReader(f, delimiter="\t")
+    fields = r.fieldnames or []
+    ensg_col = next((c for c in fields if c in ("gene_id", "ensembl_gene_id")), None)
+    hgnc_col = next((c for c in fields if c in ("gene", "symbol", "gene_symbol")), None)
+    if not ensg_col or not hgnc_col:
+        print(f"  {panel}: missing ENSG/HGNC columns in constraint: {fields}",
+              file=sys.stderr)
+        sys.exit(1)
+    for row in r:
+        ensg = row[ensg_col].split(".")[0]
+        hgnc = row[hgnc_col]
+        if ensg and ensg not in ensg_to_hgnc and hgnc:
+            ensg_to_hgnc[ensg] = hgnc
+ 
+# Read panel file
+with open(input_path) as fin:
+    r = csv.DictReader(fin, delimiter="\t")
+    src_cols = r.fieldnames or []
+    if "gene_id" not in src_cols:
+        print(f"  {panel}: input has no gene_id column: {src_cols[:6]}",
+              file=sys.stderr)
+        sys.exit(1)
+ 
+    # Resolve which report_cols are actually present
+    keep_report = [c for c in report_cols if c in src_cols]
+    missing     = [c for c in report_cols if c not in src_cols]
+    if missing:
+        print(f"  {panel}: requested columns absent from source "
+              f"(will be skipped): {missing}", file=sys.stderr)
+ 
+    # Extra columns that always go through if present
+    extra_id_cols = [c for c in ("group", "n_cases", "n_controls") if c in src_cols]
+ 
+    out_cols = ["hgnc_symbol", "gene_id"] + extra_id_cols + keep_report
+ 
+    rows_out = []
+    seen_genes = set()
+    n_raw = n_after_ensg = n_after_group = n_with_hgnc = n_unique = 0
+ 
+    for row in r:
+        n_raw += 1
+        ensg = row["gene_id"].split(".")[0]
+        if not ensg.startswith("ENSG"):
+            continue
+        n_after_ensg += 1
+        if group_filt:
+            if row.get("group", "") not in group_filt:
+                continue
+        n_after_group += 1
+        hgnc = ensg_to_hgnc.get(ensg, "")
+        if not hgnc:
+            continue
+        n_with_hgnc += 1
+        if hgnc in seen_genes:
+            continue
+        seen_genes.add(hgnc)
+        n_unique += 1
+        rows_out.append(
+            [hgnc, ensg] + [row.get(c, "") for c in extra_id_cols]
+            + [row.get(c, "") for c in keep_report]
+        )
+ 
+with open(output_path, "w", newline="") as fout:
+    w = csv.writer(fout, delimiter="\t")
+    w.writerow(out_cols)
+    w.writerows(rows_out)
+ 
+print(f"  {panel}: raw={n_raw} -> ensg-only={n_after_ensg} -> "
+      f"group-filt={n_after_group} -> hgnc-joined={n_with_hgnc} -> "
+      f"unique-genes={n_unique}", file=sys.stderr)
+print(f"  {panel}: wrote {output_path} ({len(out_cols)} cols)",
+      file=sys.stderr)
+sys.exit(0 if n_unique > 0 else 1)
+PYEOF
+}
+ 
+bipex_hgnc_join() {
+    # Delimiter for GROUP_FILTER is a tab so multi-word group names like
+    # "Bipolar Disorder" survive. Multiple groups would join with tabs.
+    local groups; groups=$(IFS=$'\t'; printf '%s' "${BIPEX_GROUP[*]}")
+    panel_hgnc_join \
+        "BipEx_gene_results.tsv" \
+        "BipEx_gene_results_with_hgnc.tsv" \
+        "BipEx" \
+        "$groups" \
+        ptv_case_count ptv_control_count \
+        ptv_fisher_gnom_non_psych_pval ptv_fisher_gnom_non_psych_OR \
+        damaging_missense_case_count damaging_missense_control_count \
+        damaging_missense_fisher_gnom_non_psych_pval \
+        damaging_missense_fisher_gnom_non_psych_OR
+}
+ 
+asc_hgnc_join() {
+    local groups; groups=$(IFS=$'\t'; printf '%s' "${ASC_GROUP[*]}")
+    panel_hgnc_join \
+        "ASC_gene_results.tsv" \
+        "ASC_gene_results_with_hgnc.tsv" \
+        "ASC" \
+        "$groups" \
+        xcase_dn_ptv xcont_dn_ptv \
+        xcase_dn_misb xcont_dn_misb \
+        xcase_dn_misa xcont_dn_misa \
+        qval
+}
+ 
+# Run BipEx join (gated on python availability and source files present)
+if [[ -f BipEx_gene_results_with_hgnc.tsv && -s BipEx_gene_results_with_hgnc.tsv ]]; then
+    log SKIP "BipEx_gene_results_with_hgnc.tsv (already present)"
+    N_SKIP+=1
+elif [[ -f BipEx_gene_results.tsv && -f gnomad_v${GNOMAD_RELEASE}_constraint_metrics.tsv ]]; then
+    if (( HAVE_PYTHON == 1 )); then
+        post_process_step "join BipEx Ensembl IDs to HGNC symbols (group=${BIPEX_GROUP[*]})" \
+            bipex_hgnc_join
+    else
+        log ERROR "python3 unavailable; cannot run BipEx HGNC join"
+        FAILED_ITEMS+=("post:BipEx HGNC join (no python)")
+        N_FAIL+=1
+    fi
+fi
+expect_file "$DATA_DIR/BipEx_gene_results_with_hgnc.tsv"
+ 
+# Run ASC join
+if [[ -f ASC_gene_results_with_hgnc.tsv && -s ASC_gene_results_with_hgnc.tsv ]]; then
+    log SKIP "ASC_gene_results_with_hgnc.tsv (already present)"
+    N_SKIP+=1
+elif [[ -f ASC_gene_results.tsv && -f gnomad_v${GNOMAD_RELEASE}_constraint_metrics.tsv ]]; then
+    if (( HAVE_PYTHON == 1 )); then
+        _asc_msg="join ASC Ensembl IDs to HGNC symbols"
+        if (( ${#ASC_GROUP[@]} > 0 )); then
+            _asc_msg="$_asc_msg (group=${ASC_GROUP[*]})"
+        fi
+        post_process_step "$_asc_msg" asc_hgnc_join
+        unset _asc_msg
+    else
+        log ERROR "python3 unavailable; cannot run ASC HGNC join"
+        FAILED_ITEMS+=("post:ASC HGNC join (no python)")
+        N_FAIL+=1
+    fi
+fi
+expect_file "$DATA_DIR/ASC_gene_results_with_hgnc.tsv"
 
 # =============================================================================
 # 8. CAPTURE BED -- cannot be automated
