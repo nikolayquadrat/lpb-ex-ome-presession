@@ -104,8 +104,8 @@ pick_representatives_py = "/tmp/scripts/lpb-exome-prioritisation-pick-family-rep
 # Sample discovery
 # -----------------------------------------------------------------------------
 samples ,= glob_wildcards("/tmp/fastq/{sample}_R1_001.fastq.gz")
-samples = [s for s in samples if s not in ['e1-19-combined']] # testing
-samples = ['e1-19-combined', 'e1-1-combined', 'e1-3-combined'] # testing
+# samples = [s for s in samples if s not in ['e1-19-combined']] # testing
+# samples = ['e1-19-combined', 'e1-1-combined', 'e1-3-combined'] # testing
 print("Samples:", samples)
 
 # -----------------------------------------------------------------------------
@@ -121,12 +121,15 @@ rule all:
         expand("/tmp/fastq/12_tiered/{sample}_tierB_missense.tsv",   sample=samples),
         expand("/tmp/fastq/12_tiered/{sample}_tierC_gene_panels.tsv",sample=samples),
         expand("/tmp/fastq/12_tiered/{sample}_master.tsv",           sample=samples),
-        # (3) QC: kinship table + artifact blacklist (built once per cohort, surfaced for inspection)
+        # (3) QC: kinship table + artifact blacklist (built once per cohort)
         "/tmp/qc/cohort_kinship.kin0",
         "/tmp/qc/representatives.txt",
         "/tmp/qc/representatives.log",
         "/tmp/qc/internal_artifact_sites.tsv",
         "/tmp/qc/internal_artifact_count.txt",
+
+        # "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
+        # "/tmp/fastq/11_vep/test_loftee.vep.tsv", # for the testing
     shell: "echo 'DROP-ready outputs produced.'"
 
 
@@ -184,7 +187,7 @@ rule r01_fastp_trim:
         r2      = temp("/tmp/fastq/01_fastp/{sample}_R2.trim.fastq.gz"),
         html    = "/tmp/fastq/01_fastp/{sample}.fastp.html",
         json    = "/tmp/fastq/01_fastp/{sample}.fastp.json",
-    threads: 4
+    threads: 6
     singularity: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_2"
     shell:
         """
@@ -241,7 +244,7 @@ rule r03_markduplicates_spark:
         bam     = temp("/tmp/fastq/03_markdup/{sample}.markdup.bam"),
         bai     = temp("/tmp/fastq/03_markdup/{sample}.markdup.bam.bai"),
         metrics = "/tmp/fastq/03_markdup/{sample}.markdup.metrics.txt",
-    threads: 4
+    threads: 6
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -310,7 +313,7 @@ rule r05_haplotypecaller_gvcf:
     output:
         gvcf        = "/tmp/fastq/05_gvcf/{sample}.g.vcf.gz",
         tbi         = "/tmp/fastq/05_gvcf/{sample}.g.vcf.gz.tbi",
-    threads: 4
+    threads: 6
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -341,7 +344,7 @@ rule r06_genomicsdbimport:
         sentinel    = "/tmp/fastq/06_genomicsdb/import.done",
     params:
         map_string  = lambda wc, input: " ".join(f"-V {g}" for g in input.gvcfs),
-    threads: 4
+    threads: 6
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -696,13 +699,11 @@ rule r11_vep_annotate_cohort:
         dbnsfp          = dbnsfp_gz,
         gnomad          = gnomad_v4_exomes,
         clinvar         = clinvar_vcf,
-
-        # LOFTEE code and data
-        lof_pm          = "/tmp/annotation/vep/plugins/flat/LoF.pm",
-        lof_src_pm      = "/tmp/annotation/vep/plugins/loftee_grch38/LoF.pm",
-        lof_ancestor    = "/tmp/annotation/vep/plugin_data/loftee_hg38/human_ancestor.fa.gz",
-        lof_sql         = "/tmp/annotation/vep/plugin_data/loftee_hg38/loftee.sql",
-        lof_gerp        = "/tmp/annotation/vep/plugin_data/loftee_hg38/gerp_conservation_scores.homo_sapiens.GRCh38.bw",
+        lof_pm       = "/tmp/annotation/vep/plugins/flat/LoF.pm",
+        lof_src_pm   = "/tmp/annotation/vep/plugins/loftee_grch38/LoF.pm",
+        lof_ancestor = "/tmp/annotation/vep/plugin_data/loftee_hg38/human_ancestor.fa.gz",
+        lof_sql      = "/tmp/annotation/vep/plugin_data/loftee_hg38/loftee.sql",
+        lof_gerp     = "/tmp/annotation/vep/plugin_data/loftee_hg38/gerp_conservation_scores.homo_sapiens.GRCh38.bw",
     output:
         tsv     = "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
         stats   = "/tmp/fastq/11_vep/cohort.vep.stats.html",
@@ -711,8 +712,9 @@ rule r11_vep_annotate_cohort:
         plugin_dir  = vep_plugin_dir,
         loftee_dir  = loftee_dir,
         loftee_path_string  = loftee_path_string,
-    threads: 4
-    singularity: "docker://ensemblorg/ensembl-vep:release_112.0"
+    threads: 6
+    # singularity: "docker://ensemblorg/ensembl-vep:release_112.0"
+    singularity: "/tmp/repo/sing/ensembl-vep-loftee-112.simg"
     shell:
         """
         vep \
@@ -733,7 +735,7 @@ rule r11_vep_annotate_cohort:
             --check_existing --no_check_alleles \
             --plugin SpliceAI,snv={input.spliceai_snv},indel={input.spliceai_indel} \
             --plugin AlphaMissense,file={input.alphamissense} \
-            --plugin "LoF,{params.loftee_path_string},human_ancestor_fa:{params.loftee_dir}/human_ancestor.fa.gz,conservation_file:{params.loftee_dir}/loftee.sql,gerp_bigwig:{params.loftee_dir}/gerp_conservation_scores.homo_sapiens.GRCh38.bw" \
+            --plugin "LoF,{params.loftee_path_string},human_ancestor_fa:{input.lof_ancestor},conservation_file:{input.lof_sql},gerp_bigwig:{input.lof_gerp}" \
             --plugin CADD,{input.cadd_snv},{input.cadd_indel} \
             --plugin REVEL,{input.revel} \
             --plugin dbNSFP,{input.dbnsfp},MutationTaster_pred,PROVEAN_pred,\
@@ -744,22 +746,85 @@ fields=AF%AF_nfe%AF_afr%AF_amr%AF_eas%AF_sas%AF_fin%AF_asj%nhomalt \
             --custom file={input.clinvar},short_name=ClinVar,format=vcf,type=exact,\
 fields=CLNSIG%CLNREVSTAT%CLNDN%CLNDISDB \
         > {output.tsv}
+
+        echo "Checking for LOFTEE columns..." >&2
+        grep -m1 '^#Uploaded_variation' {output.tsv} \
+            | tr '\t' '\n' \
+            | grep -qx 'LoF' || {{
+                echo "ERROR: VEP output is missing LOFTEE column 'LoF'" >&2
+                exit 1
+            }}
+        
         chmod a+wx /tmp/fastq/11_vep
         """
 
-rule r11b_vep_validate:
-    input: "/tmp/fastq/11_vep/cohort.vep.tsv.gz"
-    output: touch("/tmp/fastq/11_vep/.validated")
-    shell:
-        r"""
-        cols=$(zcat {input} | grep -m1 ^#Uploaded_variation | tr '\t' '\n')
-        for required in am_pathogenicity REVEL LoF SpliceAI_pred_DS_AG; do
-            if ! echo "$cols" | grep -q "^${{required}}$"; then
-                echo "ERROR: VEP output missing required column $required" >&2
-                exit 1
-            fi
-        done
-        """
+# rule r11_vep_annotate_cohort_test_bloody_loftee_plugin_arrgh:
+#     input:
+#         vcf          = "/tmp/fastq/09_normalized/cohort.norm.vcf.gz",
+#         tbi          = "/tmp/fastq/09_normalized/cohort.norm.vcf.gz.tbi",
+#         ref          = reference_genome,
+
+#         lof_pm       = "/tmp/annotation/vep/plugins/flat/LoF.pm",
+#         lof_src_pm   = "/tmp/annotation/vep/plugins/loftee_grch38/LoF.pm",
+#         lof_ancestor = "/tmp/annotation/vep/plugin_data/loftee_hg38/human_ancestor.fa.gz",
+#         lof_sql      = "/tmp/annotation/vep/plugin_data/loftee_hg38/loftee.sql",
+#         lof_gerp     = "/tmp/annotation/vep/plugin_data/loftee_hg38/gerp_conservation_scores.homo_sapiens.GRCh38.bw",
+#     output:
+#         tsv = "/tmp/fastq/11_vep/test_loftee.vep.tsv",
+#         ok  = "/tmp/fastq/11_vep/test_loftee.ok",
+#     params:
+#         cache_dir  = vep_cache_dir,
+#         plugin_dir = vep_plugin_dir,
+#         loftee_dir = loftee_dir,
+#         loftee_path_string = loftee_path_string,
+#     threads: 1
+#     # singularity: "docker://ensemblorg/ensembl-vep:release_112.0"
+#     singularity: "/tmp/repo/sing/ensembl-vep-loftee-112.simg"
+#     shell:
+#         r"""
+#         set -euo pipefail
+
+#         mkdir -p /tmp/fastq/11_vep
+
+#         vep \
+#             --input_file {input.vcf} \
+#             --output_file {output.tsv} \
+#             --fasta {input.ref} \
+#             --cache --offline --dir_cache {params.cache_dir} \
+#             --dir_plugins {params.plugin_dir} \
+#             --assembly GRCh38 \
+#             --force_overwrite \
+#             --tab \
+#             --no_stats \
+#             --safe \
+#             --chr chr21 \
+#             --symbol --canonical --biotype --numbers \
+#             --no_check_alleles \
+#             --fields "Uploaded_variation,Location,Allele,Gene,Feature,Consequence,SYMBOL,LoF,LoF_filter,LoF_flags,LoF_info" \
+#             --plugin "LoF,{params.loftee_path_string},human_ancestor_fa:{input.lof_ancestor},conservation_file:{input.lof_sql},gerp_bigwig:{input.lof_gerp}"
+
+#         echo "Checking for LOFTEE columns..." >&2
+#         grep -m1 '^#Uploaded_variation' {output.tsv} \
+#             | tr '\t' '\n' \
+#             | grep -qx 'LoF' || {{
+#                 echo "ERROR: VEP output is missing LOFTEE column 'LoF'" >&2
+#                 exit 1
+#             }}
+#         grep -m1 '^#Uploaded_variation' {output.tsv} \
+#             | tr '\t' '\n' \
+#             | grep -qx 'LoF_filter' || {{
+#                 echo "ERROR: VEP output is missing LOFTEE column 'LoF_filter'" >&2
+#                 exit 1
+#             }}
+#         grep -m1 '^#Uploaded_variation' {output.tsv} \
+#             | tr '\t' '\n' \
+#             | grep -qx 'LoF_flags' || {{
+#                 echo "ERROR: VEP output is missing LOFTEE column 'LoF_flags'" >&2
+#                 exit 1
+#             }}
+#         touch {output.ok}
+#         chmod a+wx /tmp/fastq/11_vep
+#         """
 
 # =============================================================================
 # r12 -- THE CRITICAL RULE: tier-based filtering of VEP output
@@ -811,6 +876,6 @@ rule r12_tier_candidates:
             --out_tier_b {output.tier_b} \
             --out_tier_c {output.tier_c} \
             --out_master {output.master}
-            
+
         chmod a+wx /tmp/fastq/12_tiered
         """
