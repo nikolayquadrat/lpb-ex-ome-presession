@@ -74,6 +74,13 @@
 #     helper). Also: any per-chromosome files left over from an interrupted
 #     previous run are auto-cleaned when the merged file is detected on
 #     re-run, reclaiming disk space without manual intervention.
+# 13. VEP+samtools Singularity image (section 9) is built locally because
+#     the upstream ensembl-vep image lacks samtools, which LOFTEE requires
+#     at runtime. Without this, LOFTEE silently fails to register and the
+#     pipeline's Tier A HC-LoF filter is always empty. Build is gated on
+#     SKIP_VEP_LOFTEE_SIMG_BUILD (default 0). Requires docker + apptainer
+#     or singularity. The output .simg path is registered with expect_file
+#     so the completeness check catches a partial build.
 #
 # === ITEMS THAT REQUIRE HUMAN ACTION ===
 #   A. Capture-kit BED file - from your wet-lab supplier
@@ -115,9 +122,20 @@ CAPTURE_DIR=/mnt/data/exome/annotation/capture
 CAPTURE_BED="$CAPTURE_DIR/capture.bed"
 GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
 
+# Singularity image directory (the .simg files referenced from the Snakefile
+# live here). The VEP+samtools image is built locally so it ships with the
+# samtools binary that LOFTEE needs at runtime - the upstream ensembl-vep
+# image does NOT include samtools, which silently disables LOFTEE.
+SIMG_DIR=/mnt/data/exome/repo/sing
+VEP_LOFTEE_SIMG_NAME="ensembl-vep-loftee-${VEP_CACHE_RELEASE}.simg"
+VEP_LOFTEE_SIMG="$SIMG_DIR/$VEP_LOFTEE_SIMG_NAME"
+VEP_LOFTEE_BASE_IMAGE="${VEP_LOFTEE_BASE_IMAGE:-ensemblorg/ensembl-vep:release_${VEP_CACHE_RELEASE}.0}"
+VEP_LOFTEE_DOCKER_TAG="${VEP_LOFTEE_DOCKER_TAG:-local/ensembl-vep-loftee:release_${VEP_CACHE_RELEASE}.0}"
+
 mkdir -p "$GENOME_DIR" "$VARIATION_DIR" \
          "$VEP_CACHE" "$VEP_PLUGINS" "$VEP_PLUGIN_DATA" "$VEP_CUSTOM" \
-         "$DATA_DIR" "$CAPTURE_DIR" "$(dirname "$GNOMAD_HELPER")"
+         "$DATA_DIR" "$CAPTURE_DIR" "$(dirname "$GNOMAD_HELPER")" \
+         "$SIMG_DIR"
 
 # Manifest file: TSV with one row per managed file
 MANIFEST_FILE="${MANIFEST_FILE:-/mnt/data/exome/MANIFEST.tsv}"
@@ -300,6 +318,30 @@ if (( HAVE_PYTHON == 0 )); then
 fi
 if (( HAVE_SHA256 == 0 )); then
     log WARN "sha256sum unavailable - manifest will lack hash entries"
+fi
+
+# -----------------------------------------------------------------------------
+# Section 9 prereqs: docker + apptainer/singularity for VEP+samtools image
+# -----------------------------------------------------------------------------
+# Only required if SKIP_VEP_LOFTEE_SIMG_BUILD != 1. Detected here so both
+# section 0's banner reflects them and section 9 can skip-with-clear-reason
+# when they are missing.
+SKIP_VEP_LOFTEE_SIMG_BUILD="${SKIP_VEP_LOFTEE_SIMG_BUILD:-0}"
+HAVE_DOCKER=0; HAVE_APPTAINER=0; HAVE_SINGULARITY=0
+command -v docker      >/dev/null 2>&1 && HAVE_DOCKER=1
+command -v apptainer   >/dev/null 2>&1 && HAVE_APPTAINER=1
+command -v singularity >/dev/null 2>&1 && HAVE_SINGULARITY=1
+log INFO "container tools:"
+log INFO "  docker=$HAVE_DOCKER  apptainer=$HAVE_APPTAINER  singularity=$HAVE_SINGULARITY"
+log INFO "  SKIP_VEP_LOFTEE_SIMG_BUILD=$SKIP_VEP_LOFTEE_SIMG_BUILD"
+
+if (( SKIP_VEP_LOFTEE_SIMG_BUILD == 0 )); then
+    if (( HAVE_DOCKER == 0 )); then
+        log WARN "docker missing - section 9 (VEP+samtools .simg) will be skipped"
+    fi
+    if (( HAVE_APPTAINER == 0 && HAVE_SINGULARITY == 0 )); then
+        log WARN "no apptainer/singularity - section 9 (VEP+samtools .simg) will be skipped"
+    fi
 fi
 
 # Set TMPDIR onto the data volume (cloud VMs commonly have tiny /tmp)
@@ -1485,6 +1527,187 @@ manual_needed "$CAPTURE_BED" \
 expect_file "$CAPTURE_BED"
 
 # =============================================================================
+# 9. VEP + samtools Singularity image (required by VEP rule for LOFTEE)
+# =============================================================================
+# The upstream Ensembl VEP container does NOT ship samtools. LOFTEE silently
+# fails to register if samtools is missing at runtime - and silent failure
+# means the HC-LoF filter that defines Tier A would just always be empty.
+#
+# Strategy: build a Docker image FROM ensemblorg/ensembl-vep:release_<N>.0
+# that adds samtools via apt-get, save it as a docker-archive tar, then
+# convert to a Singularity/Apptainer .simg via 'singularity build
+# docker-archive://...'. This avoids needing root for the singularity build
+# itself (apptainer is unprivileged), and produces an image that snakemake
+# can point at via the `singularity:` directive on the VEP rule.
+#
+# Behavior:
+#   - Idempotent: if $VEP_LOFTEE_SIMG already exists and is non-empty,
+#     skipped with a verification step.
+#   - Opt out entirely with SKIP_VEP_LOFTEE_SIMG_BUILD=1.
+#   - Failures count as real failures (N_FAIL += 1, FAILED_ITEMS entry).
+#   - The .simg is registered with expect_file so the completeness check
+#     catches a partial build.
+#
+# Runtime: 10-25 min depending on docker pull speed for the base image
+# (~3 GB) and disk speed of the docker-archive -> .simg conversion.
+
+section "9. VEP + samtools Singularity image"
+
+build_vep_loftee_dockerfile() {
+    # Emit the Dockerfile into a build directory under SIMG_DIR so the
+    # temporary build context lives on the data volume (cloud VMs commonly
+    # have tiny / partitions).
+    local build_dir="$1"
+    cat > "$build_dir/Dockerfile.vep-loftee" <<EOF
+FROM ${VEP_LOFTEE_BASE_IMAGE}
+
+USER root
+
+# samtools is required by LOFTEE's faidx-style lookups against
+# human_ancestor.fa.gz. Without it, LOFTEE silently fails to register.
+# The samtools version bundled by Debian is fine for LOFTEE's use case.
+RUN apt-get update \\
+    && apt-get install -y --no-install-recommends samtools \\
+    && apt-get clean \\
+    && rm -rf /var/lib/apt/lists/*
+EOF
+}
+
+verify_vep_loftee_simg() {
+    local simg="$1"
+    local sing_bin="$2"
+    log INFO "  verifying $simg"
+    if "$sing_bin" exec "$simg" bash -lc '
+        set -euo pipefail
+        command -v vep >/dev/null && vep --help >/dev/null
+        command -v samtools >/dev/null && samtools --version >/dev/null
+    ' 2>>"$LOG_FILE"; then
+        log INFO "  verification OK: vep + samtools present"
+        return 0
+    else
+        log ERROR "  verification FAILED: vep or samtools missing"
+        return 1
+    fi
+}
+
+build_vep_loftee_simg_now() {
+    # Returns 0 on success, 1 on failure. Logs via the main 'log' helper.
+    local sing_bin=""
+    if (( HAVE_APPTAINER == 1 )); then
+        sing_bin="apptainer"
+    elif (( HAVE_SINGULARITY == 1 )); then
+        sing_bin="singularity"
+    else
+        log ERROR "no apptainer/singularity available"
+        return 1
+    fi
+    log INFO "  container builder: $sing_bin"
+
+    local docker_archive="${SIMG_DIR}/${VEP_LOFTEE_SIMG_NAME%.simg}.docker.tar"
+    local build_dir
+    build_dir=$(mktemp -d "${SIMG_DIR}/build-vep-loftee.XXXXXX")
+    # shellcheck disable=SC2064 -- intentional immediate expansion of build_dir
+    trap "rm -rf '$build_dir'" RETURN
+
+    build_vep_loftee_dockerfile "$build_dir"
+    log INFO "  Dockerfile:"
+    while IFS= read -r dline; do log INFO "    $dline"; done < "$build_dir/Dockerfile.vep-loftee"
+
+    log INFO "  docker build -t $VEP_LOFTEE_DOCKER_TAG"
+    if ! docker build -t "$VEP_LOFTEE_DOCKER_TAG" \
+            -f "$build_dir/Dockerfile.vep-loftee" "$build_dir" \
+            >>"$LOG_FILE" 2>&1; then
+        log ERROR "  docker build failed (see $LOG_FILE)"
+        return 1
+    fi
+
+    log INFO "  docker run verification (vep + samtools)"
+    if ! docker run --rm "$VEP_LOFTEE_DOCKER_TAG" bash -lc '
+        set -euo pipefail
+        command -v vep && vep --help | head -3 >/dev/null
+        command -v samtools && samtools --version | head -1
+    ' >>"$LOG_FILE" 2>&1; then
+        log ERROR "  docker image verification failed"
+        return 1
+    fi
+
+    log INFO "  docker save -> $docker_archive"
+    if ! docker save "$VEP_LOFTEE_DOCKER_TAG" -o "$docker_archive" 2>>"$LOG_FILE"; then
+        log ERROR "  docker save failed"
+        return 1
+    fi
+
+    log INFO "  $sing_bin build $VEP_LOFTEE_SIMG (this takes a few minutes)"
+    # apptainer can build unprivileged from docker-archive://, singularity
+    # generally needs sudo. Try unprivileged first either way; fall back if
+    # it fails on singularity.
+    local sing_cmd=("$sing_bin" build --force "$VEP_LOFTEE_SIMG" "docker-archive://${docker_archive}")
+    if ! "${sing_cmd[@]}" >>"$LOG_FILE" 2>&1; then
+        if [[ "$sing_bin" == "singularity" && $EUID -ne 0 ]]; then
+            log WARN "  unprivileged singularity build failed; retrying with sudo"
+            if ! sudo "${sing_cmd[@]}" >>"$LOG_FILE" 2>&1; then
+                log ERROR "  singularity build failed even with sudo (see $LOG_FILE)"
+                return 1
+            fi
+        else
+            log ERROR "  $sing_bin build failed (see $LOG_FILE)"
+            return 1
+        fi
+    fi
+
+    verify_vep_loftee_simg "$VEP_LOFTEE_SIMG" "$sing_bin" || return 1
+
+    # Keep the docker archive by default - it makes a re-run idempotent if
+    # the user deletes the .simg but not the archive. Toggle with
+    # KEEP_VEP_LOFTEE_DOCKER_ARCHIVE=0 to free ~3 GB after a successful build.
+    if [[ "${KEEP_VEP_LOFTEE_DOCKER_ARCHIVE:-1}" != "1" ]]; then
+        log INFO "  removing docker archive: $docker_archive"
+        rm -f "$docker_archive"
+    fi
+    return 0
+}
+
+if (( SKIP_VEP_LOFTEE_SIMG_BUILD == 1 )); then
+    log SKIP "VEP+samtools .simg build (SKIP_VEP_LOFTEE_SIMG_BUILD=1)"
+    N_SKIP+=1
+elif [[ -s "$VEP_LOFTEE_SIMG" ]]; then
+    # Already present - just verify
+    log SKIP "VEP+samtools .simg already exists: $VEP_LOFTEE_SIMG"
+    sing_bin_for_verify=""
+    (( HAVE_APPTAINER == 1 ))   && sing_bin_for_verify="apptainer"
+    [[ -z "$sing_bin_for_verify" ]] && (( HAVE_SINGULARITY == 1 )) && sing_bin_for_verify="singularity"
+    if [[ -n "$sing_bin_for_verify" ]]; then
+        if ! verify_vep_loftee_simg "$VEP_LOFTEE_SIMG" "$sing_bin_for_verify"; then
+            log ERROR "existing .simg failed verification; consider removing and re-running"
+            FAILED_ITEMS+=("verify:$VEP_LOFTEE_SIMG")
+            N_FAIL+=1
+        else
+            N_SKIP+=1
+        fi
+    else
+        log WARN "cannot verify existing .simg (no apptainer/singularity available)"
+        N_SKIP+=1
+    fi
+    unset sing_bin_for_verify
+elif (( HAVE_DOCKER == 0 )); then
+    log ERROR "docker missing - cannot build VEP+samtools .simg"
+    FAILED_ITEMS+=("build:VEP+samtools .simg (no docker)")
+    N_FAIL+=1
+elif (( HAVE_APPTAINER == 0 && HAVE_SINGULARITY == 0 )); then
+    log ERROR "no apptainer/singularity - cannot build VEP+samtools .simg"
+    FAILED_ITEMS+=("build:VEP+samtools .simg (no apptainer/singularity)")
+    N_FAIL+=1
+else
+    if post_process_step "build VEP+samtools .simg ($VEP_LOFTEE_SIMG)" \
+            build_vep_loftee_simg_now; then
+        N_OK+=1
+        manifest_record "$VEP_LOFTEE_SIMG" "built" "$VEP_LOFTEE_BASE_IMAGE"
+    fi
+fi
+
+expect_file "$VEP_LOFTEE_SIMG"
+
+# =============================================================================
 # Final completeness check + manifest update
 # =============================================================================
 section "Completeness validation"
@@ -1629,6 +1852,17 @@ G. LOFTEE network workaround (if section 5d failed)
      gunzip -k loftee.sql.gz && tar czf loftee_hg38.tar.gz *
      # rsync / s3 cp the tarball back to the target host
 
+H. VEP+samtools Singularity image (for the VEP annotation rule)
+   Path: $VEP_LOFTEE_SIMG
+   Wire into your Snakefile on the VEP rule:
+     rule r11_vep_annotate_cohort:
+         ...
+         singularity: "/tmp/repo/sing/$VEP_LOFTEE_SIMG_NAME"
+   (Assumes /mnt/data/exome is bind-mounted as /tmp inside snakemake.)
+   The image is rebuilt only if missing; set SKIP_VEP_LOFTEE_SIMG_BUILD=1
+   to skip even when the .simg is missing (e.g., on a machine without
+   docker). Override the base image via VEP_LOFTEE_BASE_IMAGE.
+
 ==============================================================================
 ALSO AUTOMATED
 ==============================================================================
@@ -1648,6 +1882,11 @@ ALSO AUTOMATED
       deletes ~184 GB of per-chromosome originals as it processes them and
       produces the ~30 GB merged stripped VCF. Set SKIP_GNOMAD_PROCESSING=1
       to skip the auto-run (in which case run "bash $GNOMAD_HELPER" later).
+  - VEP+samtools Singularity image build (section 9): docker -> .simg
+      conversion that adds samtools to the upstream Ensembl VEP image so
+      LOFTEE can register at runtime. Skipped if the .simg already exists
+      or if docker/apptainer is missing. Toggle off with
+      SKIP_VEP_LOFTEE_SIMG_BUILD=1.
   - Manifest at $MANIFEST_FILE (paths, sizes, sha256, source URLs, status)
   - Index-completeness validation
   - Version-coherence sanity check at startup
