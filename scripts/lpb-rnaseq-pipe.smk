@@ -502,13 +502,11 @@ rule r04b_make_rrna_intervals:
 
 rule r04c_picard_rnaseq_metrics:
     """
-    Per-sample CollectRnaSeqMetrics. Strand-specificity is set to NONE
-    because we don't know your library protocol - if your library is
-    strand-specific (most modern protocols are), update this to
-    SECOND_READ_TRANSCRIPTION_STRAND (TruSeq dUTP/Stranded mRNA) or
+    Per-sample CollectRnaSeqMetrics. Strand-specificity could be set to NONE
+    update this to SECOND_READ_TRANSCRIPTION_STRAND (TruSeq dUTP/Stranded mRNA) or
     FIRST_READ_TRANSCRIPTION_STRAND. Wrong strand setting inflates the
     PCT_CORRECT_STRAND_READS metric but does NOT affect 3'/5' bias - so
-    NONE is safe for our primary QC purpose.
+    NONE is safe for primary QC purpose.
     """
     input:
         bam = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam",
@@ -527,7 +525,7 @@ rule r04c_picard_rnaseq_metrics:
             O={output.metrics} \
             REF_FLAT={input.refflat} \
             RIBOSOMAL_INTERVALS={input.rrna_list} \
-            STRAND_SPECIFICITY=NONE \
+            STRAND_SPECIFICITY=SECOND_READ_TRANSCRIPTION_STRAND \
             VALIDATION_STRINGENCY=LENIENT \
             ASSUME_SORTED=true
         """
@@ -623,7 +621,7 @@ rule r04d_qc_summary:
 #      gsutil cp -r gs://gtex-resources/references/star_index_oh75 \
 #                /tmp/data/00_additional_files/gtex_v11_refs/
 #    BUT note that this index is for sjdbOverhang=75 only, so it only matches
-#    if your reads are 2x76bp. For other read lengths, build your own.
+#    if reads are 2x76bp. For other read lengths, build your own.
 #
 # 4. (Optional, for DROP-OUTRIDER reference panel) GTEx V11 gene counts
 #    Used downstream to merge with your samples for OUTRIDER:
