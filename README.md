@@ -21,7 +21,7 @@ The GRCh38 reference assembly with ALT contigs (Homo_sapiens_assembly38.fasta) a
 #### 2. Functional annotation infrastructure
 Ensembl VEP cache release 112 was downloaded from ftp.ensembl.org. VEP plugin source code was cloned from two repositories: the official Ensembl VEP_plugins repository pinned to release/115 (required for dbNSFP v5 column-layout compatibility), and the LOFTEE plugin from the konradjk/loftee repository on the grch38 branch. To accommodate VEP's single-directory plugin-loading model, all .pm files from both repositories were copied into a single canonical directory (plugins/flat/); copies (rather than symlinks) avoid Singularity bind-mount path-resolution failures.
 
-#### 3. Plugin data resources
+#### 3a. Plugin data resources
 - **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz). Were obtained from the DeepMind public bucket and tabix-indexed.
 - **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)) single-nucleotide-variant scores. Were downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror).
 - **SpliceAI indel scores**. Were obtained *manually* via the Illumina BaseSpace CLI (project 66029966) due to licensing constraints.
@@ -30,8 +30,11 @@ Ensembl VEP cache release 112 was downloaded from ftp.ensembl.org. VEP plugin so
 - **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)**. Downloaded manually from https://sites.google.com/site/revelgenomics/downloads. The panel require explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test.
 - **dbNSFP** v5.3.1a ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. Was supplied *manually* from genos.us and verified against its upstream MD5 checksum.
 
+#### 3b. Custom Singularity image for the VEP annotation
+This workflow uses a custom Singularity image for the VEP annotation step instead of the stock ensemblorg/ensembl-vep:release_112.0 container. The image is built from the official Ensembl VEP 112 container, with samtools added for LOFTEE support. LOFTEE requires samtools faidx during annotation, especially for checks involving the ancestral allele FASTA. Without samtools, VEP may still run, but LOFTEE can emit warnings such as Can't exec "samtools" and may produce incomplete or incorrect LoF, LoF_filter, and LoF_flags annotations. In particular, variants that should be downgraded by LOFTEE filters such as ANC_ALLELE may otherwise remain incorrectly classified as high-confidence LoF. The custom image is built once and stored as a local .simg file. The image preserves the official VEP 112 environment and only adds the missing runtime dependency required by LOFTEE.
+
 #### 4. Population-frequency annotation
-- gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X and Y; ~184 GB total). A helper script (gnomad_strip_concat.sh) was generated and auto-invoked to strip each per-chromosome VCF to relevant AF columns (AF, AF_nfe, AF_afr, AF_amr, AF_eas, AF_sas, AF_fin, AF_asj, nhomalt, AC, AN) using bcftools 1.19 in parallel, concatenating the stripped files into a single bgzipped VCF (~30 GB final), and removing per-chromosome originals as each was processed to bound peak disk usage. 
+- gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X and Y; ~184 GB total). A helper script (gnomad_strip_concat.sh) was generated and auto-invoked to strip each per-chromosome VCF to relevant AF columns (AF, AF_nfe, AF_afr, AF_amr, AF_eas, AF_sas, AF_fin, AF_asj, nhomalt, AC, AN) using bcftools 1.19 in parallel, concatenating the stripped files into a single bgzipped VCF (~30 GB final), and removing per-chromosome originals as each was processed to bound peak disk usage.
 
 #### 5. Clinical-significance annotation
 ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/2026/clinvar_20260426.vcf.gz). ClinVar is attached to variants in the VEP step via --custom annotation, which copies the CLNSIG (clinical significance), CLNDN (disease name), CLNREVSTAT (review status), and CLNDISDB (disease database cross-references) INFO fields from the ClinVar record at matching coordinates onto the variant being annotated.
@@ -59,7 +62,7 @@ sudo docker container run --rm --privileged -it \
 -e SINGULARITY_TMPDIR=/tmp/sing_tmp \
 -e SINGULARITY_CACHEDIR=/tmp/sing_tmp/cache \
 -e TMPDIR=/tmp/sing_tmp \
-snakemake/snakemake:v8.20.0
+snakemake/snakemake:v9.16.3
 # inside the container
 snakemake --snakefile /tmp/repo/lpb-exome-prioritisation-pipe.smk \
     --cores 6 \
@@ -187,12 +190,14 @@ sudo docker container run --rm --privileged -it \
     -e APPTAINER_TMPDIR=/tmp/sing_tmp \
     -e APPTAINER_CACHEDIR=/tmp/sing_tmp/cache \
     -e TMPDIR=/tmp/sing_tmp \
-snakemake/snakemake:v8.20.0
+snakemake/snakemake:v9.16.3
 # run inside the container
-time snakemake --snakefile /tmp/repo/lpb-rnaseq-pipe.smk --cores 4 --use-singularity --singularity-prefix sing --singularity-args "--home ${HOME}" --rerun-triggers mtime -n
+export SINGULARITYENV_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt #  for NCBI datasets in contamination check
+export SINGULARITYENV_SSL_CERT_DIR=/etc/ssl/certs  # for NCBI datasets in contamination check
+time snakemake --snakefile /tmp/repo/lpb-rnaseq-pipe.smk --cores 4 --use-singularity --singularity-prefix sing --singularity-args "--home ${HOME} -B /etc/ssl/certs:/etc/ssl/certs:ro" --rerun-triggers mtime -n
 ```
 
-The disk space requirement: ~35Gb for genome, annotation and STAR index + ~??Gb per transcriptome.
+The disk space requirement: ~35Gb for genome, annotation, and STAR index + ~??Gb per transcriptome.
 
 ### Under the hood
 ```mermaid
@@ -243,23 +248,56 @@ Picard MarkDuplicates 2.27.5 (rule r03f_markduplicates) marks PCR/optical duplic
 #### 5. Mapping statistics aggregation
 Per-sample STAR Log.final.out files are parsed into a single TSV (rule r03h_mapping_stat, 00_mapping_stat/mapping_stat.txt) reporting input read counts, uniquely mapped read counts and percentages, multi-mapped percentages, "too many loci" rates, and unmapped fractions per sample.
 
-#### 6. RNA-seq quality control
- Picard CollectRnaSeqMetrics 2.27.5 (rule r04c_picard_rnaseq_metrics) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using ucsc-gtfToGenePred -genePredExt -geneNameAsName2 followed by column-reordering to refFlat format (rule r04a_make_refflat). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule r04b_make_rrna_intervals). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and VALIDATION_STRINGENCY=LENIENT to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule r04d_qc_summary, 04_qc/00_qc_summary.tsv) reporting:
- - PCT_RIBOSOMAL_BASES
- - PCT_CODING_BASES
- - PCT_UTR_BASES
- - PCT_INTRONIC_BASES
- - PCT_INTERGENIC_BASES
- - PCT_MRNA_BASES
- - PCT_USABLE_BASES
- - MEDIAN_CV_COVERAGE
- - MEDIAN_5PRIME_BIAS
- - MEDIAN_3PRIME_BIAS
- - MEDIAN_5PRIME_TO_3PRIME_BIAS
- Three flag columns identify outlier samples: flag_3prime_bias_high fires when a sample's MEDIAN_3PRIME_BIAS exceeds the cohort median plus three median-absolute-deviations (cohort-relative outlier detection that adapts to the protocol's baseline); flag_rrna_high fires when PCT_RIBOSOMAL_BASES exceeds 10% (depletion-failure threshold); flag_mrna_low fires when PCT_MRNA_BASES falls below 60% (genomic-DNA or pre-mRNA contamination threshold). These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
+#### 6. Contamination check
+Contamination check is done with the provided species list (*00_additional_files/contamination/species.txt*) on unmapped reads. The bwa-mem2 alignment is set to be stricter than default (`bwa-mem2 mem-p -T 70 -k 25 -r 2.0`) to supress false positives.
+-T 95: minimum alignment score 95 (default 30). A 100bp read needs ~98% identity to align. Cross-mapping reads at 80-90% identity to homologs are filtered out before output.
+-k 31: minimum seed 31bp (default 19). Raises the floor for what bwa-mem2 considers worth extending.
+-B 6: mismatch penalty 6 (default 4). Each mismatch costs more, so the math above for -T 95 becomes "100 - 7N" — only 1 mismatch tolerated for a 100bp read at -T 95.
+-O 8: gap open penalty 8 (default 6). Gaps are more punished — relevant because indels are how many cross-mapping reads find alignment in rRNA.
+-L 10: clipping penalty 10 (default 5). Discourages soft-clipping, which is how bwa-mem2 sometimes "rescues" partial alignments that should have been rejected.
+The included species are:
+- Neurotropic pathogens
+*Toxoplasma gondii, HHV-6A/B, HHV-7, HSV, EBV, CMV, HSV-2, VZV, JC polyomavirus, West Nile Virus, Rabies lyssavirus, Measles morbillivirus, HIV, Listeria monocytogenes, Neisseria meningitidis, Streptococcus pneumoniae, Cryptococcus neoformans, Treponema pallidum, Borreliella burgdorferi, Mycobacterium tuberculosis*
+- Post-mortem / environmental signature (autopsy & dissection contamination)
+*Escherichia coli, Cutibacterium acnes, Pseudomonas aeruginosa, Klebsiella pneumoniae, Staphylococcus aureus, Staphylococcus epidermidis*
+- Cell-culture / lab-contamination panel (mycoplasmas, fungi etc)
+*Mesomycoplasma hyorhinis, Metamycoplasma orale, Mycoplasmopsis arginini, Mycoplasmopsis fermentans, Metamycoplasma hominis, Acholeplasma laidlawii, Candida albicans, Aspergillus fumigatus, Penicillium rubens, Cladosporium sphaerospermum, Delftia acidovorans, Bradyrhizobium diazoefficiens, Bradyrhizobium japonicum, Cupriavidus metallidurans, Cupriavidus necator, Ralstonia pickettii, Ralstonia insidiosa, Ralstonia pseudosolanacearum*
+- Other pathogenes (mostly negative controls)
+Streptococcus pyogenes, Enterococcus faecalis, Enterococcus faecium, Serratia marcescens, Enterobacter cloacae, Salmonella enterica, Acinetobacter baumannii, Bacillus cereus, Babesia microti, Plasmodium falciparum, Leishmania donovani, Sars_cov_2
 
-#### 7. Pipeline outputs
+#### 7. RNA-seq quality control
+ Picard CollectRnaSeqMetrics 2.27.5 (rule r04c_picard_rnaseq_metrics) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using ucsc-gtfToGenePred -genePredExt -geneNameAsName2 followed by column-reordering to refFlat format (rule r04a_make_refflat). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule r04b_make_rrna_intervals). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and VALIDATION_STRINGENCY=LENIENT to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule r04d_qc_summary, 04_qc/00_qc_summary.tsv) reporting:
+ - PF_BASES. Total number of bases in reads passing Illumina's chastity filter (PF = Passed Filter), including non-aligned reads. The denominator for most fraction metrics below.
+ - PF_ALIGNED_BASES. Bases from PF reads that aligned to the reference. Bases in soft-clips, insertions, and secondary/supplementary alignments are excluded. Roughly equal to PF_BASES × overall alignment rate.
+ - PCT_RIBOSOMAL_BASES. rRNA contamination. Quality target: <5% with good rRNA depletion (Ribo-Zero / Poly-A selection); >10% indicates depletion failure or RNA degradation pulling reads to rRNA fragments.
+ - PCT_CODING_BASES. Fraction of aligned bases mapping to protein-coding (CDS) regions. Higher is generally better for downstream gene-expression analysis. Typical range for well-prepared poly-A brain RNA: 40–60%.
+ - PCT_UTR_BASES. Fraction of aligned bases mapping to 5' or 3' UTRs. Together with PCT_CODING_BASES this sums to PCT_MRNA_BASES. Typical range: 25–40%.
+ - PCT_INTRONIC_BASES. Fraction of aligned bases in intronic regions. Elevated levels (>20%) indicate either DNA contamination of the RNA prep, immature/pre-mRNA enrichment, or RNA degradation that exposed intronic reads.
+ - PCT_INTERGENIC_BASES. Fraction of aligned bases falling outside any annotated gene. Elevated levels (>10%) typically signal genomic DNA contamination or assembly quality issues.
+ - PCT_MRNA_BASES. Combined PCT_CODING_BASES + PCT_UTR_BASES. The most important single quality metric for poly-A RNA-seq. Target: >85% for high-quality poly-A samples; <60% indicates a degraded or contaminated library.
+ - PCT_USABLE_BASES. Fraction of all PF bases (not just aligned) that landed in mRNA (PF_ALIGNED_BASES × PCT_MRNA_BASES / PF_BASES). Combines alignment rate and library purity into one number.
+ - MEDIAN_CV_COVERAGE. Median coefficient of variation in coverage across the 1000 most-expressed transcripts (CV = stdev/mean). Lower is better — uniform coverage means small CV. Values <0.6 are typical for good libraries; >0.8 indicates uneven coverage (often degradation-driven).
+ - MEDIAN_5PRIME_BIAS. Median ratio of coverage at the 5' end vs. the middle of the top-1000 transcripts. Values near 0.5 = balanced; <0.3 = 5' depleted; >0.7 = 5' enriched. 5' enrichment with poly-A selection is unusual and may suggest a library-prep issue.
+ - MEDIAN_3PRIME_BIAS. Median ratio of coverage at the 3' end vs. the middle. The single most diagnostic degradation signature for poly-A libraries. Values near 0.5 = balanced; >0.7 = significant 3' enrichment from RNA degradation (poly-A primers pulled coverage toward the 3' end as transcripts fragmented); >0.8 = severe degradation. Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.
+ - MEDIAN_5PRIME_TO_3PRIME_BIAS. Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.
+ - PCT_CORRECT_STRAND_READS. For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.
+ - Uniquely_mapped. Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; below 10M, autoencoder denoising breaks down and outlier detection becomes unreliable.
+ - Uniquely_mapped_pct. STAR's reported percentage of input reads that mapped uniquely (e.g., 90.10%). Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).
+ Four flag columns identify outlier samples:
+ - flag_3prime_bias_high. Fires when a sample's MEDIAN_3PRIME_BIAS exceeds the cohort median plus three median-absolute-deviations (cohort-relative outlier detection that adapts to the protocol's baseline).
+ - flag_rrna_high. Fires when PCT_RIBOSOMAL_BASES exceeds 10% (depletion-failure threshold).
+ - flag_mrna_low. Fires when PCT_MRNA_BASES falls below 60% (genomic-DNA or pre-mRNA contamination threshold).
+ - flag_low_complexity. Boolean absolute-threshold flag: True if Uniquely_mapped < 10,000,000. Catches samples that look clean by RNA-quality metrics but lack enough reads for reliable outlier detection. Samples with this flag True should be excluded from the OUTRIDER reference panel; including them as the test sample is fine but will yield lower-power results.
+ These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
+
+#### 8. Pipeline outputs
  Per sample: {sample}.Aligned.sortedByCoord.out.patched.md.bam plus index (canonical DROP input), {sample}.SJ.out.tab (FRASER input), {sample}.ReadsPerGene.out.tab (OUTRIDER input, mergeable with GTEx V11 counts), {sample}.Aligned.toTranscriptome.out.bam (RSEM input if needed), {sample}.Chimeric.out.junction, {sample}.Log.final.out, {sample}.markdup_metrics.txt, and {sample}.rnaseq_metrics.txt. Cohort-level: 00_mapping_stat/mapping_stat.txt (alignment summary) and 04_qc/00_qc_summary.tsv (RNA-seq QC summary with outlier flags).
+
+## DROP pipeline
+Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andrade, Leonhard Wachutka, Laure Frésard, Mirjana Gusic, et al. 2021. “Detection of Aberrant Gene Expression Events in RNA Sequencing Data.” Nature Protocols 16 (2): 1276–96. https://doi.org/10.1038/s41596-020-00462-5.
+
+Installation and manual is described here:
+https://gagneurlab-drop.readthedocs.io/en/latest/installation.html
 
 ## AI disclosure
 Scripts were produced with assistance from Claude Opus 4.7
