@@ -6,7 +6,7 @@
 #   (2) Tiered annotated mutation tables (Tier A / B / C) for VUS prioritization
 #
 # Design:
-#   * BWA-MEM2 
+#   * BWA-MEM2 (check the container tag!)
 #   * Joint calling via GenomicsDBImport + GenotypeGVCFs across the cohort
 #   * Hard filtering split by variant type (SNP / indel) per GATK best practice;
 #     VQSR and CNN are not appropriate for this sample size
@@ -660,7 +660,7 @@ rule r10_per_sample_vcf:
         vcf = "/tmp/fastq/10_per_sample_vcf/{sample}.vcf.gz",
         tbi = "/tmp/fastq/10_per_sample_vcf/{sample}.vcf.gz.tbi",
     params:
-        unsorted_vcf = lambda wc: "/tmp/fastq/10_per_sample_vcf/" + wc.sample + ".uncorted.vcf.gz",
+        unsorted_vcf = lambda wc: "/tmp/fastq/10_per_sample_vcf/" + wc.sample + ".unsorted.vcf.gz",
     singularity: "docker://quay.io/biocontainers/bcftools:1.19--h8b25389_0"
     shell:
         """
