@@ -22,19 +22,19 @@ The GRCh38 reference assembly with ALT contigs (Homo_sapiens_assembly38.fasta) a
 Ensembl VEP cache release 112 was downloaded from ftp.ensembl.org. VEP plugin source code was cloned from two repositories: the official Ensembl VEP_plugins repository pinned to release/115 (required for dbNSFP v5 column-layout compatibility), and the LOFTEE plugin from the konradjk/loftee repository on the grch38 branch. To accommodate VEP's single-directory plugin-loading model, all .pm files from both repositories were copied into a single canonical directory (plugins/flat/); copies (rather than symlinks) avoid Singularity bind-mount path-resolution failures.
 
 #### 3a. Plugin data resources
-- **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz). Were obtained from the DeepMind public bucket and tabix-indexed.
-- **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)) single-nucleotide-variant scores. Were downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror).
-- **SpliceAI indel scores**. Were obtained *manually* via the Illumina BaseSpace CLI (project 66029966) due to licensing constraints.
-- **CADD** v1.7 SNV and indel scores ([Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)). Were retrieved from the University of Washington's CADD distribution.
-- **LOFTEE** ([Karczewski et al. 2020](doi:10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) were obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues.
-- **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)**. Downloaded manually from https://sites.google.com/site/revelgenomics/downloads. The panel require explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test.
-- **dbNSFP** v5.3.1a ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. Was supplied *manually* from genos.us and verified against its upstream MD5 checksum.
+- **LOFTEE** ([Karczewski et al. 2020](doi:10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) were obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Source of information for the tier A variants (see below).
+- **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)) single-nucleotide-variant scores. Were downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Source of information for the tier A variants.
+- **SpliceAI indel scores**. Were obtained *manually* via the Illumina BaseSpace CLI (project 66029966) due to licensing constraints, academic use. Source of information for the tier A variants.
+- **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz). Were obtained from the DeepMind public bucket and tabix-indexed. Source of information for the tier B variants.
+- **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)**. Downloaded manually from https://sites.google.com/site/revelgenomics/downloads. The panel require explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data were used under non-commercial research license. Source of information for the tier B variants.
+- **CADD** v1.7 SNV and indel scores ([Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)). Were retrieved from the University of Washington's CADD non-commercial license distribution.
+- **dbNSFP** v5.3.1a (academic-use branch) ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. Was supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).
 
 #### 3b. Custom Singularity image for the VEP annotation
 This workflow uses a custom Singularity image for the VEP annotation step instead of the stock ensemblorg/ensembl-vep:release_112.0 container. The image is built from the official Ensembl VEP 112 container, with samtools added for LOFTEE support. LOFTEE requires samtools faidx during annotation, especially for checks involving the ancestral allele FASTA. Without samtools, VEP may still run, but LOFTEE can emit warnings such as Can't exec "samtools" and may produce incomplete or incorrect LoF, LoF_filter, and LoF_flags annotations. In particular, variants that should be downgraded by LOFTEE filters such as ANC_ALLELE may otherwise remain incorrectly classified as high-confidence LoF. The custom image is built once and stored as a local .simg file. The image preserves the official VEP 112 environment and only adds the missing runtime dependency required by LOFTEE.
 
 #### 4. Population-frequency annotation
-- gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X and Y; ~184 GB total). A helper script (gnomad_strip_concat.sh) was generated and auto-invoked to strip each per-chromosome VCF to relevant AF columns (AF, AF_nfe, AF_afr, AF_amr, AF_eas, AF_sas, AF_fin, AF_asj, nhomalt, AC, AN) using bcftools 1.19 in parallel, concatenating the stripped files into a single bgzipped VCF (~30 GB final), and removing per-chromosome originals as each was processed to bound peak disk usage.
+gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X and Y; ~184 GB total). A helper script (gnomad_strip_concat.sh) was generated and auto-invoked to strip each per-chromosome VCF to relevant AF columns (AF, AF_nfe, AF_afr, AF_amr, AF_eas, AF_sas, AF_fin, AF_asj, nhomalt, AC, AN) using bcftools 1.19 in parallel, concatenating the stripped files into a single bgzipped VCF (~30 GB final), and removing per-chromosome originals as each was processed to bound peak disk usage.
 
 #### 5. Clinical-significance annotation
 ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/2026/clinvar_20260426.vcf.gz). ClinVar is attached to variants in the VEP step via --custom annotation, which copies the CLNSIG (clinical significance), CLNDN (disease name), CLNREVSTAT (review status), and CLNDISDB (disease database cross-references) INFO fields from the ClinVar record at matching coordinates onto the variant being annotated.
@@ -42,8 +42,8 @@ ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/202
 #### 6. Gene panels
 *all downloaded manually*<br>
 - **SureSelectXT Human All Exon V8 capture-kit BED file** (S33266436_Regions.bed & S33266436_Regions.padded100.interval_list). The capture-kit BED file is supplied externally from [the wet-laboratory provider](https://earray.chem.agilent.com/suredesign/search/entity.htm).
-- **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results were obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results were joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering.
-- **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel was retrieved via the panel's TSV download endpoint, with a JSON-API fallback and automated JSON-to-TSV conversion.
+- **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results were obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results were joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering (tier C).
+- **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel was retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion.
 
 #### 7. Validation
 Final completeness validation iterates over expected files, confirming non-zero size and presence of required indices (.tbi for VCF/TSV.gz, .fai/.dict for FASTA). Version coherence between VEP cache, plugin branch, and dbNSFP release is enforced at startup. Post-processing failures (REVEL conversion, SCHEMA HGNC join, gnomAD strip+concat, plugin flattening) propagate to the script's exit code.
@@ -55,7 +55,7 @@ A 27-rule Snakemake workflow processes paired-end whole-exome sequencing data fr
 ### Usage
 - Exomes are provided in the mounted /tmp/fastq folder
 - Tested in a snakemake container in Intel Ice Lake VM with 6 cores and 96Gb RAM with Ububntu 24.04 LTS
-Run snakemake container (yes, containers in the snakemake container is a choice).
+Run snakemake container (yes, containers in the snakemake container is a design choice).
 ```sh
 sudo docker container run --rm --privileged -it \
 -v "${PWD}:/tmp" \
@@ -161,7 +161,7 @@ Following GATK best practices for small cohorts, SNVs and indels were extracted 
 The cohort VCF was left-aligned and multiallelics were split using bcftools norm -m -any --check-ref w against the reference FASTA (rule r09_normalize).
 
 #### 6. Internal artifact filtering
-*this step requires an exome panel, at least couple dozens samples*<br>
+*this step requires an exome panel, at least a couple of dozens samples*<br>
 Four rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) with autosome restriction and MAF/genotype-rate filters (--maf 0.05 --geno 0.05 --hwe 1e-6) produced a BED file from the cohort VCF (r09b_make_plink_bed); KING-format kinship coefficients were computed via --make-king-table (r09c_kinship_table). A custom Python helper (*scripts\lpb-exome-prioritisation-pick-family-representatives.py*) performed connected-component analysis on related-pair edges (KING kinship ≥ 0.0442, the third-degree-relative threshold), retaining one lexicographically-first representative per family (r09d_pick_representatives). The cohort VCF was then subset to representatives and re-tagged with bcftools +fill-tags AC,AN; sites with AC ≥ 2 among representatives that were absent or rare (AF < 0.001) in gnomAD v4.1 were flagged as artifact-suspect tuples (r09e_artifact_blacklist). This procedure removes recurrent batch / mapping / sample-prep artifacts that gnomAD-AF filtering alone cannot detect, while avoiding false positives from variants shared across related samples.
 
 #### 7. Per-sample VCF extraction
@@ -172,7 +172,7 @@ Functional annotation. The cohort VCF was annotated by Ensembl VEP 112 (rule r11
 *scripts\lpb-exome-prioritisation-tier-candidates.py*<br>
 A Python script classifies per-sample variants into three tiers (rule r12_tier_candidates). Common variants (gnomAD popmax AF ≥ 0.001) and internal artifact sites are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
 - **Tier A** captures DROP-testable predicted loss-of-function and splice-disrupting variants (LOFTEE high-confidence LoF, or SpliceAI max delta ≥ 0.20).
-- **Tier B** captures rank-only damaging missense candidates in constrained genes (gnomAD LOEUF < 0.35) by AlphaMissense likely-pathogenic class (score ≥ 0.564) or REVEL ≥ 0.75.
+- **Tier B** captures rank-only damaging missense candidates in constrained genes (gnomAD LOEUF < 0.35) by AlphaMissense likely-pathogenic class (score ≥ 0.564) or ClinGen-endorsed REVEL ≥ 0.773 ([Pejaver et al. 2022](https://doi.org/10.1016/j.ajhg.2022.10.013)).
 - **Tier C** captures any rare protein-altering variant in a curated gene set (SCHEMA at FDR ≤ 0.25, ASC at FDR ≤ 0.25, or DDG2P confidence ≥ 2). Per-panel boolean membership flags and panel-specific annotation columns (e.g., SCHEMA Q meta, OR for protein-truncating variants; DDG2P mode-of-inheritance and aggregated phenotypes) are appended to all output tables. BipEx burden statistics are reported as annotation only and do not define Tier C panel membership.
 
 ## II. RNA-seq alignment and QC pipeline for DROP
@@ -214,23 +214,36 @@ flowchart LR
 	id9[r03g_index_md_bam]
 	id10[r04a_make_refflat]
 	id11[r04b_make_rrna_intervals]
+	id12[r05d_contamination_screen]
+	id13[r05c_entropy_filter]
+	id14[r05b_extract_unmapped]
+	id15[r05a_contamination_index]
+	id16[r05a0_mask_conserved_regions]
 	id2 --> id0
 	id1 --> id0
-	id7 --> id0
 	id6 --> id0
+	id7 --> id0
 	id5 --> id1
 	id2 --> id1
-	id4 --> id2
 	id3 --> id2
+	id4 --> id2
 	id2 --> id5
 	id2 --> id6
 	id8 --> id7
-	id10 --> id8
-	id9 --> id8
-	id1 --> id8
+	id6 --> id7
+	id12 --> id7
 	id11 --> id8
+	id1 --> id8
+	id9 --> id8
+	id10 --> id8
 	id1 --> id9
 	id2 --> id11
+	id1 --> id12
+	id15 --> id12
+	id13 --> id12
+	id14 --> id13
+	id1 --> id14
+	id16 --> id15
 ```
 
 #### 1. Reference assembly and annotation
@@ -249,12 +262,14 @@ Picard MarkDuplicates 2.27.5 (rule r03f_markduplicates) marks PCR/optical duplic
 Per-sample STAR Log.final.out files are parsed into a single TSV (rule r03h_mapping_stat, 00_mapping_stat/mapping_stat.txt) reporting input read counts, uniquely mapped read counts and percentages, multi-mapped percentages, "too many loci" rates, and unmapped fractions per sample.
 
 #### 6. Contamination check
-Contamination check is done with the provided species list (*00_additional_files/contamination/species.txt*) on unmapped reads. The bwa-mem2 alignment is set to be stricter than default (`bwa-mem2 mem-p -T 70 -k 25 -r 2.0`) to supress false positives.
--T 95: minimum alignment score 95 (default 30). A 100bp read needs ~98% identity to align. Cross-mapping reads at 80-90% identity to homologs are filtered out before output.
--k 31: minimum seed 31bp (default 19). Raises the floor for what bwa-mem2 considers worth extending.
--B 6: mismatch penalty 6 (default 4). Each mismatch costs more, so the math above for -T 95 becomes "100 - 7N" — only 1 mismatch tolerated for a 100bp read at -T 95.
--O 8: gap open penalty 8 (default 6). Gaps are more punished — relevant because indels are how many cross-mapping reads find alignment in rRNA.
--L 10: clipping penalty 10 (default 5). Discourages soft-clipping, which is how bwa-mem2 sometimes "rescues" partial alignments that should have been rejected.
+Contamination check is done with the provided species list (*00_additional_files/contamination/species.txt*) on entropy-filtered (bbduk) unmapped reads. The bwa-mem2 alignment parameters is set to be stricter than default to supress false positives:
+-T 95: minimum alignment score 95 (default 30).
+-k 35: minimum seed 35bp (default 19).
+-B 6: mismatch penalty 6 (default 4).
+-O 8: gap open penalty 8 (default 6).
+-L 10: clipping penalty 10 (default 5).
+Additionally, hard MAPQ filter is implemented for stricter best-alignment confidence (samtools view -q 35).
+
 The included species are:
 - Neurotropic pathogens
 *Toxoplasma gondii, HHV-6A/B, HHV-7, HSV, EBV, CMV, HSV-2, VZV, JC polyomavirus, West Nile Virus, Rabies lyssavirus, Measles morbillivirus, HIV, Listeria monocytogenes, Neisseria meningitidis, Streptococcus pneumoniae, Cryptococcus neoformans, Treponema pallidum, Borreliella burgdorferi, Mycobacterium tuberculosis*
@@ -262,8 +277,10 @@ The included species are:
 *Escherichia coli, Cutibacterium acnes, Pseudomonas aeruginosa, Klebsiella pneumoniae, Staphylococcus aureus, Staphylococcus epidermidis*
 - Cell-culture / lab-contamination panel (mycoplasmas, fungi etc)
 *Mesomycoplasma hyorhinis, Metamycoplasma orale, Mycoplasmopsis arginini, Mycoplasmopsis fermentans, Metamycoplasma hominis, Acholeplasma laidlawii, Candida albicans, Aspergillus fumigatus, Penicillium rubens, Cladosporium sphaerospermum, Delftia acidovorans, Bradyrhizobium diazoefficiens, Bradyrhizobium japonicum, Cupriavidus metallidurans, Cupriavidus necator, Ralstonia pickettii, Ralstonia insidiosa, Ralstonia pseudosolanacearum*
-- Other pathogenes (mostly negative controls)
-Streptococcus pyogenes, Enterococcus faecalis, Enterococcus faecium, Serratia marcescens, Enterobacter cloacae, Salmonella enterica, Acinetobacter baumannii, Bacillus cereus, Babesia microti, Plasmodium falciparum, Leishmania donovani, Sars_cov_2
+- Other pathogenes (acting mostly as negative controls)
+*Streptococcus pyogenes, Enterococcus faecalis, Enterococcus faecium, Serratia marcescens, Enterobacter cloacae, Salmonella enterica, Acinetobacter baumannii, Bacillus cereus, Babesia microti, Plasmodium falciparum, Leishmania donovani, SARS-CoV-2*
+
+The rRNA regions in the genomes of the pathogenes were hardmasked due to high expecteded homology with human rRNA.
 
 #### 7. RNA-seq quality control
  Picard CollectRnaSeqMetrics 2.27.5 (rule r04c_picard_rnaseq_metrics) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using ucsc-gtfToGenePred -genePredExt -geneNameAsName2 followed by column-reordering to refFlat format (rule r04a_make_refflat). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule r04b_make_rrna_intervals). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and VALIDATION_STRINGENCY=LENIENT to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule r04d_qc_summary, 04_qc/00_qc_summary.tsv) reporting:
@@ -299,5 +316,10 @@ Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andr
 Installation and manual is described here:
 https://gagneurlab-drop.readthedocs.io/en/latest/installation.html
 
+GTEx v11 Cortex BA9 counts data:
+https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression
+
+Helpful notes:
+
 ## AI disclosure
-Scripts were produced with assistance from Claude Opus 4.7
+Scripts were produced with the assistance from Claude Opus 4.7
