@@ -76,7 +76,7 @@ import numpy as np
 AF_MAX               = 0.001    # gnomAD v4 popmax cutoff (ultra-rare)
 SPLICEAI_THRESHOLD   = 0.20     # min of max(AG,AL,DG,DL) to flag splice
 ALPHAMIS_LIKELY_PATH = 0.564    # AlphaMissense likely_pathogenic threshold
-REVEL_THRESHOLD      = 0.75     # ensemble missense threshold
+REVEL_THRESHOLD      = 0.773    # ClinGen-endorsed thresholds (0.773 for moderate evidence, 0.932 for strong evidence under ACMG PP3 criteria).
 LOEUF_THRESHOLD      = 0.35     # gnomAD constraint: constrained genes
 SCHEMA_FDR_MAX       = 0.25     # include sub-significant SCHEMA genes
 ASC_FDR_MAX          = 0.25     # include sub-significant ASC genes
