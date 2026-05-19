@@ -143,10 +143,42 @@ rule r000a_samtools_faidx:
     shell:  "samtools faidx {input}"
 
 rule r000b_picard_dict:
+    """
+    Create the FASTA's sequence dictionary (.dict). The GENOME_ASSEMBLY (AS=)
+    argument is REQUIRED here -- without it Picard either omits the AS field
+    or fills it from the input filename, both of which break downstream
+    tools that compare genome metadata across files (notably DROP's
+    MonoallelicExpression module, where R's BSgenome compares AS strings
+    when merging DNA-VCF and RNA-counts objects, and refuses to merge if
+    "hg38" doesn't match the dict's filename-derived label).
+
+    Setting AS=hg38 here ensures consistency across:
+      - the dict (this rule)
+      - downstream BAM @SQ headers (BWA reads the dict)
+      - downstream VCF ##contig lines (GATK reads the dict)
+    so DROP's MAE concordance check just works without manual reheadering.
+    """
     input:  reference_genome
     output: reference_genome_base + ".dict"
     singularity: "docker://quay.io/biocontainers/picard:3.1.1--hdfd78af_0"
-    shell:  "picard CreateSequenceDictionary R={input} O={output}"
+    shell:
+        """
+        picard CreateSequenceDictionary \
+            R={input} \
+            O={output} \
+            GENOME_ASSEMBLY=hg38 \
+            SPECIES=Homo_sapiens
+
+        # Sanity check: every @SQ line should now carry AS:hg38.
+        TOTAL=$(grep -c '^@SQ' {output})
+        GOOD=$(grep -c '^@SQ.*AS:hg38' {output})
+        if [ "$TOTAL" != "$GOOD" ]; then
+            echo "ERROR: AS:hg38 not set on all @SQ lines: $GOOD/$TOTAL" >&2
+            grep '^@SQ' {output} | head -3 >&2
+            exit 1
+        fi
+        echo "[r000b] AS:hg38 set correctly on all $TOTAL @SQ lines in {output}" >&2
+        """
 
 rule r000c_bwamem2_index:
     input:  reference_genome
@@ -675,11 +707,19 @@ rule r10_per_sample_vcf:
 # Annotation -- VEP with plugins
 # -----------------------------------------------------------------------------
 # Big upgrade over the original:
-#   * SpliceAI  -- essential for splice-VUS interpretation (Tier A candidates)
+#   * SpliceAI  -- essential for splice-VUS interpretation (Tier A candidates).
+#                  Uses split_output=1 so the 4 delta-scores (DS_AG/AL/DG/DL)
+#                  and 4 delta-positions (DP_AG/AL/DG/DL) are emitted as
+#                  separate columns, making it easier to identify the splicing
+#                  mechanism (e.g., donor loss vs acceptor gain) rather than
+#                  collapsing into a single SpliceAI_pred string.
 #   * AlphaMissense -- state-of-the-art missense pathogenicity (Tier B)
 #   * LOFTEE    -- high-confidence LoF classification (Tier A)
 #   * CADD      -- general deleteriousness score
 #   * REVEL     -- ensemble missense score (complements AlphaMissense)
+#   * dbNSFP    -- pulls 8 in-silico predictors plus gene-level constraint
+#                  (gnomAD_pLI, gnomAD_LOEUF from gnomAD v4.1). LOEUF<0.6
+#                  is the v4.0+ recommended threshold (vs <0.35 for v2.1.1).
 #   * gnomAD v4 -- 807k samples, much better ancestry resolution than v2.0.1
 #   * ClinVar   -- curated clinical assertions
 # Annotation done on the cohort VCF (single VEP run, faster than per-sample)
@@ -733,14 +773,15 @@ rule r11_vep_annotate_cohort:
             --mane --pick_allele_gene --pick_order mane_select,canonical,biotype \
             --sift b --polyphen b \
             --check_existing --no_check_alleles \
-            --plugin SpliceAI,snv={input.spliceai_snv},indel={input.spliceai_indel} \
+            --plugin SpliceAI,snv={input.spliceai_snv},indel={input.spliceai_indel},split_output=1 \
             --plugin AlphaMissense,file={input.alphamissense} \
             --plugin "LoF,{params.loftee_path_string},human_ancestor_fa:{input.lof_ancestor},conservation_file:{input.lof_sql},gerp_bigwig:{input.lof_gerp}" \
             --plugin CADD,{input.cadd_snv},{input.cadd_indel} \
             --plugin REVEL,{input.revel} \
             --plugin dbNSFP,{input.dbnsfp},MutationTaster_pred,PROVEAN_pred,\
 MetaLR_pred,MetaRNN_pred,M-CAP_pred,PrimateAI_pred,\
-ClinPred_pred,BayesDel_addAF_pred \
+ClinPred_pred,BayesDel_addAF_pred,\
+gnomAD_pLI,gnomAD_LOEUF \
             --custom file={input.gnomad},short_name=gnomADv4,format=vcf,type=exact,\
 fields=AF%AF_nfe%AF_afr%AF_amr%AF_eas%AF_sas%AF_fin%AF_asj%nhomalt \
             --custom file={input.clinvar},short_name=ClinVar,format=vcf,type=exact,\
