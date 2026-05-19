@@ -19,7 +19,7 @@ Tier A  (DROP-testable: LoF + splice)
 Tier B  (Missense, rank-only)
     * Missense variants with AlphaMissense pathogenicity class
       'likely_pathogenic' (score >= 0.564) in constrained genes
-      (gnomAD LOEUF < 0.35), OR REVEL >= 0.75 in the same gene set.
+      (gnomAD LOEUF < 0.6), OR REVEL >= 0.75 in the same gene set.
     Rationale: DROP usually cannot confirm missense (normal mRNA, normal
     splicing); this tier feeds downstream hand-curation.
 
@@ -77,7 +77,7 @@ AF_MAX               = 0.001    # gnomAD v4 popmax cutoff (ultra-rare)
 SPLICEAI_THRESHOLD   = 0.20     # min of max(AG,AL,DG,DL) to flag splice
 ALPHAMIS_LIKELY_PATH = 0.564    # AlphaMissense likely_pathogenic threshold
 REVEL_THRESHOLD      = 0.773    # ClinGen-endorsed thresholds (0.773 for moderate evidence, 0.932 for strong evidence under ACMG PP3 criteria).
-LOEUF_THRESHOLD      = 0.35     # gnomAD constraint: constrained genes
+LOEUF_THRESHOLD      = 0.60     # gnomAD constraint: constrained genes (from gnomAD v4.0+ (2024))
 SCHEMA_FDR_MAX       = 0.25     # include sub-significant SCHEMA genes
 ASC_FDR_MAX          = 0.25     # include sub-significant ASC genes
 
@@ -683,6 +683,32 @@ def main():
           file=sys.stderr)
 
     # ------------------------------------------------------------------
+    # 2b. Compute BAF (B-allele frequency) = AD[ALT] / DP
+    # ------------------------------------------------------------------
+    # AD comes from GATK as "REF_count,ALT_count" (or longer for multi-allelic
+    # sites; since the upstream pipeline normalizes/splits multi-allelics in
+    # r09, every row here is biallelic and AD is exactly two integers).
+    # BAF is the standard QC / allele-balance metric for a heterozygous call:
+    #   - ~0.5 for a true heterozygous diploid germline variant
+    #   - skewed toward 0 or 1 for mosaicism, allelic dropout, mapping bias
+    # NaN for missing AD/DP (rows from samples with no coverage at the site).
+    def _baf(ad_str, dp_val):
+        try:
+            parts = str(ad_str).split(",")
+            if len(parts) < 2:
+                return np.nan
+            alt_count = float(parts[1])
+            dp = float(dp_val)
+            return alt_count / dp if dp > 0 else np.nan
+        except (TypeError, ValueError):
+            return np.nan
+
+    merged["BAF"] = [
+        _baf(ad, dp) for ad, dp in zip(merged.get("AD", []),
+                                       merged.get("DP", []))
+    ]
+
+    # ------------------------------------------------------------------
     # 3. gnomAD AF filter
     # ------------------------------------------------------------------
     if af_cols:
@@ -907,48 +933,201 @@ def main():
           file=sys.stderr)
 
     # ------------------------------------------------------------------
-    # 6. Output column ordering
+    # 6. Source-attributed column renaming + 5-group output ordering
     # ------------------------------------------------------------------
-    # Compose front-column list dynamically from columns that actually exist.
-    # Order:
-    #   1. Tier label and gene/variant identifiers
-    #   2. Genotype + coverage in the sample
-    #   3. Coordinates and HGVS
-    #   4. Population frequency (gnomAD)
-    #   5. Predictor scores (SpliceAI, AlphaMissense, REVEL, LOFTEE, CADD)
-    #   6. Clinical assertions (ClinVar)
-    #   7. Per-panel boolean memberships (in_SCHEMA, in_BipEx, ...)
-    #   8. Per-panel annotation columns (SCHEMA_*, BipEx_*, ASC_*, DDG2P_*)
-    # Any AlphaMissense / REVEL / SpliceAI / LOFTEE columns that the VEP run
-    # did emit get pulled to the front; missing ones are silently skipped.
-    front_candidates = ["tier", "SYMBOL", "Consequence",
-                        "CHROM", "POS", "REF", "ALT",
-                        "GT", "DP", "AD", "GQ",
-                        "HGVSc", "HGVSp", "Amino_acids", "Protein_position",
-                        "gnomAD_popmax", "SpliceAI_max"]
-    if loftee_present:
-        front_candidates += ["LoF", "LoF_filter", "LoF_flags"]
-    if am_score_col:
-        front_candidates.append(am_score_col)
-    if am_class_col:
-        front_candidates.append(am_class_col)
-    if revel_col:
-        front_candidates.append(revel_col)
-    for c in ("CADD_PHRED", "CLNSIG", "CLNDN", "ClinVar_CLNSIG", "ClinVar_CLNDN"):
-        if c in rare.columns:
-            front_candidates.append(c)
+    # Two operations, in this order:
+    #
+    # (a) Rename plugin-sourced columns with their source as a prefix
+    #     (LOFTEE_*, AlphaMissense_*, SpliceAI_*, dbNSFP_*, VEP_*), so the
+    #     output table makes clear which tool produced each annotation.
+    #     This matters for license attribution, version tracking, and for
+    #     anyone reading the table without access to the VEP invocation.
+    #
+    # (b) Group columns into 5 ordered sections in the final report:
+    #         1. General info (variant ID + sample genotype data)
+    #         2. Tier A criteria (LoF + splice -- DROP-testable)
+    #         3. Tier B criteria (missense pathogenicity + gene constraint)
+    #         4. Tier C criteria (gene panels + ClinVar)
+    #         5. Others (population frequencies, misc VEP flags, tier label)
+    #
+    # Rename happens AFTER classification (lines 849-870) -- the classifier
+    # functions use the original VEP plugin column names; we only rename
+    # for the final output table.
 
-    # Per-panel boolean flags
-    front_candidates += ["in_SCHEMA", "has_BipEx_annotation", "in_ASC", "in_DDG2P"]
+    # Build the rename map from columns that actually exist in the table.
+    # Missing columns are silently skipped, so this works whether or not
+    # each plugin was run.
+    rename_map = {}
 
-    # Per-panel annotation columns, grouped by panel for readability
+    # LOFTEE plugin
+    for old, new in [("LoF",        "LOFTEE_LoF"),
+                     ("LoF_filter", "LOFTEE_LoF_filter"),
+                     ("LoF_flags",  "LOFTEE_LoF_flags"),
+                     ("LoF_info",   "LOFTEE_LoF_info")]:
+        if old in rare.columns:
+            rename_map[old] = new
+
+    # AlphaMissense plugin (handles either of the two naming conventions
+    # that the VEP plugin uses depending on version)
+    for old, new in [("am_pathogenicity",          "AlphaMissense_pathogenicity"),
+                     ("am_class",                  "AlphaMissense_class"),
+                     ("AlphaMissense_pathogenicity", "AlphaMissense_pathogenicity"),
+                     ("AlphaMissense_class",        "AlphaMissense_class"),
+                     ("AlphaMissense_score",        "AlphaMissense_pathogenicity")]:
+        if old in rare.columns and old != new:
+            rename_map[old] = new
+
+    # REVEL plugin
+    if "REVEL" in rare.columns:
+        rename_map["REVEL"] = "REVEL_score"
+
+    # SpliceAI plugin -- with split_output=1 the four delta-scores and four
+    # delta-positions are emitted as separate columns. Drop the "_pred_"
+    # infix for compactness: SpliceAI_pred_DS_AG -> SpliceAI_DS_AG.
+    for kind in ("DS", "DP"):
+        for direction in ("AG", "AL", "DG", "DL"):
+            old = f"SpliceAI_pred_{kind}_{direction}"
+            new = f"SpliceAI_{kind}_{direction}"
+            if old in rare.columns:
+                rename_map[old] = new
+
+    # VEP-cache built-in predictors (SIFT / PolyPhen-2 come from --sift b
+    # --polyphen b, NOT from dbNSFP, so prefix them with VEP_ to make the
+    # source obvious. Without the prefix, readers commonly assume these
+    # are dbNSFP-sourced and treat them as independent evidence -- they
+    # are not, since dbNSFP's other predictors already incorporate them.)
+    for old, new in [("SIFT",     "VEP_SIFT"),
+                     ("PolyPhen", "VEP_PolyPhen")]:
+        if old in rare.columns:
+            rename_map[old] = new
+
+    # dbNSFP plugin predictors. Pandas converts hyphens in column names
+    # to dots when the VEP TSV is read, so "M-CAP_pred" can become
+    # "M.CAP_pred" -- handle both spellings.
+    dbnsfp_predictors = [
+        "MutationTaster_pred", "PROVEAN_pred",
+        "MetaLR_pred", "MetaRNN_pred",
+        "M-CAP_pred", "M.CAP_pred",
+        "PrimateAI_pred", "ClinPred_pred",
+        "BayesDel_addAF_pred",
+        # gene-level constraint from gnomAD v4.1, carried via dbNSFP:
+        "gnomAD_pLI", "gnomAD_LOEUF",
+    ]
+    for old in dbnsfp_predictors:
+        if old in rare.columns:
+            rename_map[old] = f"dbNSFP_{old}"
+
+    rare = rare.rename(columns=rename_map)
+    if rename_map:
+        print(f"  renamed {len(rename_map)} source-attributed columns",
+              file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # Column-ordering: 5 groups
+    # ------------------------------------------------------------------
+    # Each list is a candidate set -- we filter to columns that actually
+    # exist in the table, then concatenate the groups in order. Anything
+    # not assigned to a group lands at the end of group 5 ("others").
+
+    # Group 1: General info -- variant identification, genotype data
+    group1 = [
+        "SYMBOL", "Consequence", "IMPACT",
+        "CHROM", "POS", "REF", "ALT",
+        "Uploaded_variation", "Location", "Allele",
+        "Existing_variation",
+        "Gene", "Feature", "Feature_type", "BIOTYPE",
+        "CANONICAL", "MANE_SELECT", "MANE_PLUS_CLINICAL", "SOURCE",
+        "SYMBOL_SOURCE", "HGNC_ID",
+        "STRAND", "FLAGS", "DISTANCE",
+        "cDNA_position", "CDS_position", "Protein_position",
+        "Amino_acids", "Codons",
+        "HGVSc", "HGVSp", "HGVS_OFFSET", "EXON", "INTRON",
+        "GT", "DP", "AD", "BAF", "GQ",
+    ]
+
+    # Group 2: Tier A criteria -- LoF + splice (DROP-testable)
+    group2 = [
+        "is_lof", "is_splice",
+        # LOFTEE outputs (renamed)
+        "LOFTEE_LoF", "LOFTEE_LoF_filter", "LOFTEE_LoF_flags", "LOFTEE_LoF_info",
+        # SpliceAI: max aggregate, then individual delta-scores, then
+        # delta-positions, then the legacy packed-string column if present
+        "SpliceAI_max",
+        "SpliceAI_DS_AG", "SpliceAI_DS_AL", "SpliceAI_DS_DG", "SpliceAI_DS_DL",
+        "SpliceAI_DP_AG", "SpliceAI_DP_AL", "SpliceAI_DP_DG", "SpliceAI_DP_DL",
+        "SpliceAI_pred",
+    ]
+
+    # Group 3: Tier B criteria -- missense pathogenicity + gene constraint
+    group3 = [
+        "is_damaging_mis", "is_protein_altering",
+        # AlphaMissense
+        "AlphaMissense_pathogenicity", "AlphaMissense_class",
+        # Other meta-predictors
+        "REVEL_score",
+        # CADD
+        "CADD_PHRED", "CADD_RAW",
+        # VEP-cache predictors
+        "VEP_SIFT", "VEP_PolyPhen",
+        # dbNSFP predictors (renamed)
+        "dbNSFP_MutationTaster_pred", "dbNSFP_PROVEAN_pred",
+        "dbNSFP_MetaLR_pred", "dbNSFP_MetaRNN_pred",
+        "dbNSFP_M-CAP_pred", "dbNSFP_M.CAP_pred",
+        "dbNSFP_PrimateAI_pred", "dbNSFP_ClinPred_pred",
+        "dbNSFP_BayesDel_addAF_pred",
+        # Gene-level constraint (from dbNSFP, gnomAD v4.1)
+        "dbNSFP_gnomAD_pLI", "dbNSFP_gnomAD_LOEUF",
+    ]
+
+    # Group 4: Tier C criteria -- gene panels + ClinVar
+    group4 = [
+        "is_panel_gene",
+        # Per-panel boolean membership flags
+        "in_SCHEMA", "has_BipEx_annotation", "in_ASC", "in_DDG2P",
+    ]
+    # Per-panel annotation columns (already panel-prefixed). Add them in
+    # panel order so columns from the same panel stay grouped together.
     for prefix in ("SCHEMA", "BipEx", "ASC", "DDG2P"):
-        panel_cols = [c for c in rare.columns if c.startswith(prefix + "_")]
-        front_candidates.extend(panel_cols)
+        group4 += [c for c in rare.columns
+                   if c.startswith(prefix + "_") and c not in group4]
+    # ClinVar fields
+    group4 += [
+        "ClinVar",
+        "ClinVar_CLNSIG", "ClinVar_CLNDN",
+        "ClinVar_CLNREVSTAT", "ClinVar_CLNDISDB",
+        # VEP's own existing-variation flag (different from ClinVar plugin)
+        "CLIN_SIG",
+    ]
 
-    front_cols = [c for c in front_candidates if c in rare.columns]
-    other_cols = [c for c in rare.columns if c not in front_cols]
-    rare = rare[front_cols + other_cols]
+    # Group 5: Others -- population frequencies, misc VEP flags, tier
+    group5 = ["gnomAD_popmax"]
+    group5 += [c for c in rare.columns if c.startswith("gnomADv4")]
+    group5 += ["SOMATIC", "PHENO"]
+    group5 += ["tier"]  # final tier label goes last
+
+    # Concatenate groups, keeping only columns that exist; preserve order
+    ordered = []
+    seen = set()
+    for group in (group1, group2, group3, group4, group5):
+        for c in group:
+            if c in rare.columns and c not in seen:
+                ordered.append(c)
+                seen.add(c)
+
+    # Anything not explicitly placed in a group lands at the end (before
+    # 'tier', so 'tier' stays last). Sorted for determinism.
+    leftover = sorted(c for c in rare.columns if c not in seen)
+    if leftover:
+        print(f"  {len(leftover)} unassigned columns appended at the end: "
+              f"{leftover[:5]}{'...' if len(leftover) > 5 else ''}",
+              file=sys.stderr)
+    # Pull 'tier' out of `ordered` (we know it's there) and re-append after
+    # the leftovers, so it stays as the final column.
+    if "tier" in ordered:
+        ordered.remove("tier")
+    ordered = ordered + leftover + (["tier"] if "tier" in rare.columns else [])
+
+    rare = rare[ordered]
 
     # Slice per-tier views from the reordered, fully-annotated `rare` so the
     # tier-specific TSVs share the same columns and column order as the
