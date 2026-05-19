@@ -38,7 +38,7 @@
 #     while copies are visible everywhere. Critical plugins are verified
 #     present after flattening; missing .pm files are flagged as failures
 #     rather than silently dropped at runtime.
-#     IMPORTANT: in your Snakefile, point VEP at the flat directory:
+#     IMPORTANT: in Snakefile, point VEP at the flat directory:
 #       --dir_plugins /tmp/annotation/vep/plugins/flat
 #     and set --plugin LoF,loftee_path:/tmp/annotation/vep/plugins/loftee_grch38
 #     (the loftee_path is the source-code directory, NOT the plugin_data
@@ -83,7 +83,7 @@
 #     so the completeness check catches a partial build.
 #
 # === ITEMS THAT REQUIRE HUMAN ACTION ===
-#   A. Capture-kit BED file - from your wet-lab supplier
+#   A. Capture-kit BED file - from wet-lab supplier
 #   B. SpliceAI INDEL VCF - via Illumina BaseSpace CLI (free account)
 #   C. dbNSFP v5.3.1a - via genos.us (license form per session)
 #   D. REVEL - via Google Sites (license form). Auto-converted on re-run.
@@ -1155,7 +1155,7 @@ GNOMAD_EOF
     log INFO "  helper written: $GNOMAD_HELPER"
 fi
 
-# Auto-run the gnomAD strip+concat helper unless the user has opted out.
+# Auto-run the gnomAD strip+concat helper unless the being opted out.
 # The helper produces the single merged stripped VCF that VEP --custom
 # expects, AND deletes the per-chromosome ~184 GB of source files as it
 # processes each chromosome (peak working disk ~45 GB; final merged file
@@ -1523,7 +1523,7 @@ expect_file "$DATA_DIR/ASC_gene_results_with_hgnc.tsv"
 # =============================================================================
 section "8. Capture-kit BED"
 manual_needed "$CAPTURE_BED" \
-    "Get GRCh38 target-region BED from your wet-lab supplier or kit vendor (Agilent SureSelect: register at https://earray.chem.agilent.com/suredesign/). Place at $CAPTURE_BED"
+    "Get GRCh38 target-region BED from wet-lab supplier or kit vendor (Agilent SureSelect: register at https://earray.chem.agilent.com/suredesign/). Place at $CAPTURE_BED"
 expect_file "$CAPTURE_BED"
 
 # =============================================================================
@@ -1798,7 +1798,7 @@ NEXT STEPS - things requiring human action
 
 A. CAPTURE-KIT BED (BLOCKER for variant-calling rules)
    Path: $CAPTURE_BED
-   From your wet-lab supplier; vendor URL printed above.
+   From wet-lab supplier; vendor URL printed above.
 
 B. SpliceAI INDEL VCF
    Path:  $VEP_PLUGIN_DATA/spliceai_scores.raw.indel.hg38.vcf.gz
@@ -1854,7 +1854,7 @@ G. LOFTEE network workaround (if section 5d failed)
 
 H. VEP+samtools Singularity image (for the VEP annotation rule)
    Path: $VEP_LOFTEE_SIMG
-   Wire into your Snakefile on the VEP rule:
+   Wire into Snakefile on the VEP rule:
      rule r11_vep_annotate_cohort:
          ...
          singularity: "/tmp/repo/sing/$VEP_LOFTEE_SIMG_NAME"
