@@ -46,7 +46,13 @@ sources, since file formats and column names drift between releases:
   * SCHEMA gene column:                  hgnc_symbol or gene_name
   * SCHEMA FDR column:                   "Q meta" or FDR
   * DDG2P gene column:                   gene_symbol / hgnc_symbol / "gene symbol"
-  * gnomAD constraint LOEUF column:      lof.oe_ci.upper / loeuf
+  * gnomAD constraint LOEUF column:      lof.oe_ci.upper / oe_lof_upper / loeuf
+  * gnomAD constraint pLI column:        lof.pLI / pLI
+
+Gene-level gnomAD constraint (pLI + LOEUF) is joined directly from the
+gnomAD constraint TSV (the same file as --loeuf_table) and lands in the
+output as gnomADv4_pLI / gnomADv4_LOEUF. dbNSFP 5.3.1a does NOT include
+these gene-level metrics, so they cannot come from the dbNSFP plugin.
 
 Missing optional gene-set files (e.g., empty BipEx/ASC placeholder files)
 are tolerated; load_gene_set returns an empty set with a warning, the
@@ -614,6 +620,92 @@ def load_constrained_genes(path, threshold=LOEUF_THRESHOLD):
     return constrained
 
 
+def load_gnomad_constraint_per_gene(path):
+    """Load per-gene pLI and LOEUF from the gnomAD constraint table.
+
+    dbNSFP 5.3.1a does NOT include gene-level constraint metrics (pLI / LOEUF
+    are gene-level, while dbNSFP is per-variant), so they have to come from
+    gnomAD directly. Returns a DataFrame with columns:
+        SYMBOL          -- gene symbol (HGNC), match key
+        gnomADv4_pLI    -- probability of LoF intolerance
+        gnomADv4_LOEUF  -- loss-of-function observed/expected upper-bound
+    The "gnomADv4_" prefix mirrors the existing prefix used for gnomAD v4 AF
+    columns (from --custom file=...,short_name=gnomADv4) so both groups of
+    gnomAD-sourced columns share a single visually-obvious source label.
+
+    If the gnomAD constraint file has multiple rows per gene (one per
+    transcript), the row flagged as MANE-select or canonical is kept. If
+    neither flag column is present, the first row per gene wins.
+
+    The column-name detection accepts both the v2.1.1 convention ("pLI",
+    "oe_lof_upper") and the v4.x convention ("lof.pLI", "lof.oe_ci.upper")
+    so the function survives schema variation across gnomAD releases.
+    Returns None if the file is missing or has neither pLI nor LOEUF columns
+    (the caller then skips the merge with a warning).
+    """
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        print(f"WARNING: {path} not found; gnomADv4_pLI/LOEUF columns "
+              "will be absent from output", file=sys.stderr)
+        return None
+    try:
+        df = pd.read_csv(path, sep="\t", low_memory=False)
+    except Exception as err:
+        print(f"WARNING: could not read {path}: {err}; gnomADv4_pLI/LOEUF "
+              "columns will be absent from output", file=sys.stderr)
+        return None
+
+    # Detect column names: accept gnomAD v2.1.1 or v4.x conventions
+    gene_col = next((c for c in df.columns
+                     if c.lower() in ("gene", "symbol", "gene_symbol",
+                                      "hgnc_symbol")), None)
+    pli_col = (next((c for c in df.columns if c == "lof.pLI"), None)
+               or next((c for c in df.columns if c.lower() == "pli"), None))
+    loeuf_col = (next((c for c in df.columns if c == "lof.oe_ci.upper"), None)
+                 or next((c for c in df.columns if c == "oe_lof_upper"), None)
+                 or next((c for c in df.columns if "loeuf" in c.lower()), None))
+
+    if gene_col is None:
+        print(f"WARNING: no gene-symbol column in {path}; "
+              "gnomADv4_pLI/LOEUF columns will be absent", file=sys.stderr)
+        return None
+    if pli_col is None and loeuf_col is None:
+        print(f"WARNING: neither pLI nor LOEUF columns found in {path}; "
+              "gnomADv4_pLI/LOEUF columns will be absent", file=sys.stderr)
+        return None
+
+    # Deduplicate rows per gene. Prefer mane_select == True, then canonical
+    # == True, then keep the first row per gene as a fallback. gnomAD's
+    # canonical / mane_select are boolean strings ("true"/"false") in the
+    # TSV, so cast first.
+    for flag in ("mane_select", "canonical"):
+        if flag in df.columns:
+            df[flag] = df[flag].astype(str).str.lower().eq("true")
+    if "mane_select" in df.columns and df["mane_select"].any():
+        df = df[df["mane_select"]].copy()
+    elif "canonical" in df.columns and df["canonical"].any():
+        df = df[df["canonical"]].copy()
+    df = df.drop_duplicates(subset=gene_col, keep="first")
+
+    # Build minimal output table
+    keep = [gene_col] + [c for c in (pli_col, loeuf_col) if c is not None]
+    out = df[keep].copy()
+    rename = {gene_col: "SYMBOL"}
+    if pli_col is not None:
+        rename[pli_col]   = "gnomADv4_pLI"
+        out[pli_col]      = pd.to_numeric(out[pli_col],   errors="coerce")
+    if loeuf_col is not None:
+        rename[loeuf_col] = "gnomADv4_LOEUF"
+        out[loeuf_col]    = pd.to_numeric(out[loeuf_col], errors="coerce")
+    out = out.rename(columns=rename)
+    out["SYMBOL"] = out["SYMBOL"].astype(str).str.strip()
+    out = out[out["SYMBOL"].ne("") & out["SYMBOL"].ne("nan")]
+
+    print(f"  loaded gnomAD constraint per-gene table: {len(out)} genes "
+          f"({'pLI ' if pli_col else ''}{'LOEUF' if loeuf_col else ''}) "
+          f"from {path}", file=sys.stderr)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -933,6 +1025,30 @@ def main():
           file=sys.stderr)
 
     # ------------------------------------------------------------------
+    # 5b. Join gene-level gnomAD constraint (pLI + LOEUF)
+    # ------------------------------------------------------------------
+    # dbNSFP 5.3.1a does NOT include gene-level constraint metrics (these
+    # are gene-level, while dbNSFP is per-variant), so we add them now by
+    # joining the dedicated gnomAD constraint TSV by HGNC gene symbol.
+    # The constraint table was already opened once by load_constrained_genes
+    # above; here we re-read it as a per-gene table with the two columns we
+    # want.
+    constraint_per_gene = load_gnomad_constraint_per_gene(args.loeuf_table)
+    if constraint_per_gene is not None:
+        before_cols = set(rare.columns)
+        rare = rare.merge(constraint_per_gene, on="SYMBOL", how="left")
+        added = sorted(set(rare.columns) - before_cols)
+        if added:
+            n_pli   = (rare["gnomADv4_pLI"].notna().sum()
+                       if "gnomADv4_pLI"   in rare.columns else 0)
+            n_loeuf = (rare["gnomADv4_LOEUF"].notna().sum()
+                       if "gnomADv4_LOEUF" in rare.columns else 0)
+            print(f"  added gnomAD constraint columns ({added}): "
+                  f"pLI populated in {n_pli}/{len(rare)} rows, "
+                  f"LOEUF populated in {n_loeuf}/{len(rare)} rows",
+                  file=sys.stderr)
+
+    # ------------------------------------------------------------------
     # 6. Source-attributed column renaming + 5-group output ordering
     # ------------------------------------------------------------------
     # Two operations, in this order:
@@ -990,6 +1106,10 @@ def main():
             new = f"SpliceAI_{kind}_{direction}"
             if old in rare.columns:
                 rename_map[old] = new
+    # The SYMBOL column SpliceAI emits is the gene it scored against; rename
+    # under the same convention so it groups with the other SpliceAI columns.
+    if "SpliceAI_pred_SYMBOL" in rare.columns:
+        rename_map["SpliceAI_pred_SYMBOL"] = "SpliceAI_SYMBOL"
 
     # VEP-cache built-in predictors (SIFT / PolyPhen-2 come from --sift b
     # --polyphen b, NOT from dbNSFP, so prefix them with VEP_ to make the
@@ -1004,14 +1124,17 @@ def main():
     # dbNSFP plugin predictors. Pandas converts hyphens in column names
     # to dots when the VEP TSV is read, so "M-CAP_pred" can become
     # "M.CAP_pred" -- handle both spellings.
+    # NOTE: gnomAD_pLI / gnomAD_LOEUF used to be requested here too, but
+    # dbNSFP 5.3.1a does NOT include those gene-level metrics (they are
+    # gene-level, while dbNSFP is per-variant). They now come from the
+    # gnomAD constraint TSV directly, merged in section 5b above, and
+    # land in the output as gnomADv4_pLI / gnomADv4_LOEUF.
     dbnsfp_predictors = [
         "MutationTaster_pred", "PROVEAN_pred",
         "MetaLR_pred", "MetaRNN_pred",
         "M-CAP_pred", "M.CAP_pred",
         "PrimateAI_pred", "ClinPred_pred",
         "BayesDel_addAF_pred",
-        # gene-level constraint from gnomAD v4.1, carried via dbNSFP:
-        "gnomAD_pLI", "gnomAD_LOEUF",
     ]
     for old in dbnsfp_predictors:
         if old in rare.columns:
@@ -1030,11 +1153,16 @@ def main():
     # not assigned to a group lands at the end of group 5 ("others").
 
     # Group 1: General info -- variant identification, genotype data
+    # SOMATIC and PHENO are VEP --check_existing output flags (whether the
+    # variant has been found in somatic databases like COSMIC, and whether
+    # it has any phenotype associations from VEP's existing-variation
+    # lookup). They are variant-identification context rather than tier
+    # criteria; group them with the other VEP identifier columns.
     group1 = [
         "SYMBOL", "Consequence", "IMPACT",
         "CHROM", "POS", "REF", "ALT",
         "Uploaded_variation", "Location", "Allele",
-        "Existing_variation",
+        "Existing_variation", "SOMATIC", "PHENO",
         "Gene", "Feature", "Feature_type", "BIOTYPE",
         "CANONICAL", "MANE_SELECT", "MANE_PLUS_CLINICAL", "SOURCE",
         "SYMBOL_SOURCE", "HGNC_ID",
@@ -1051,10 +1179,13 @@ def main():
         # LOFTEE outputs (renamed)
         "LOFTEE_LoF", "LOFTEE_LoF_filter", "LOFTEE_LoF_flags", "LOFTEE_LoF_info",
         # SpliceAI: max aggregate, then individual delta-scores, then
-        # delta-positions, then the legacy packed-string column if present
+        # delta-positions, then the SpliceAI-internal gene symbol used for
+        # prediction (renamed from SpliceAI_pred_SYMBOL), then the legacy
+        # packed-string column if present.
         "SpliceAI_max",
         "SpliceAI_DS_AG", "SpliceAI_DS_AL", "SpliceAI_DS_DG", "SpliceAI_DS_DL",
         "SpliceAI_DP_AG", "SpliceAI_DP_AL", "SpliceAI_DP_DG", "SpliceAI_DP_DL",
+        "SpliceAI_SYMBOL",
         "SpliceAI_pred",
     ]
 
@@ -1075,8 +1206,10 @@ def main():
         "dbNSFP_M-CAP_pred", "dbNSFP_M.CAP_pred",
         "dbNSFP_PrimateAI_pred", "dbNSFP_ClinPred_pred",
         "dbNSFP_BayesDel_addAF_pred",
-        # Gene-level constraint (from dbNSFP, gnomAD v4.1)
-        "dbNSFP_gnomAD_pLI", "dbNSFP_gnomAD_LOEUF",
+        # Gene-level constraint from gnomAD v4.1 (joined directly from the
+        # gnomAD constraint TSV in section 5b -- NOT from dbNSFP, which
+        # does not include these gene-level metrics).
+        "gnomADv4_pLI", "gnomADv4_LOEUF",
     ]
 
     # Group 4: Tier C criteria -- gene panels + ClinVar
@@ -1100,9 +1233,11 @@ def main():
     ]
 
     # Group 5: Others -- population frequencies, misc VEP flags, tier
+    # (SOMATIC and PHENO have moved up to group1 alongside the other
+    # VEP existing-variation columns.)
     group5 = ["gnomAD_popmax"]
-    group5 += [c for c in rare.columns if c.startswith("gnomADv4")]
-    group5 += ["SOMATIC", "PHENO"]
+    group5 += [c for c in rare.columns if c.startswith("gnomADv4")
+               and c not in ("gnomADv4_pLI", "gnomADv4_LOEUF")]
     group5 += ["tier"]  # final tier label goes last
 
     # Concatenate groups, keeping only columns that exist; preserve order
