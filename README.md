@@ -74,9 +74,10 @@ snakemake --snakefile /tmp/repo/lpb-exome-prioritisation-pipe.smk \
     --software-deployment-method apptainer \
     --apptainer-prefix sing \
     --apptainer-args "--home ${HOME}" \
-    --rerun-incomplete
+	--resources disk_mb="${DISK_MB_BUDGET}" \
+    --set-resource-scopes disk_mb=global \
 ```
-The disk space requirement: ~350Gb for the reference data + ~12Gb per exome.
+The disk space requirement: ~350Gb for the reference data and ~12Gb per exome, however could be much larger with intermediatory files. $DISK_MB_BUDGET is usefull to set as actual available space for the workflow to run.
 
 ### Under the hood
 ```mermaid
@@ -180,7 +181,17 @@ Four rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) w
 The cohort VCF was demultiplexed into per-sample VCFs by bcftools 1.19 with private-variant retention (r10_per_sample_vcf).
 Functional annotation. The cohort VCF was annotated by Ensembl VEP 112 (rule r11_vep_annotate_cohort) using the offline cache, MANE-Select / canonical / biotype transcript prioritization (--pick_allele_gene --pick_order mane_select,canonical,biotype), and HGVS notation. Plugins were loaded from a flattened directory and included AlphaMissense, REVEL, LOFTEE (high-confidence loss-of-function flag), CADD v1.7, SpliceAI (max delta scores across acceptor/donor gain/loss), and dbNSFP v5.3.1a fields (MutationTaster_pred, PROVEAN_pred, MetaLR_pred, MetaRNN_pred, M-CAP_pred, PrimateAI_pred, ClinPred_pred, BayesDel_addAF_pred). VEP --custom annotations attached gnomAD v4.1 exome population-stratified allele frequencies and ClinVar clinical-significance fields.
 
-#### 8. Tier classification
+
+#### 8. HLA class I typing in the exome pipeline
+The pipeline runs two independent HLA class I typers per sample for cross-validation, both invoked as parallel branches off the per-sample markdup BAM:
+
+**OptiType 1.3.5** ([Szolek et al. 2014](doi.org/10.1093/bioinformatics/btu548)); container: quay.io/biocontainers/optitype:1.3.5--hdfd78af_3. OptiType takes the paired-end trimmed FASTQs from r01_fastp_trim as input. The rule first pre-filters reads with razers3 against OptiType's bundled HLA reference (/usr/local/bin/data/hla_reference_dna.fasta) to drastically reduce input size, then converts the filtered BAMs back to FASTQ with samtools and runs OptiTypePipeline.py which solves an integer-linear-program (ILP) for the allele combination that best explains the read evidence. The biocontainer omits the standard config.ini, so the rule generates one at run-time pointing to the GLPK ILP solver. Output is a single TSV at 13_hla/optitype/{sample}/{sample}_result.tsv with one row containing the two-allele calls for HLA-A, HLA-B, and HLA-C at two-field resolution.
+
+**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from .../data/arcashla_ref/dat. Rule r03c_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at 13_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule r03d_arcashla_genotype then runs arcasHLA genotype -g A,B,C on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at 13_hla/arcashla/{sample}/{sample}.genotype.json with the called alleles per gene (typically 3-field resolution like C*04:01:88, truncated to 2-field for downstream NetMHCpan use).
+
+The cross-validation step is downstream: agreement at 2-field resolution between OptiType and arcasHLA gives high-confidence HLA calls.
+
+#### 9. Tier classification
 *scripts\lpb-exome-prioritisation-tier-candidates.py*<br>
 A Python script classifies per-sample variants into three tiers (rule r12_tier_candidates). Common variants (gnomAD popmax AF ≥ 0.001) and internal artifact sites are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
 - **Tier A** captures DROP-testable predicted loss-of-function and splice-disrupting variants (LOFTEE high-confidence LoF, or SpliceAI max delta ≥ 0.20).
@@ -206,7 +217,9 @@ snakemake/snakemake:v9.16.3
 # run inside the container
 export SINGULARITYENV_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt #  for NCBI datasets in contamination check
 export SINGULARITYENV_SSL_CERT_DIR=/etc/ssl/certs  # for NCBI datasets in contamination check
-time snakemake --snakefile /tmp/repo/lpb-rnaseq-pipe.smk --cores 4 --use-singularity --singularity-prefix sing --singularity-args "--home ${HOME} -B /etc/ssl/certs:/etc/ssl/certs:ro" --rerun-triggers mtime -n
+time snakemake --snakefile /tmp/repo/lpb-rnaseq-pipe.smk \
+    --cores 6 \
+	--use-singularity --singularity-prefix sing --singularity-args "--home ${HOME} -B /etc/ssl/certs:/etc/ssl/certs:ro"
 ```
 
 The disk space requirement: ~35Gb for genome, annotation, and STAR index + ~??Gb per transcriptome.
@@ -306,16 +319,7 @@ The included species are:
 
 The rRNA regions in the genomes of the pathogenes were hardmasked due to high expecteded homology with human rRNA.
 
-#### 7. HLA class I typing in the exome pipeline
-The pipeline runs two independent HLA class I typers per sample for cross-validation, both invoked as parallel branches off the per-sample markdup BAM:
-
-**OptiType 1.3.5** ([Szolek et al. 2014](doi.org/10.1093/bioinformatics/btu548)); container: quay.io/biocontainers/optitype:1.3.5--hdfd78af_3. OptiType takes the paired-end trimmed FASTQs from r01_fastp_trim as input. The rule first pre-filters reads with razers3 against OptiType's bundled HLA reference (/usr/local/bin/data/hla_reference_dna.fasta) to drastically reduce input size, then converts the filtered BAMs back to FASTQ with samtools and runs OptiTypePipeline.py which solves an integer-linear-program (ILP) for the allele combination that best explains the read evidence. The biocontainer omits the standard config.ini, so the rule generates one at run-time pointing to the GLPK ILP solver. Output is a single TSV at 13_hla/optitype/{sample}/{sample}_result.tsv with one row containing the two-allele calls for HLA-A, HLA-B, and HLA-C at two-field resolution.
-
-**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from .../data/arcashla_ref/dat. Rule r03c_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at 13_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule r03d_arcashla_genotype then runs arcasHLA genotype -g A,B,C on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at 13_hla/arcashla/{sample}/{sample}.genotype.json with the called alleles per gene (typically 3-field resolution like C*04:01:88, truncated to 2-field for downstream NetMHCpan use).
-
-The cross-validation step is downstream: agreement at 2-field resolution between OptiType and arcasHLA gives high-confidence HLA calls.
-
-#### 8. RNA-seq quality control
+#### 7. RNA-seq quality control
  Picard CollectRnaSeqMetrics 2.27.5 (rule r04c_picard_rnaseq_metrics) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using ucsc-gtfToGenePred -genePredExt -geneNameAsName2 followed by column-reordering to refFlat format (rule r04a_make_refflat). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule r04b_make_rrna_intervals). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and VALIDATION_STRINGENCY=LENIENT to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule r04d_qc_summary, 04_qc/00_qc_summary.tsv) reporting:
  - PF_BASES. Total number of bases in reads passing Illumina's chastity filter (PF = Passed Filter), including non-aligned reads. The denominator for most fraction metrics below.
  - PF_ALIGNED_BASES. Bases from PF reads that aligned to the reference. Bases in soft-clips, insertions, and secondary/supplementary alignments are excluded. Roughly equal to PF_BASES × overall alignment rate.
