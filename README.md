@@ -45,7 +45,10 @@ ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/202
 - **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results were obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results were joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering (tier C).
 - **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel was retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion.
 
-#### 7. Validation
+#### 7. arcasHLA reference
+ Fully build the arcasHLA reference data on the host filesystem. The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it tries to. the script performs the four-step setup once on the host: (a) git clone --depth 1 of the ANHIG/IMGTHLA repository (IPD-IMGT/HLA database release 3.64.0, ~1.2 GB at depth 1), (b) unzip of hla.dat.zip and other compressed archives inside the IMGTHLA repo (the uncompressed hla.dat is too large for git so the repo ships it compressed), (c) seeding the host dat/info and dat/ref directories with the small JSON tables bundled inside the biocontainer (copied out via apptainer exec with a bind mount), and (d) running arcasHLA reference --rebuild once inside the container with the host dat/ directory bind-mounted over the container's read-only /usr/local/share/arcas-hla-0.6.0-2/dat, which generates hla.fasta, hla.idx, hla.p.json, hla.convert.json, hla_partial.fasta, hla_partial.idx, and hla_partial.p.json via Kallisto (v0.50.1 inside the biocontainer). The build can be disabled with SKIP_ARCASHLA_REF_BUILD=1. Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices)
+
+#### 8. Validation
 Final completeness validation iterates over expected files, confirming non-zero size and presence of required indices (.tbi for VCF/TSV.gz, .fai/.dict for FASTA). Version coherence between VEP cache, plugin branch, and dbNSFP release is enforced at startup. Post-processing failures (REVEL conversion, SCHEMA HGNC join, gnomAD strip+concat, plugin flattening) propagate to the script's exit code.
 
 ## Ib. Variant-calling and annotation: pipeline
@@ -54,11 +57,13 @@ A 27-rule Snakemake workflow processes paired-end whole-exome sequencing data fr
 
 ### Usage
 - Exomes are provided in the mounted /tmp/fastq folder
+- Outputs are written in the same folder
 - Tested in a snakemake container in Intel Ice Lake VM with 6 cores and 96Gb RAM with Ububntu 24.04 LTS
 Run snakemake container (yes, containers in the snakemake container is a design choice).
 ```sh
 sudo docker container run --rm --privileged -it \
 -v "${PWD}:/tmp" \
+-v "${PWD}/data/arcashla_ref/dat:/usr/local/share/arcas-hla-0.6.0-2/dat" \
 -e SINGULARITY_TMPDIR=/tmp/sing_tmp \
 -e SINGULARITY_CACHEDIR=/tmp/sing_tmp/cache \
 -e TMPDIR=/tmp/sing_tmp \
@@ -69,7 +74,7 @@ snakemake --snakefile /tmp/repo/lpb-exome-prioritisation-pipe.smk \
     --software-deployment-method apptainer \
     --apptainer-prefix sing \
     --apptainer-args "--home ${HOME}" \
-    --rerun-incomplete -n
+    --rerun-incomplete
 ```
 The disk space requirement: ~350Gb for the reference data + ~12Gb per exome.
 
@@ -103,11 +108,13 @@ flowchart LR
 	id24[r09d_pick_representatives]
 	id25[r09c_kinship_table]
 	id26[r09b_make_plink_bed]
+	id27[r03e_hla_summary]
+	id28[r03b_optitype]
+	id29[r03d_arcashla_genotype]
+	id30[r03c_arcashla_extract]
+	id27 --> id0
 	id1 --> id0
 	id21 --> id0
-	id25 --> id0
-	id23 --> id0
-	id24 --> id0
 	id2 --> id1
 	id3 --> id2
 	id4 --> id3
@@ -115,16 +122,16 @@ flowchart LR
 	id5 --> id4
 	id6 --> id5
 	id7 --> id6
-	id18 --> id7
 	id8 --> id7
-	id18 --> id8
+	id18 --> id7
 	id9 --> id8
-	id10 --> id9
+	id18 --> id8
 	id15 --> id9
+	id10 --> id9
 	id11 --> id10
 	id12 --> id11
-	id14 --> id12
 	id13 --> id12
+	id14 --> id12
 	id16 --> id15
 	id10 --> id15
 	id18 --> id15
@@ -132,9 +139,9 @@ flowchart LR
 	id17 --> id18
 	id20 --> id19
 	id6 --> id20
+	id22 --> id21
 	id1 --> id21
 	id23 --> id21
-	id22 --> id21
 	id2 --> id22
 	id24 --> id23
 	id2 --> id23
@@ -142,6 +149,11 @@ flowchart LR
 	id25 --> id24
 	id26 --> id25
 	id2 --> id26
+	id29 --> id27
+	id28 --> id27
+	id13 --> id28
+	id30 --> id29
+	id10 --> id30
 ```
 
 #### 1. Read processing and alignment
@@ -161,7 +173,7 @@ Following GATK best practices for small cohorts, SNVs and indels were extracted 
 The cohort VCF was left-aligned and multiallelics were split using bcftools norm -m -any --check-ref w against the reference FASTA (rule r09_normalize).
 
 #### 6. Internal artifact filtering
-*this step requires an exome panel, at least a couple of dozens samples*<br>
+*this step requires an exome panel, at least a couple dozen samples*<br>
 Four rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) with autosome restriction and MAF/genotype-rate filters (--maf 0.05 --geno 0.05 --hwe 1e-6) produced a BED file from the cohort VCF (r09b_make_plink_bed); KING-format kinship coefficients were computed via --make-king-table (r09c_kinship_table). A custom Python helper (*scripts\lpb-exome-prioritisation-pick-family-representatives.py*) performed connected-component analysis on related-pair edges (KING kinship ≥ 0.0442, the third-degree-relative threshold), retaining one lexicographically-first representative per family (r09d_pick_representatives). The cohort VCF was then subset to representatives and re-tagged with bcftools +fill-tags AC,AN; sites with AC ≥ 2 among representatives that were absent or rare (AF < 0.001) in gnomAD v4.1 were flagged as artifact-suspect tuples (r09e_artifact_blacklist). This procedure removes recurrent batch / mapping / sample-prep artifacts that gnomAD-AF filtering alone cannot detect, while avoiding false positives from variants shared across related samples.
 
 #### 7. Per-sample VCF extraction
@@ -273,7 +285,7 @@ Picard MarkDuplicates 2.27.5 (rule r03f_markduplicates) marks PCR/optical duplic
 #### 5. Mapping statistics aggregation
 Per-sample STAR Log.final.out files are parsed into a single TSV (rule r03h_mapping_stat, 00_mapping_stat/mapping_stat.txt) reporting input read counts, uniquely mapped read counts and percentages, multi-mapped percentages, "too many loci" rates, and unmapped fractions per sample.
 
-#### 6. Contamination check
+#### 6. Neurotropic pathogens/contamination check
 Contamination check is done with the provided species list (*00_additional_files/contamination/species.txt*) on entropy-filtered (bbduk) unmapped reads. The bwa-mem2 alignment parameters is set to be stricter than default to supress false positives:
 -T 95: minimum alignment score 95 (default 30).
 -k 35: minimum seed 35bp (default 19).
@@ -283,18 +295,27 @@ Contamination check is done with the provided species list (*00_additional_files
 Additionally, hard MAPQ filter is implemented for stricter best-alignment confidence (samtools view -q 35).
 
 The included species are:
-- Neurotropic pathogens
+- Neurotropic pathogens:<br>
 *Toxoplasma gondii, HHV-6A/B, HHV-7, HSV, EBV, CMV, HSV-2, VZV, JC polyomavirus, West Nile Virus, Rabies lyssavirus, Measles morbillivirus, HIV, Listeria monocytogenes, Neisseria meningitidis, Streptococcus pneumoniae, Cryptococcus neoformans, Treponema pallidum, Borreliella burgdorferi, Mycobacterium tuberculosis*
-- Post-mortem / environmental signature (autopsy & dissection contamination)
+- Post-mortem / environmental signature (autopsy & dissection contamination):<br>
 *Escherichia coli, Cutibacterium acnes, Pseudomonas aeruginosa, Klebsiella pneumoniae, Staphylococcus aureus, Staphylococcus epidermidis*
-- Cell-culture / lab-contamination panel (mycoplasmas, fungi etc)
+- Cell-culture / lab-contamination panel (mycoplasmas, fungi etc):<br>
 *Mesomycoplasma hyorhinis, Metamycoplasma orale, Mycoplasmopsis arginini, Mycoplasmopsis fermentans, Metamycoplasma hominis, Acholeplasma laidlawii, Candida albicans, Aspergillus fumigatus, Penicillium rubens, Cladosporium sphaerospermum, Delftia acidovorans, Bradyrhizobium diazoefficiens, Bradyrhizobium japonicum, Cupriavidus metallidurans, Cupriavidus necator, Ralstonia pickettii, Ralstonia insidiosa, Ralstonia pseudosolanacearum*
-- Other pathogenes (acting mostly as negative controls)
+- Other pathogenes (acting mostly as negative controls):<br>
 *Streptococcus pyogenes, Enterococcus faecalis, Enterococcus faecium, Serratia marcescens, Enterobacter cloacae, Salmonella enterica, Acinetobacter baumannii, Bacillus cereus, Babesia microti, Plasmodium falciparum, Leishmania donovani, SARS-CoV-2*
 
 The rRNA regions in the genomes of the pathogenes were hardmasked due to high expecteded homology with human rRNA.
 
-#### 7. RNA-seq quality control
+#### 7. HLA class I typing in the exome pipeline
+The pipeline runs two independent HLA class I typers per sample for cross-validation, both invoked as parallel branches off the per-sample markdup BAM:
+
+**OptiType 1.3.5** ([Szolek et al. 2014](doi.org/10.1093/bioinformatics/btu548)); container: quay.io/biocontainers/optitype:1.3.5--hdfd78af_3. OptiType takes the paired-end trimmed FASTQs from r01_fastp_trim as input. The rule first pre-filters reads with razers3 against OptiType's bundled HLA reference (/usr/local/bin/data/hla_reference_dna.fasta) to drastically reduce input size, then converts the filtered BAMs back to FASTQ with samtools and runs OptiTypePipeline.py which solves an integer-linear-program (ILP) for the allele combination that best explains the read evidence. The biocontainer omits the standard config.ini, so the rule generates one at run-time pointing to the GLPK ILP solver. Output is a single TSV at 13_hla/optitype/{sample}/{sample}_result.tsv with one row containing the two-allele calls for HLA-A, HLA-B, and HLA-C at two-field resolution.
+
+**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from .../data/arcashla_ref/dat. Rule r03c_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at 13_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule r03d_arcashla_genotype then runs arcasHLA genotype -g A,B,C on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at 13_hla/arcashla/{sample}/{sample}.genotype.json with the called alleles per gene (typically 3-field resolution like C*04:01:88, truncated to 2-field for downstream NetMHCpan use).
+
+The cross-validation step is downstream: agreement at 2-field resolution between OptiType and arcasHLA gives high-confidence HLA calls.
+
+#### 8. RNA-seq quality control
  Picard CollectRnaSeqMetrics 2.27.5 (rule r04c_picard_rnaseq_metrics) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using ucsc-gtfToGenePred -genePredExt -geneNameAsName2 followed by column-reordering to refFlat format (rule r04a_make_refflat). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule r04b_make_rrna_intervals). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and VALIDATION_STRINGENCY=LENIENT to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule r04d_qc_summary, 04_qc/00_qc_summary.tsv) reporting:
  - PF_BASES. Total number of bases in reads passing Illumina's chastity filter (PF = Passed Filter), including non-aligned reads. The denominator for most fraction metrics below.
  - PF_ALIGNED_BASES. Bases from PF reads that aligned to the reference. Bases in soft-clips, insertions, and secondary/supplementary alignments are excluded. Roughly equal to PF_BASES × overall alignment rate.
@@ -323,12 +344,14 @@ The rRNA regions in the genomes of the pathogenes were hardmasked due to high ex
  Per sample: {sample}.Aligned.sortedByCoord.out.patched.md.bam plus index (canonical DROP input), {sample}.SJ.out.tab (FRASER input), {sample}.ReadsPerGene.out.tab (OUTRIDER input, mergeable with GTEx V11 counts), {sample}.Aligned.toTranscriptome.out.bam (RSEM input if needed), {sample}.Chimeric.out.junction, {sample}.Log.final.out, {sample}.markdup_metrics.txt, and {sample}.rnaseq_metrics.txt. Cohort-level: 00_mapping_stat/mapping_stat.txt (alignment summary) and 04_qc/00_qc_summary.tsv (RNA-seq QC summary with outlier flags).
 
 ## DROP pipeline
-Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andrade, Leonhard Wachutka, Laure Frésard, Mirjana Gusic, et al. 2021. “Detection of Aberrant Gene Expression Events in RNA Sequencing Data.” Nature Protocols 16 (2): 1276–96. https://doi.org/10.1038/s41596-020-00462-5.
+Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andrade, Leonhard Wachutka, Laure Frésard, Mirjana Gusic, et al. 2021.
+“Detection of Aberrant Gene Expression Events in RNA Sequencing Data.”
+Nature Protocols 16 (2): 1276–96. https://doi.org/10.1038/s41596-020-00462-5.
 
-Installation and manual is described here:
+Installation and manual are described here:
 https://gagneurlab-drop.readthedocs.io/en/latest/installation.html
 
-GTEx v11 Cortex BA9 counts data and meta-data:
+GTEx v11 Cortex & Cortex BA9 counts data and meta-data:
 https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression
 https://gtexportal.org/home/downloads/adult-gtex/metadata
 
@@ -338,7 +361,10 @@ https://www.gencodegenes.org/human/release_47.html
 Helpful notes:
 - in the mixed in-house and external sample table, annotation should be set as NAs for the in-house samples for some reason.
 - for the external counts matrix, set "geneID" as a gene identifier name.
-- external counts matrix should be aligned, thesame genes and the same order as in the annotation (*lpb-drop-align_gtex_counts.R*).
+- external counts matrix should be aligned, the same genes and the same order as in the annotation (the script *lpb-drop-align_gtex_counts.R* is doing that).
+
+### System analysis on top of the OUTRIDER results
+*lpb-drop-post-outrider.R*<br>
 
 ## AI disclosure
-Scripts were produced with the assistance from Claude Opus 4.7
+The scripts were produced with the assistance from Claude Opus 4.7
