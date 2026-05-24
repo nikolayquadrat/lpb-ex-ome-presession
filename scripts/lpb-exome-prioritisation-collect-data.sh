@@ -81,6 +81,16 @@
 #     SKIP_VEP_LOFTEE_SIMG_BUILD (default 0). Requires docker + apptainer
 #     or singularity. The output .simg path is registered with expect_file
 #     so the completeness check catches a partial build.
+# 15. arcasHLA reference data (section 10) is fully built locally because
+#     the bioconda biocontainer ships only a partial reference. Build steps:
+#     (a) clone ANHIG/IMGTHLA, (b) unzip hla.dat.zip, (c) seed dat/info and
+#     dat/ref from the container's bundled files, (d) run `arcasHLA
+#     reference --rebuild` to generate the derived JSON tables and Kallisto
+#     indices. The Snakefile bind-mounts $ARCASHLA_REF_DIR/dat over the
+#     container's /usr/local/share/arcas-hla-0.6.0-2/dat at run-time. Build
+#     is gated on SKIP_ARCASHLA_REF_BUILD (default 0); skipping means
+#     arcasHLA rules cannot run, but OptiType still produces class I calls.
+#     Runtime: 5-15 min for the Kallisto index step. Disk: ~3 GB total.
 #
 # === ITEMS THAT REQUIRE HUMAN ACTION ===
 #   A. Capture-kit BED file - from wet-lab supplier
@@ -132,10 +142,29 @@ VEP_LOFTEE_SIMG="$SIMG_DIR/$VEP_LOFTEE_SIMG_NAME"
 VEP_LOFTEE_BASE_IMAGE="${VEP_LOFTEE_BASE_IMAGE:-ensemblorg/ensembl-vep:release_${VEP_CACHE_RELEASE}.0}"
 VEP_LOFTEE_DOCKER_TAG="${VEP_LOFTEE_DOCKER_TAG:-local/ensembl-vep-loftee:release_${VEP_CACHE_RELEASE}.0}"
 
+# arcasHLA reference directory. The bioconda biocontainer for arcasHLA
+# (quay.io/biocontainers/arcas-hla) does NOT ship a usable reference --
+# it lacks the IMGTHLA git clone AND the derived JSON / Kallisto-index
+# files that arcasHLA needs at runtime. Section 10 builds them once on
+# the host, then the Snakefile bind-mounts this directory over the
+# container's /usr/local/share/arcas-hla-*/dat/ at run-time.
+#
+# Layout under ARCASHLA_REF_DIR after section 10 completes:
+#   dat/IMGTHLA/                    (git clone of ANHIG/IMGTHLA, hla.dat unzipped)
+#   dat/info/                       (copied from container)
+#   dat/ref/                        (copied from container + derived files)
+#       ├── hla.fasta, hla.idx, hla.p.json, hla.convert.json
+#       └── hla_partial.fasta, hla_partial.idx, hla_partial.p.json
+ARCASHLA_REF_DIR="${ARCASHLA_REF_DIR:-$DATA_DIR/arcashla_ref}"
+ARCASHLA_BIOCONTAINER="${ARCASHLA_BIOCONTAINER:-docker://quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2}"
+# Container-internal mount point for the dat/ directory (used by the
+# Snakefile; recorded here for documentation / the manifest).
+ARCASHLA_CONTAINER_DAT_PATH="/usr/local/share/arcas-hla-0.6.0-2/dat"
+
 mkdir -p "$GENOME_DIR" "$VARIATION_DIR" \
          "$VEP_CACHE" "$VEP_PLUGINS" "$VEP_PLUGIN_DATA" "$VEP_CUSTOM" \
          "$DATA_DIR" "$CAPTURE_DIR" "$(dirname "$GNOMAD_HELPER")" \
-         "$SIMG_DIR"
+         "$SIMG_DIR" "$ARCASHLA_REF_DIR"
 
 # Manifest file: TSV with one row per managed file
 MANIFEST_FILE="${MANIFEST_FILE:-/mnt/data/exome/MANIFEST.tsv}"
@@ -1706,6 +1735,257 @@ else
 fi
 
 expect_file "$VEP_LOFTEE_SIMG"
+
+# =============================================================================
+# 10. arcasHLA reference data (IMGTHLA + derived JSON / Kallisto indices)
+# =============================================================================
+# arcasHLA is one of two tools used for HLA class I typing in the Snakefile
+# (the other is OptiType). It needs:
+#   (a) The IMGTHLA database -- a 1.2 GB git repo (ANHIG/IMGTHLA on GitHub)
+#       containing IPD-IMGT/HLA allele sequences and nomenclature tables.
+#   (b) The hla.dat file from IMGTHLA UNZIPPED (the repo ships hla.dat.zip
+#       because the uncompressed file is too large for git).
+#   (c) Derived files built from (a)+(b): hla.p.json, hla.convert.json,
+#       hla.fasta, hla.idx, hla_partial.fasta, hla_partial.idx. These are
+#       built by `arcasHLA reference --rebuild`, which parses the IPD-IMGT/HLA
+#       database and runs `kallisto index` to produce the pseudo-alignment
+#       indices.
+#
+# The bioconda biocontainer ships a partial reference -- it has the basic
+# JSONs (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks
+# both IMGTHLA itself AND the derived index files. arcasHLA can build these
+# at runtime, but only if its dat/ directory is writable, which it is NOT
+# inside the read-only container filesystem. The workaround is to maintain
+# a writable copy of dat/ on the host, populated as follows:
+#
+#   1. Clone the IMGTHLA repo to $ARCASHLA_REF_DIR/dat/IMGTHLA
+#   2. Unzip hla.dat.zip and any other compressed files inside that repo
+#   3. Copy the container's bundled dat/info and dat/ref into the host dat/
+#      (so the container can read them; copies preserve the originals)
+#   4. Run `arcasHLA reference --rebuild` once with the host dat/ bound
+#      into the container, which generates the derived files in place
+#
+# The Snakefile then runs arcasHLA with both /tmp:/tmp AND the host
+# arcashla_ref/dat directory bound over the container's
+# /usr/local/share/arcas-hla-0.6.0-2/dat so arcasHLA sees the fully-built
+# reference. See the --apptainer-args in the Snakefile rules.
+#
+# This whole setup runs ONCE per VM. Subsequent re-runs of this script
+# detect the existing reference and skip. To force a rebuild, delete
+# $ARCASHLA_REF_DIR.
+#
+# Runtime: 5-15 minutes for the Kallisto index step (the slow part).
+# Disk usage: ~3 GB total (1.2 GB IMGTHLA + 1.9 GB Kallisto indices).
+#
+# Opt out entirely with SKIP_ARCASHLA_REF_BUILD=1 (in which case the
+# Snakefile's arcasHLA rules cannot run, but OptiType still produces
+# class I HLA typings).
+
+section "10. arcasHLA reference data"
+
+# arcasHLA's pre-built reference index files. If all of these exist with
+# non-zero size, the reference is fully built and we can skip the build.
+ARCASHLA_REF_KEY_FILES=(
+    "$ARCASHLA_REF_DIR/dat/IMGTHLA/hla.dat"
+    "$ARCASHLA_REF_DIR/dat/IMGTHLA/wmda/hla_nom_p.txt"
+    "$ARCASHLA_REF_DIR/dat/ref/hla.p.json"
+    "$ARCASHLA_REF_DIR/dat/ref/hla.convert.json"
+    "$ARCASHLA_REF_DIR/dat/ref/hla.idx"
+    "$ARCASHLA_REF_DIR/dat/ref/hla_partial.idx"
+)
+
+arcashla_ref_is_built() {
+    local f
+    for f in "${ARCASHLA_REF_KEY_FILES[@]}"; do
+        [[ -s "$f" ]] || return 1
+    done
+    return 0
+}
+
+arcashla_clone_imgthla() {
+    # Clone ANHIG/IMGTHLA into $ARCASHLA_REF_DIR/dat/IMGTHLA. Use --depth 1
+    # to skip ~17 GB of git history. The repo is ~1.2 GB even at depth 1
+    # because of the FASTA files it ships uncompressed.
+    local imgthla_dir="$ARCASHLA_REF_DIR/dat/IMGTHLA"
+    if [[ -d "$imgthla_dir/.git" ]]; then
+        log INFO "  IMGTHLA repo already cloned at $imgthla_dir"
+        return 0
+    fi
+    mkdir -p "$ARCASHLA_REF_DIR/dat"
+    log INFO "  cloning ANHIG/IMGTHLA (~1.2 GB, depth=1)"
+    if git clone --depth 1 https://github.com/ANHIG/IMGTHLA.git \
+            "$imgthla_dir" >>"$LOG_FILE" 2>&1; then
+        log INFO "  IMGTHLA cloned successfully"
+        return 0
+    else
+        log ERROR "  IMGTHLA clone failed (see $LOG_FILE)"
+        return 1
+    fi
+}
+
+arcashla_unzip_imgthla() {
+    # The IMGTHLA repo ships hla.dat as hla.dat.zip (the uncompressed file
+    # is too large for git). arcasHLA's reference build needs the unzipped
+    # version. There are a few other zips too (Alignments_Rel_*.zip,
+    # hla_gen.fasta.zip); unzip all to be safe.
+    local imgthla_dir="$ARCASHLA_REF_DIR/dat/IMGTHLA"
+    [[ -d "$imgthla_dir" ]] || { log ERROR "  $imgthla_dir not found"; return 1; }
+    if [[ -s "$imgthla_dir/hla.dat" ]]; then
+        log INFO "  hla.dat already unzipped"
+        return 0
+    fi
+    if ! command -v unzip >/dev/null 2>&1; then
+        log ERROR "  unzip not installed; cannot extract IMGTHLA zips"
+        log ERROR "  install with: apt-get install unzip (or equivalent)"
+        return 1
+    fi
+    log INFO "  unzipping hla.dat.zip and other archives in $imgthla_dir"
+    local z
+    local failed=0
+    for z in "$imgthla_dir"/*.zip; do
+        [[ -f "$z" ]] || continue
+        log INFO "    unzip $(basename "$z")"
+        if ! ( cd "$imgthla_dir" && unzip -o -q "$(basename "$z")" ) \
+                >>"$LOG_FILE" 2>&1; then
+            log ERROR "    unzip failed for $z"
+            failed=1
+        fi
+    done
+    if (( failed == 1 )); then return 1; fi
+    [[ -s "$imgthla_dir/hla.dat" ]] || {
+        log ERROR "  hla.dat still missing after unzip"
+        return 1
+    }
+    log INFO "  hla.dat unzipped ($(du -h "$imgthla_dir/hla.dat" | cut -f1))"
+    return 0
+}
+
+arcashla_seed_dat_from_container() {
+    # Copy the bioconda biocontainer's bundled dat/info and dat/ref into
+    # the host's dat/ directory. This puts the small JSONs the container
+    # ships (cDNA.json, allele_groups.json, hla_transcripts.json, ...)
+    # alongside our IMGTHLA clone, so arcasHLA can read them when we bind
+    # the host dat/ over the container's read-only dat/.
+    local host_dat="$ARCASHLA_REF_DIR/dat"
+    if [[ -s "$host_dat/ref/cDNA.json" && -s "$host_dat/info/parameters.json" ]]; then
+        log INFO "  bundled dat/info and dat/ref already seeded"
+        return 0
+    fi
+    local sing_bin=""
+    if (( HAVE_APPTAINER == 1 )); then
+        sing_bin="apptainer"
+    elif (( HAVE_SINGULARITY == 1 )); then
+        sing_bin="singularity"
+    else
+        log ERROR "  apptainer/singularity required to seed dat/ from container"
+        return 1
+    fi
+    log INFO "  seeding dat/info + dat/ref from $ARCASHLA_BIOCONTAINER"
+    if "$sing_bin" exec \
+            --bind "$host_dat:/host_dat" \
+            "$ARCASHLA_BIOCONTAINER" \
+            bash -c '
+                set -e
+                cp -r /usr/local/share/arcas-hla-0.6.0-2/dat/info /host_dat/
+                cp -r /usr/local/share/arcas-hla-0.6.0-2/dat/ref  /host_dat/
+            ' >>"$LOG_FILE" 2>&1; then
+        log INFO "  dat/ seeded"
+        return 0
+    else
+        log ERROR "  dat/ seed failed (see $LOG_FILE)"
+        return 1
+    fi
+}
+
+arcashla_rebuild_indices() {
+    # Run `arcasHLA reference --rebuild` once to generate the derived
+    # files from the IMGTHLA database. Produces hla.fasta, hla.idx,
+    # hla.p.json, hla.convert.json, hla_partial.fasta, hla_partial.idx
+    # in the bound dat/ref/ directory.
+    local host_dat="$ARCASHLA_REF_DIR/dat"
+    local sing_bin=""
+    if (( HAVE_APPTAINER == 1 )); then
+        sing_bin="apptainer"
+    elif (( HAVE_SINGULARITY == 1 )); then
+        sing_bin="singularity"
+    else
+        log ERROR "  apptainer/singularity required for arcasHLA rebuild"
+        return 1
+    fi
+    log INFO "  running arcasHLA reference --rebuild (5-15 min)"
+    if "$sing_bin" exec \
+            --bind "$host_dat:$ARCASHLA_CONTAINER_DAT_PATH" \
+            "$ARCASHLA_BIOCONTAINER" \
+            arcasHLA reference --rebuild -v >>"$LOG_FILE" 2>&1; then
+        log INFO "  arcasHLA reference rebuild complete"
+        return 0
+    else
+        log ERROR "  arcasHLA reference rebuild failed (see $LOG_FILE)"
+        return 1
+    fi
+}
+
+if [[ "${SKIP_ARCASHLA_REF_BUILD:-0}" == "1" ]]; then
+    log INFO "SKIP_ARCASHLA_REF_BUILD=1; skipping arcasHLA reference build"
+    log INFO "  the Snakefile's arcasHLA rules will fail without this --"
+    log INFO "  OptiType will still produce class I HLA typings"
+elif arcashla_ref_is_built; then
+    log INFO "arcasHLA reference fully built at $ARCASHLA_REF_DIR/dat -- skipping"
+    N_OK+=1
+else
+    log INFO "building arcasHLA reference at $ARCASHLA_REF_DIR/dat"
+    arcashla_step_failed=0
+
+    # Step 10a: clone IMGTHLA
+    if ! post_process_step "clone ANHIG/IMGTHLA repo" \
+            arcashla_clone_imgthla; then
+        arcashla_step_failed=1
+    fi
+
+    # Step 10b: unzip hla.dat (and other zips)
+    if (( arcashla_step_failed == 0 )); then
+        if ! post_process_step "unzip IMGTHLA archives (hla.dat, ...)" \
+                arcashla_unzip_imgthla; then
+            arcashla_step_failed=1
+        fi
+    fi
+
+    # Step 10c: seed dat/info + dat/ref from biocontainer
+    if (( arcashla_step_failed == 0 )); then
+        if ! post_process_step "seed dat/info + dat/ref from biocontainer" \
+                arcashla_seed_dat_from_container; then
+            arcashla_step_failed=1
+        fi
+    fi
+
+    # Step 10d: rebuild derived files (Kallisto indices, JSON tables)
+    if (( arcashla_step_failed == 0 )); then
+        if ! post_process_step "arcasHLA reference --rebuild" \
+                arcashla_rebuild_indices; then
+            arcashla_step_failed=1
+        fi
+    fi
+
+    # Final verification
+    if (( arcashla_step_failed == 0 )) && arcashla_ref_is_built; then
+        log INFO "arcasHLA reference build verified"
+        N_OK+=1
+        manifest_record "$ARCASHLA_REF_DIR/dat" "built" "$ARCASHLA_BIOCONTAINER"
+    else
+        log ERROR "arcasHLA reference build incomplete"
+        N_FAIL+=1
+        FAILED_ITEMS+=("arcasHLA reference @ $ARCASHLA_REF_DIR")
+    fi
+fi
+
+# Register key files so the completeness check catches a partial setup.
+# Note: only registered if the build was attempted (i.e. not skipped), so
+# users who opt out with SKIP_ARCASHLA_REF_BUILD don't see spurious failures.
+if [[ "${SKIP_ARCASHLA_REF_BUILD:-0}" != "1" ]]; then
+    for f in "${ARCASHLA_REF_KEY_FILES[@]}"; do
+        expect_file "$f"
+    done
+fi
 
 # =============================================================================
 # Final completeness check + manifest update
