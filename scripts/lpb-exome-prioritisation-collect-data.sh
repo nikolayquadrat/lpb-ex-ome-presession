@@ -377,12 +377,8 @@ fi
 
 # Section 10 (arcasHLA reference) needs apptainer or singularity. If neither
 # is present and the user hasn't explicitly opted out via SKIP_ARCASHLA_REF_BUILD,
-# we HALT here rather than silently skip later. Silent skipping is what caused
-# the broken-reference issue we hit before: IMGTHLA was cloned, but the
-# biocontainer-bundled dat/info and dat/ref were never copied because the
-# seed step required apptainer, returning 1 and being logged at INFO level
-# only. Halting up-front prevents the user from discovering the failure
-# only after running the snakemake pipeline and seeing arcasHLA crash.
+# we HALT here rather than silently skip later. Halting up-front prevents the user from
+# discovering the failure only after running the snakemake pipeline and seeing arcasHLA crash.
 if (( SKIP_ARCASHLA_REF_BUILD == 0 )); then
     if (( HAVE_APPTAINER == 0 && HAVE_SINGULARITY == 0 )); then
         log ERROR ""
