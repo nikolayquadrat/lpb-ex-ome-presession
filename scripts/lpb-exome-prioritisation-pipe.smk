@@ -103,7 +103,7 @@ pick_representatives_py = "/tmp/scripts/lpb-exome-prioritisation-pick-family-rep
 # -----------------------------------------------------------------------------
 # Sample discovery
 # -----------------------------------------------------------------------------
-samples ,= glob_wildcards("/tmp/fastq/{sample}_R1_001.fastq.gz")
+samples ,= glob_wildcards("/tmp/fastq/{sample}_R1_001.fastq.gz") # or whatever fastq is named
 # samples = [s for s in samples if s not in ['e1-19-combined']] # testing
 # samples = ['e1-19-combined', 'e1-1-combined', 'e1-3-combined'] # testing
 print("Samples:", samples)
@@ -113,20 +113,28 @@ print("Samples:", samples)
 # -----------------------------------------------------------------------------
 rule all:
     input:
+        # 
         # (1) Per-sample VCFs for DROP MAE
         expand("/tmp/fastq/10_per_sample_vcf/{sample}.vcf.gz",     sample=samples),
         expand("/tmp/fastq/10_per_sample_vcf/{sample}.vcf.gz.tbi", sample=samples),
-        # (2) Tiered candidate tables for VUS prioritization
+        # # (2) Tiered candidate tables for VUS prioritization
         expand("/tmp/fastq/12_tiered/{sample}_tierA_lof_splice.tsv", sample=samples),
         expand("/tmp/fastq/12_tiered/{sample}_tierB_missense.tsv",   sample=samples),
         expand("/tmp/fastq/12_tiered/{sample}_tierC_gene_panels.tsv",sample=samples),
         expand("/tmp/fastq/12_tiered/{sample}_master.tsv",           sample=samples),
         # (3) QC: kinship table + artifact blacklist (built once per cohort)
-        "/tmp/qc/cohort_kinship.kin0",
-        "/tmp/qc/representatives.txt",
-        "/tmp/qc/representatives.log",
-        "/tmp/qc/internal_artifact_sites.tsv",
-        "/tmp/qc/internal_artifact_count.txt",
+        # "/tmp/qc/cohort_kinship.kin0",
+        # "/tmp/qc/representatives.txt",
+        # "/tmp/qc/representatives.log",
+        # "/tmp/qc/internal_artifact_sites.tsv",
+        # "/tmp/qc/internal_artifact_count.txt",
+        # (4) HLA class I typing -- two tools per sample for cross-validation:
+        #     OptiType (best class I accuracy, FASTQ input via razer3 prefilter)
+        #     arcasHLA (class I, BAM input). Compare results; require concordance
+        #     before downstream use (e.g. NetMHCpan with sample-specific HLAs).
+        # expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv", sample=samples),
+        # expand("/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json", sample=samples),
+        "/tmp/fastq/13_hla/hla_summary.tsv"
 
         # "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
         # "/tmp/fastq/11_vep/test_loftee.vep.tsv", # for the testing
@@ -219,7 +227,8 @@ rule r01_fastp_trim:
         r2      = temp("/tmp/fastq/01_fastp/{sample}_R2.trim.fastq.gz"),
         html    = "/tmp/fastq/01_fastp/{sample}.fastp.html",
         json    = "/tmp/fastq/01_fastp/{sample}.fastp.json",
-    threads: 6
+    threads: 2
+    resources: disk_mb=10000
     singularity: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_2"
     shell:
         """
@@ -241,7 +250,8 @@ rule r02a_bwamem2_align:
         bwt2 = reference_genome + ".bwt.2bit.64",
     output:
         bam = temp("/tmp/fastq/02_bam/{sample}.unsorted.bam"),
-    threads: 8
+    threads: 6
+    resources: disk_mb=30000+10000
     singularity: "docker://quay.io/biocontainers/bwa-mem2:2.2.1--he513fc3_0"
     shell:
         """
@@ -258,7 +268,8 @@ rule r02b_sort_index:
     output:
         bam = temp("/tmp/fastq/02_bam/{sample}.sorted.bam"),
         bai = temp("/tmp/fastq/02_bam/{sample}.sorted.bam.bai"),
-    threads: 8
+    threads: 2
+    resources: disk_mb=10000+30000
     singularity: "docker://quay.io/biocontainers/samtools:1.19.2--h50ea8bc_1"
     shell:
         """
@@ -277,6 +288,7 @@ rule r03_markduplicates_spark:
         bai     = temp("/tmp/fastq/03_markdup/{sample}.markdup.bam.bai"),
         metrics = "/tmp/fastq/03_markdup/{sample}.markdup.metrics.txt",
     threads: 6
+    resources: disk_mb=10000+10000
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -286,6 +298,360 @@ rule r03_markduplicates_spark:
             -M {output.metrics} \
             --conf 'spark.executor.cores={threads}'
         """
+
+# =============================================================================
+# HLA class I typing (class I only; class II requires class-II-specific tools)
+# =============================================================================
+# Two independent tools are run for cross-validation:
+#   r03b_optitype          : OptiType, considered the most accurate for class I.
+#                            Takes FASTQs, prefilters with razer3 against
+#                            OptiType's bundled IPD-IMGT/HLA reference, then
+#                            solves an integer-linear-program for the best
+#                            allele combination explaining the read evidence.
+#   r03c_arcashla_extract : extract chr6 reads from the markdup BAM
+#   r03d_arcashla_genotype: arcasHLA, easier to integrate (works straight from
+#                            BAM). Less accurate than OptiType for class I but a
+#                            useful concordance check.
+#
+# The trimmed FASTQs from r01 and the markdup BAM from r03 are both temp().
+# Snakemake retains temp files while any downstream rule still needs them, so
+# these HLA rules consuming them keeps them alive until typing completes.
+#
+# Downstream NetMHCpan usage should require concordance between the two tools
+# at 2-field resolution (e.g. HLA-A*02:01) before treating the call as final.
+# =============================================================================
+rule r03b_optitype:
+    """
+    OptiType class I HLA typing from trimmed paired-end FASTQs using the
+    bioconda biocontainer (quay.io/biocontainers/optitype:1.3.5--hdfd78af_3).
+
+    The biocontainer ships OptiType under /usr/local/bin/ but does NOT include
+    a config.ini -- we generate one at runtime pointing to the bundled
+    razers3 and using the GLPK solver (which is what bioconda ships).
+    """
+    input:
+        r1 = "/tmp/fastq/01_fastp/{sample}_R1.trim.fastq.gz",
+        r2 = "/tmp/fastq/01_fastp/{sample}_R2.trim.fastq.gz",
+    output:
+        tsv = "/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv",
+        pdf = "/tmp/fastq/13_hla/optitype/{sample}/{sample}_coverage_plot.pdf",
+    params:
+        outdir = "/tmp/fastq/13_hla/optitype/{sample}",
+        # Discovered path inside the bioconda biocontainer (1.3.5--hdfd78af_3):
+        hla_ref = "/usr/local/bin/data/hla_reference_dna.fasta",
+    threads: 4
+    singularity: "docker://quay.io/biocontainers/optitype:1.3.5--hdfd78af_3"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+        TMPDIR=$(mktemp -d -p {params.outdir} optitype.XXXXXX)
+
+        # The bioconda biocontainer doesn't ship a config.ini. Generate one
+        # at runtime. razers3 path is fixed (/usr/local/bin/razers3 in the
+        # biocontainer); solver is GLPK (the bioconda recipe doesn't include
+        # CBC or CPLEX); threads match the rule's allocation.
+        cat > $TMPDIR/config.ini <<EOF
+[mapping]
+razers3=/usr/local/bin/razers3
+threads={threads}
+
+[ilp]
+solver=glpk
+threads=1
+
+[behavior]
+deletebam=true
+unpaired_weight=0
+use_discordant=false
+EOF
+
+        # razer3 prefilter -- map reads against OptiType's bundled HLA ref
+        # to drastically reduce the input size for the ILP step.
+        razers3 -i 95 -m 1 -dr 0 \
+            -tc {threads} \
+            -o $TMPDIR/{wildcards.sample}_R1.bam \
+            {params.hla_ref} \
+            {input.r1}
+        razers3 -i 95 -m 1 -dr 0 \
+            -tc {threads} \
+            -o $TMPDIR/{wildcards.sample}_R2.bam \
+            {params.hla_ref} \
+            {input.r2}
+
+        # Convert filtered BAMs back to FASTQ for OptiType
+        samtools bam2fq $TMPDIR/{wildcards.sample}_R1.bam \
+            > $TMPDIR/{wildcards.sample}_R1.fastq
+        samtools bam2fq $TMPDIR/{wildcards.sample}_R2.bam \
+            > $TMPDIR/{wildcards.sample}_R2.fastq
+
+        # Run OptiType with our generated config
+        OptiTypePipeline.py \
+            -i $TMPDIR/{wildcards.sample}_R1.fastq $TMPDIR/{wildcards.sample}_R2.fastq \
+            --dna \
+            -c $TMPDIR/config.ini \
+            -o {params.outdir} \
+            -p {wildcards.sample}
+
+        rm -rf $TMPDIR
+        """
+
+rule r03c_arcashla_extract:
+    """
+    Extract chr6 (HLA-region) reads from the markdup BAM for arcasHLA.
+    """
+    input:
+        bam = "/tmp/fastq/03_markdup/{sample}.markdup.bam",
+        bai = "/tmp/fastq/03_markdup/{sample}.markdup.bam.bai",
+    output:
+        fq1 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.1.fq.gz",
+        fq2 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.2.fq.gz",
+    params:
+        outdir = "/tmp/fastq/13_hla/arcashla/{sample}",
+    threads: 4
+    singularity: "docker://quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir}
+
+        ln -sf $(realpath {input.bam}) "$JOB_TMP/{wildcards.sample}.bam"
+        ln -sf $(realpath {input.bai}) "$JOB_TMP/{wildcards.sample}.bam.bai"
+
+        arcasHLA extract \
+            -t {threads} \
+            -o {params.outdir} \
+            --temp "$JOB_TMP" \
+            -v \
+            "$JOB_TMP/{wildcards.sample}.bam"
+        """
+
+rule r03d_arcashla_genotype:
+    """
+    arcasHLA class I genotyping from the extracted chr6 FASTQs.
+    """
+    input:
+        fq1 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.1.fq.gz",
+        fq2 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.2.fq.gz",
+    output:
+        json = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json",
+    params:
+        outdir = "/tmp/fastq/13_hla/arcashla/{sample}",
+    threads: 2
+    singularity: "docker://quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2"
+    shell:
+        r"""
+        set -euo pipefail
+
+        JOB_TMP=$(mktemp -d -p {params.outdir} arcas_genotype.XXXXXX)
+        trap 'rm -rf "$JOB_TMP"' EXIT INT TERM
+
+        arcasHLA genotype \
+            -g A,B,C \
+            -t {threads} \
+            -o {params.outdir} \
+            --temp "$JOB_TMP" \
+            -v \
+            {input.fq1} {input.fq2}
+        """
+
+rule r03e_hla_summary:
+    """
+    Aggregate OptiType and arcasHLA class I HLA calls across all samples
+    into a single comparison TSV, with concordance flagged per gene.
+
+    Output columns (wide format, one row per sample):
+        sample
+        optitype_A1, optitype_A2, optitype_B1, optitype_B2, optitype_C1, optitype_C2
+        arcashla_A1, arcashla_A2, arcashla_B1, arcashla_B2, arcashla_C1, arcashla_C2
+        concord_A, concord_B, concord_C   (values: MATCH / PARTIAL / MISMATCH / MISSING)
+        concord_all                       (MATCH if all three genes match, else mixed)
+
+    All calls are truncated to 2-field resolution (e.g. A*02:01, dropping any
+    3rd-field synonymous-coding subtype) since that's the resolution that
+    matters for downstream NetMHCpan / clinical interpretation. arcasHLA
+    natively reports 3-field; OptiType reports 2-field.
+
+    Concordance per gene compares the two-allele set (order-independent):
+        MATCH    both alleles identical at 2-field
+        PARTIAL  exactly one allele matches; the other differs
+        MISMATCH neither allele matches
+        MISSING  one or both tools failed to call this sample's gene
+    """
+    input:
+        optitype  = expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv",
+                           sample=samples),
+        arcashla  = expand("/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json",
+                           sample=samples),
+    output:
+        tsv = "/tmp/fastq/13_hla/hla_summary.tsv",
+    params:
+        samples_list = samples,
+    threads: 1
+    run:
+        import json
+        import os
+        import pandas as pd
+
+        # ---------------- helpers -----------------------------------------
+        def to_two_field(allele):
+            """
+            Normalize an HLA allele string to 2-field resolution.
+
+            Inputs we have to handle:
+              OptiType:  "A*02:01"           (already 2-field)
+                         ""  / NaN / "no_match"      (call failure)
+              arcasHLA:  "A*02:01:01:02"     (often 3-4 field)
+                         "A*02:01N"          (null/non-expressed suffix)
+                         null in JSON        (call failure)
+
+            Returns "A*02:01" (canonical 2-field) or "" if no valid call.
+            """
+            if allele is None:
+                return ""
+            s = str(allele).strip()
+            if s in ("", "nan", "None", "no_match"):
+                return ""
+            # Drop any trailing modifier letter (N, L, S, Q, etc.) -- these
+            # are nomenclature suffixes for null/low/secreted/questionable
+            # alleles and shouldn't block 2-field equality.
+            s = s.rstrip("NLSQA")
+            # Keep gene*field1:field2 only
+            if "*" not in s:
+                return ""
+            gene, rest = s.split("*", 1)
+            fields = rest.split(":")
+            if len(fields) < 2:
+                return ""
+            return f"{gene}*{fields[0]}:{fields[1]}"
+
+        def parse_optitype(path):
+            """
+            Read OptiType result TSV. Format (one data row):
+                <index>  A1   A2   B1   B2   C1   C2   Reads  Objective
+            Returns dict {A1, A2, B1, B2, C1, C2} (each 2-field or "")
+            """
+            try:
+                df = pd.read_csv(path, sep="\t")
+            except Exception as err:
+                print(f"WARNING: could not read {path}: {err}", flush=True)
+                return {k: "" for k in ("A1", "A2", "B1", "B2", "C1", "C2")}
+            if df.empty:
+                return {k: "" for k in ("A1", "A2", "B1", "B2", "C1", "C2")}
+            row = df.iloc[0]
+            return {
+                col: to_two_field(row[col]) if col in row else ""
+                for col in ("A1", "A2", "B1", "B2", "C1", "C2")
+            }
+
+        def parse_arcashla(path):
+            """
+            Read arcasHLA genotype.json. Format:
+                {"A": ["A*02:01:01:02", "A*03:01:01"], "B": [...], "C": [...]}
+            Returns dict {A1, A2, B1, B2, C1, C2}, ordered so the
+            alphabetically-smaller allele comes first (for stable ordering
+            independent of arcasHLA's output order).
+            """
+            try:
+                with open(path) as fh:
+                    data = json.load(fh)
+            except Exception as err:
+                print(f"WARNING: could not parse {path}: {err}", flush=True)
+                return {k: "" for k in ("A1", "A2", "B1", "B2", "C1", "C2")}
+            out = {}
+            for gene in ("A", "B", "C"):
+                alleles = data.get(gene, []) or []
+                alleles = [to_two_field(a) for a in alleles]
+                alleles = [a for a in alleles if a]  # drop empties
+                # Pad to 2 alleles (homozygous case has 1; failed case has 0)
+                while len(alleles) < 2:
+                    alleles.append(alleles[0] if alleles else "")
+                # Stable order: alphabetical (so homozygous A1==A2)
+                alleles = sorted(alleles[:2])
+                out[f"{gene}1"] = alleles[0]
+                out[f"{gene}2"] = alleles[1]
+            return out
+
+        def concord(opti_pair, arcas_pair):
+            """
+            Compare two 2-allele sets (order-independent). Each pair is a
+            tuple like ("A*02:01", "A*03:01"). Empty strings indicate
+            missing calls.
+
+            Returns one of: MATCH, PARTIAL, MISMATCH, MISSING.
+            """
+            o = sorted(a for a in opti_pair  if a)
+            a = sorted(x for x in arcas_pair if x)
+            # Any tool missing both alleles -> MISSING
+            if len(o) < 2 or len(a) < 2:
+                return "MISSING"
+            if o == a:
+                return "MATCH"
+            shared = set(o) & set(a)
+            if len(shared) >= 1:
+                return "PARTIAL"
+            return "MISMATCH"
+
+        # ---------------- aggregate ---------------------------------------
+        rows = []
+        for sample in params.samples_list:
+            opti_path  = f"/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv"
+            arcas_path = f"/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json"
+            opti  = parse_optitype(opti_path)  if os.path.exists(opti_path)  else \
+                    {k: "" for k in ("A1","A2","B1","B2","C1","C2")}
+            arcas = parse_arcashla(arcas_path) if os.path.exists(arcas_path) else \
+                    {k: "" for k in ("A1","A2","B1","B2","C1","C2")}
+
+            # Per-gene concordance
+            conc = {}
+            for gene in ("A", "B", "C"):
+                conc[f"concord_{gene}"] = concord(
+                    (opti[f"{gene}1"],  opti[f"{gene}2"]),
+                    (arcas[f"{gene}1"], arcas[f"{gene}2"]),
+                )
+            # Cohort-level overall: MATCH only if all three are MATCH
+            states = [conc[f"concord_{g}"] for g in ("A", "B", "C")]
+            if all(s == "MATCH" for s in states):
+                overall = "MATCH"
+            elif "MISSING" in states:
+                overall = "MISSING"
+            elif "MISMATCH" in states:
+                overall = "MISMATCH"
+            else:
+                overall = "PARTIAL"
+
+            row = {"sample": sample}
+            for gene in ("A", "B", "C"):
+                row[f"optitype_{gene}1"] = opti[f"{gene}1"]
+                row[f"optitype_{gene}2"] = opti[f"{gene}2"]
+            for gene in ("A", "B", "C"):
+                row[f"arcashla_{gene}1"] = arcas[f"{gene}1"]
+                row[f"arcashla_{gene}2"] = arcas[f"{gene}2"]
+            row.update(conc)
+            row["concord_all"] = overall
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        # Reorder columns explicitly so the output is human-readable
+        col_order = ["sample"]
+        for tool in ("optitype", "arcashla"):
+            for gene in ("A", "B", "C"):
+                col_order += [f"{tool}_{gene}1", f"{tool}_{gene}2"]
+        col_order += [f"concord_{g}" for g in ("A", "B", "C")] + ["concord_all"]
+        df = df[col_order]
+        df.to_csv(output.tsv, sep="\t", index=False)
+
+        # Brief summary to stdout (visible in the snakemake log)
+        n = len(df)
+        n_all_match  = (df["concord_all"] == "MATCH").sum()
+        n_partial    = (df["concord_all"] == "PARTIAL").sum()
+        n_mismatch   = (df["concord_all"] == "MISMATCH").sum()
+        n_missing    = (df["concord_all"] == "MISSING").sum()
+        print(f"[HLA summary] wrote {output.tsv} -- {n} samples", flush=True)
+        print(f"[HLA summary]   concordant across all 3 genes: {n_all_match}/{n}", flush=True)
+        print(f"[HLA summary]   partial concord:                 {n_partial}/{n}", flush=True)
+        print(f"[HLA summary]   mismatch:                        {n_mismatch}/{n}", flush=True)
+        print(f"[HLA summary]   missing (one tool failed):       {n_missing}/{n}", flush=True)
 
 rule r04a_bqsr_table:
     input:
@@ -300,6 +666,7 @@ rule r04a_bqsr_table:
         intervals   = capture_intervals,
     output:
         table       = "/tmp/fastq/04_bqsr/{sample}.recal.table",
+    threads: 2
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -322,6 +689,7 @@ rule r04b_apply_bqsr: # probably redundant, present in GATK best practices but a
     output:
         bam     = "/tmp/fastq/04_bqsr/{sample}.recal.bam",
         bai     = "/tmp/fastq/04_bqsr/{sample}.recal.bai",
+    threads: 2
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -345,7 +713,7 @@ rule r05_haplotypecaller_gvcf:
     output:
         gvcf        = "/tmp/fastq/05_gvcf/{sample}.g.vcf.gz",
         tbi         = "/tmp/fastq/05_gvcf/{sample}.g.vcf.gz.tbi",
-    threads: 6
+    threads: 1
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -400,6 +768,7 @@ rule r07_genotypegvcfs:
     output:
         vcf         = "/tmp/fastq/07_joint/cohort.joint.vcf.gz",
         tbi         = "/tmp/fastq/07_joint/cohort.joint.vcf.gz.tbi",
+    threads: 6
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -717,9 +1086,7 @@ rule r10_per_sample_vcf:
 #   * LOFTEE    -- high-confidence LoF classification (Tier A)
 #   * CADD      -- general deleteriousness score
 #   * REVEL     -- ensemble missense score (complements AlphaMissense)
-#   * dbNSFP    -- pulls 8 in-silico predictors plus gene-level constraint
-#                  (gnomAD_pLI, gnomAD_LOEUF from gnomAD v4.1). LOEUF<0.6
-#                  is the v4.0+ recommended threshold (vs <0.35 for v2.1.1).
+#   * dbNSFP    -- pulls 8 in-silico predictors
 #   * gnomAD v4 -- 807k samples, much better ancestry resolution than v2.0.1
 #   * ClinVar   -- curated clinical assertions
 # Annotation done on the cohort VCF (single VEP run, faster than per-sample)
@@ -781,7 +1148,6 @@ rule r11_vep_annotate_cohort:
             --plugin dbNSFP,{input.dbnsfp},MutationTaster_pred,PROVEAN_pred,\
 MetaLR_pred,MetaRNN_pred,M-CAP_pred,PrimateAI_pred,\
 ClinPred_pred,BayesDel_addAF_pred,\
-gnomAD_pLI,gnomAD_LOEUF \
             --custom file={input.gnomad},short_name=gnomADv4,format=vcf,type=exact,\
 fields=AF%AF_nfe%AF_afr%AF_amr%AF_eas%AF_sas%AF_fin%AF_asj%nhomalt \
             --custom file={input.clinvar},short_name=ClinVar,format=vcf,type=exact,\
