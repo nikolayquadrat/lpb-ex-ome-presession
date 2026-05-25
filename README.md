@@ -5,14 +5,14 @@ This LPB project, low PRS SZ brain, exome & transcriptome analysis
 
 ## Ia. Variant-calling and annotation: reference data acquisition and post-processing
 *scripts\lpb-exome-priritisation-collect-data.sh*<br>
-A bash pipeline (download_references.sh) was developed to assemble all reference and annotation resources required by the variant-calling and annotation workflow. The script is idempotent, supports atomic resumption after interruption, and produces a manifest (TSV format) recording each managed file's path, size, SHA-256 hash, source URL, and validation status.
+A bash pipeline designed to assemble all reference and annotation resources required by the variant-calling and annotation workflow. The script is idempotent, supports atomic resumption after interruption, and produces a manifest (TSV format) recording each managed file's path, size, SHA-256 hash, source URL, and validation status.
 
 Usage:
 ```sh
 sudo chmod +x lpb-exome-priritisation-collect-data.sh
-bash lpb-exome-priritisation-collect-data.sh
+sudo bash lpb-exome-priritisation-collect-data.sh
 ```
-The disk space requirement: ~350Gb for the reference data + ~12Gb per exome.
+The disk space requirement: ~350Gb for the reference data + ~12Gb per exome. Root priveledges require only to run apptainer for building the arcasHLA reference.
 
 ### Under the hood:
 #### 1. Reference genome and known-sites VCFs
@@ -59,7 +59,7 @@ A 27-rule Snakemake workflow processes paired-end whole-exome sequencing data fr
 - Exomes are provided in the mounted /tmp/fastq folder
 - Outputs are written in the same folder
 - Tested in a snakemake container in Intel Ice Lake VM with 6 cores and 96Gb RAM with Ububntu 24.04 LTS
-Run snakemake container (yes, containers in the snakemake container is a design choice).
+Run snakemake container (nested containers is a design choice).
 ```sh
 sudo docker container run --rm --privileged -it \
 -v "${PWD}:/tmp" \
@@ -73,9 +73,9 @@ snakemake --snakefile /tmp/repo/lpb-exome-prioritisation-pipe.smk \
     --cores 6 \
     --software-deployment-method apptainer \
     --apptainer-prefix sing \
-    --apptainer-args "--home ${HOME}" \
+    --apptainer-args "--home ${HOME} --bind /tmp:/tmp --bind /usr/local/share/arcas-hla-0.6.0-2/dat:/usr/local/share/arcas-hla-0.6.0-2/dat" \
 	--resources disk_mb="${DISK_MB_BUDGET}" \
-    --set-resource-scopes disk_mb=global \
+    --set-resource-scopes disk_mb=global
 ```
 The disk space requirement: ~350Gb for the reference data and ~12Gb per exome, however could be much larger with intermediatory files. $DISK_MB_BUDGET is usefull to set as actual available space for the workflow to run.
 
