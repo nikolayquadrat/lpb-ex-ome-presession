@@ -1267,9 +1267,19 @@ def main():
     # Slice per-tier views from the reordered, fully-annotated `rare` so the
     # tier-specific TSVs share the same columns and column order as the
     # master file.
-    tier_a = rare[tier_a_mask].copy()
-    tier_b = rare[tier_b_mask].copy()
-    tier_c = rare[tier_c_mask].copy()
+    #
+    # NOTE: We use the `tier` column (set above via np.select) rather than
+    # the original boolean masks because `rare.merge(...)` calls above (the
+    # panel-annotation joins at section 5a and the gnomAD constraint join
+    # at section 5b) can reset the DataFrame's index when there are
+    # one-to-many matches on SYMBOL. After such a reset, the original
+    # tier_*_mask Series carry the pre-merge index and trigger
+    # `IndexingError: Unalignable boolean Series` when used to index the
+    # post-merge `rare`. The `tier` column survives merges because it's a
+    # column (not an index), so equality-based slicing always works.
+    tier_a = rare[rare["tier"] == "A"].copy()
+    tier_b = rare[rare["tier"] == "B"].copy()
+    tier_c = rare[rare["tier"] == "C"].copy()
 
     # ------------------------------------------------------------------
     # 7. Write outputs
