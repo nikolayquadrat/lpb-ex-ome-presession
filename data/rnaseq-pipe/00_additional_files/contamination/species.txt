@@ -1,0 +1,80 @@
+# Post-mortem / environmental signature (autopsy & dissection contamination)
+escherichia_coli_k12	GCF_000005845.2
+cutibacterium_acnes	GCF_000008345.1
+pseudomonas_aeruginosa_pao1	GCF_000006765.1
+klebsiella_pneumoniae	GCF_000240185.1
+staphylococcus_aureus	GCF_000013425.1
+staphylococcus_epidermidis	GCF_006094375.1
+
+# Disease-relevant neurotropic pathogens
+toxoplasma_gondii	GCF_000006565.2
+hhv6a_u1102	GCF_000845685.2
+hhv6b_z29	GCF_000846365.1
+hsv1_strain17	GCF_000859985.2
+ebv_b95_8	GCF_002402265.1
+cmv_merlin	GCF_000845245.1
+hsv2_hg52	GCF_000858385.2
+vzv_dumas	GCF_000858285.1
+hhv7_rk	GCF_000848125.1
+jcv	GCF_000863805.1
+betapolyomavirus_hominis	GCF_000837865.1
+mammarenavirus_choriomeningitidis	GCF_004789475.1
+borna_disease_virus_1	GCA_002366305.1
+influenza_a	GCF_000865725.1
+west_nile_virus	GCF_000861085.1
+rabies_lyssavirus	GCF_000859625.1
+measles_morbillivirus	GCF_000854845.1
+hiv1	GCF_000864765.1
+listeria_monocytogenes_egde	GCF_000196035.1
+neisseria_meningitidis_mc58	GCF_000008805.1
+streptococcus_pneumoniae_r6	GCF_000007045.1
+cryptococcus_neoformans_h99	GCF_000149245.1
+treponema_pallidum_nichols	GCF_000410535.2
+borreliella_burgdorferi_b31	GCF_000008685.2
+mycobacterium_tuberculosis_h37rv	GCF_000195955.2
+naegleria_fowleri	GCF_008403515.1
+acanthamoeba_castellanii	GCF_000313135.1
+trypanosoma_cruzi	GCF_000209065.1
+trypanosoma_brucei	GCF_000002445.2
+nocardia_asteroides	GCF_900637185.1
+schistosoma_japonicum	GCA_025215515.1
+taenia_solium	GCA_001870725.1
+toxocara_canis	GCA_000803305.1
+balamuthia_mandrillaris	GCA_031835245.2
+mycoplasmoides_pneumoniae	GCF_900660465.1
+
+# Cell-culture / lab-contamination panel (mycoplasmas + fungi)
+mesomycoplasma_hyorhinis	GCF_001705605.1
+metamycoplasma_orale	GCF_000420105.1
+mycoplasmopsis_arginini	GCF_001547975.1
+mycoplasmopsis_fermentans	GCF_000209735.1
+metamycoplasma_hominis	GCF_000935865.1
+acholeplasma_laidlawii	GCF_000018785.1
+candida_albicans	GCF_000182965.3
+aspergillus_fumigatus	GCF_000002655.1
+penicillium_rubens	GCF_028828025.1
+cladosporium_sphaerospermum	GCA_023621355.1
+delftia_acidovorans_sph1        GCF_000018665.1
+bradyrhizobium_diazoefficiens_usda110  GCF_000011365.1
+bradyrhizobium_japonicum_5038   GCF_013752735.1
+cupriavidus_metallidurans_ch34  GCF_000196015.1
+cupriavidus_necator_h16         GCF_000009285.1
+ralstonia_pickettii_12j         GCF_000020205.1
+ralstonia_insidiosa_atcc49129   GCF_001663855.1
+ralstonia_pseudosolanacearum_gmi1000   GCF_000009125.1
+
+# other pathogens / transfusion-associated sentinel
+streptococcus_pyogenes_m1	GCF_000006785.2
+enterococcus_faecalis_v583	GCF_000007785.1
+enterococcus_faecium_cfsan059070	GCF_003071425.1
+serratia_marcescens_db11	GCF_000513215.1
+enterobacter_cloacae_atcc13047	GCF_000025565.1
+salmonella_enterica_lt2	GCF_000006945.2
+acinetobacter_baumannii_ab307	GCF_000021145.1
+bacillus_cereus_atcc14579	GCF_006094295.1
+babesia_microti_atcc30222	GCA_001650055.1
+plasmodium_falciparum_3d7	GCF_000002765.6
+leishmania_donovani_bpk282a1	GCF_000227135.1
+sars_cov_2_wuhan_hu_1	GCF_009858895.2
+tbev	GCF_000863125.1
+
