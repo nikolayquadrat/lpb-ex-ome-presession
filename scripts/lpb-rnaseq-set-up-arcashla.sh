@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install-arcashla-ref.sh
+# lpb-rnaseq-set-up-arcashla.sh
 # =============================================================================
-# Build a complete arcasHLA reference for the RNA-seq HLA-typing rules
-# (r06a_arcashla_extract / r06b_arcashla_genotype / r06c_hla_summary) in
+# Build a complete arcasHLA reference for the RNA-seq HLA-typing rules in
 # lpb-rnaseq-pipe.smk.
 #
 # WHY THIS SCRIPT EXISTS
@@ -25,7 +24,7 @@
 # after each. It is SELF-CONTAINED: it does not assume any file already exists
 # and is safe to run on a fresh machine.
 #
-# QUIRKS HANDLED (learned the hard way on the exome pipeline)
+# QUIRKS HANDLED (learned the hard way)
 # -----------------------------------------------------------
 #  1. hla.dat ships as hla.dat.zip inside the IMGTHLA repo -- must be unzipped
 #     (plus the other *.zip archives). Uncompressed hla.dat is ~323 MB.
