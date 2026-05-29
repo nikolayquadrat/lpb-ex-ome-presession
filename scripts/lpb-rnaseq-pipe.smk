@@ -189,8 +189,37 @@ _have_species_list = (
     os.path.exists(CONTAM_SPECIES_LIST)
     and os.path.getsize(CONTAM_SPECIES_LIST) > 0
 )
-CONTAMINATION_ENABLED  = _prebuilt or _have_species_list
+
+# CONTAMINATION_ENABLED can be forced on/off via the CONTAMINATION_ENABLED
+# environment variable. Set to "0"/"false"/"no"/"off" to force-disable (skip
+# r05* contamination rules regardless of which input files are present), or
+# "1"/"true"/"yes"/"on" to force-enable. Anything else, including the default
+# "auto", uses filesystem auto-detection (the original behaviour).
+_contamination_override = os.environ.get("CONTAMINATION_ENABLED", "auto").lower()
+if _contamination_override in ("0", "false", "no", "off"):
+    CONTAMINATION_ENABLED = False
+elif _contamination_override in ("1", "true", "yes", "on"):
+    CONTAMINATION_ENABLED = True
+elif _contamination_override == "auto":
+    CONTAMINATION_ENABLED = _prebuilt or _have_species_list
+else:
+    print(f"[contamination screen] unrecognised "
+          f"CONTAMINATION_ENABLED='{_contamination_override}', "
+          f"falling back to auto-detection", file=sys.stderr)
+    CONTAMINATION_ENABLED = _prebuilt or _have_species_list
+
+# AUTOBUILD only makes sense when no prebuilt files exist AND we have a
+# species list to download from. Independent of the override (a force-on user
+# still needs species.txt to trigger autobuild).
 CONTAMINATION_AUTOBUILD = (not _prebuilt) and _have_species_list
+
+# Warn the user if a forced-on flag will produce broken downstream rules
+# because there is nothing for r05* to consume.
+if CONTAMINATION_ENABLED and not _prebuilt and not _have_species_list:
+    print(f"[contamination screen] WARNING: CONTAMINATION_ENABLED is forced ON "
+          f"but neither prebuilt files nor {CONTAM_SPECIES_LIST} are present; "
+          f"contamination rules will fail with missing-input errors.",
+          file=sys.stderr)
 
 if CONTAMINATION_ENABLED:
     if CONTAMINATION_AUTOBUILD:
@@ -210,7 +239,8 @@ if CONTAMINATION_ENABLED:
 else:
     print(f"[contamination screen] disabled (need either pre-built "
           f"contamination.fa+gtf+gtf_seqnames.tsv or a species.txt in "
-          f"{CONTAM_DIR})", file=sys.stderr)
+          f"{CONTAM_DIR}, or unset CONTAMINATION_ENABLED if it is forced off)",
+          file=sys.stderr)
 
 # -----------------------------------------------------------------------------
 # Optional HLA class I typing with arcasHLA
@@ -257,18 +287,41 @@ _arcashla_key_files = (
     f"{ARCASHLA_DAT}/ref/hla.idx",
     f"{ARCASHLA_DAT}/ref/hla_partial.idx",
 )
-ARCASHLA_ENABLED = all(
-    os.path.exists(p) and os.path.getsize(p) > 0
-    for p in _arcashla_key_files
-)
+
+_arcashla_override = os.environ.get("ARCASHLA_ENABLED", "auto").lower()
+if _arcashla_override == "auto":
+    ARCASHLA_ENABLED = all(
+        os.path.exists(p) and os.path.getsize(p) > 0
+        for p in _arcashla_key_files
+    )
+elif _arcashla_override in ("0", "false", "no", "off"):
+    ARCASHLA_ENABLED = False
+elif _arcashla_override in ("1", "true", "yes", "on"):
+    ARCASHLA_ENABLED = True
+else:
+    print(f"[arcasHLA] unrecognised ARCASHLA_ENABLED='{_arcashla_override}', "
+          f"falling back to auto-detection", file=sys.stderr)
+    ARCASHLA_ENABLED = all(
+        os.path.exists(p) and os.path.getsize(p) > 0
+        for p in _arcashla_key_files
+    )
 
 if ARCASHLA_ENABLED:
-    print(f"[arcasHLA] enabled -- reference found at {ARCASHLA_DAT}",
-          file=sys.stderr)
-    print(f"[arcasHLA] REMINDER: the snakemake run must bind the host "
-          f"arcashla_ref/dat over {ARCASHLA_CONTAINER_DAT_PATH} "
-          f"(see installer script for the exact --apptainer-args / "
-          f"--singularity-args line)", file=sys.stderr)
+    _missing = [p for p in _arcashla_key_files
+                if not (os.path.exists(p) and os.path.getsize(p) > 0)]
+    if _missing:
+        print(f"[arcasHLA] WARNING: ARCASHLA_ENABLED is forced ON but the "
+              f"reference is incomplete; arcasHLA rules will fail at run time",
+              file=sys.stderr)
+        print(f"[arcasHLA] missing/empty: {_missing[:3]}"
+              f"{'...' if len(_missing) > 3 else ''}", file=sys.stderr)
+    else:
+        print(f"[arcasHLA] enabled -- reference found at {ARCASHLA_DAT}",
+              file=sys.stderr)
+        print(f"[arcasHLA] REMINDER: the snakemake run must bind the host "
+              f"arcashla_ref/dat over {ARCASHLA_CONTAINER_DAT_PATH} "
+              f"(see installer script for the exact --apptainer-args / "
+              f"--singularity-args line)", file=sys.stderr)
 else:
     _missing = [p for p in _arcashla_key_files
                 if not (os.path.exists(p) and os.path.getsize(p) > 0)]
@@ -279,6 +332,8 @@ else:
     print(f"[arcasHLA] run install-arcashla-ref.sh on the host to build it, "
           f"then ensure arcashla_ref/ is bind-mounted into the container",
           file=sys.stderr)
+
+
 
 def get_fastq_path(wildcards):
     """Same logic as your existing get_fastq_path(): paired or single-end."""
