@@ -128,13 +128,12 @@ rule all:
         # "/tmp/qc/representatives.log",
         # "/tmp/qc/internal_artifact_sites.tsv",
         # "/tmp/qc/internal_artifact_count.txt",
-        # (4) HLA class I typing -- two tools per sample for cross-validation:
-        #     OptiType (best class I accuracy, FASTQ input via razer3 prefilter)
-        #     arcasHLA (class I, BAM input). Compare results; require concordance
-        #     before downstream use (e.g. NetMHCpan with sample-specific HLAs).
-        # expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv", sample=samples),
-        # expand("/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json", sample=samples),
-        "/tmp/fastq/13_hla/hla_summary.tsv"
+        # (4) HLA class I typing with OptiType (best class I accuracy from
+        #     exome/DNA data, FASTQ input via razer3 prefilter). arcasHLA was
+        #     previously run here as a cross-check but is an RNA-seq tool and
+        #     produced systematically discordant calls on exome input; it has
+        #     been moved to the RNA-seq pipeline where it is used correctly.
+        expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv", sample=samples)
 
         # "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
         # "/tmp/fastq/11_vep/test_loftee.vep.tsv", # for the testing
@@ -302,23 +301,23 @@ rule r03_markduplicates_spark:
 # =============================================================================
 # HLA class I typing (class I only; class II requires class-II-specific tools)
 # =============================================================================
-# Two independent tools are run for cross-validation:
-#   r03b_optitype          : OptiType, considered the most accurate for class I.
-#                            Takes FASTQs, prefilters with razer3 against
-#                            OptiType's bundled IPD-IMGT/HLA reference, then
-#                            solves an integer-linear-program for the best
-#                            allele combination explaining the read evidence.
-#   r03c_arcashla_extract : extract chr6 reads from the markdup BAM
-#   r03d_arcashla_genotype: arcasHLA, easier to integrate (works straight from
-#                            BAM). Less accurate than OptiType for class I but a
-#                            useful concordance check.
+# r03b_optitype : OptiType, the most accurate tool for class I typing from
+#                 exome/DNA short reads. Takes FASTQs, prefilters with razer3
+#                 against OptiType's bundled IPD-IMGT/HLA reference, then solves
+#                 an integer-linear-program for the best allele combination
+#                 explaining the read evidence.
 #
-# The trimmed FASTQs from r01 and the markdup BAM from r03 are both temp().
-# Snakemake retains temp files while any downstream rule still needs them, so
-# these HLA rules consuming them keeps them alive until typing completes.
+# NOTE: arcasHLA was previously run here as a second tool for concordance
+# checking, but arcasHLA is designed and validated for RNA-seq (its cDNA-based
+# pseudo-alignment reference is unsuitable for genomic capture reads). On exome
+# input it produced systematically discordant calls (recurrent implausible rare
+# alleles), so it has been removed from this pipeline and moved to the RNA-seq
+# pipeline, where it is used on its intended data type. OptiType (DNA mode) is
+# the definitive class I caller here.
 #
-# Downstream NetMHCpan usage should require concordance between the two tools
-# at 2-field resolution (e.g. HLA-A*02:01) before treating the call as final.
+# The trimmed FASTQs from r01 are temp(). Snakemake retains temp files while any
+# downstream rule still needs them, so this HLA rule consuming them keeps them
+# alive until typing completes.
 # =============================================================================
 rule r03b_optitype:
     """
@@ -395,272 +394,6 @@ EOF
 
         rm -rf $TMPDIR
         """
-
-rule r03c_arcashla_extract:
-    """
-    Extract chr6 (HLA-region) reads from the markdup BAM for arcasHLA.
-    """
-    input:
-        bam = "/tmp/fastq/03_markdup/{sample}.markdup.bam",
-        bai = "/tmp/fastq/03_markdup/{sample}.markdup.bam.bai",
-    output:
-        fq1 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.1.fq.gz",
-        fq2 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.2.fq.gz",
-    params:
-        outdir = "/tmp/fastq/13_hla/arcashla/{sample}",
-    threads: 4
-    singularity: "docker://quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2"
-    shell:
-        r"""
-        set -euo pipefail
-
-        JOB_TMP=""
-        trap 'rm -rf "${{JOB_TMP:-}}"' EXIT INT TERM
-
-        mkdir -p {params.outdir}
-        JOB_TMP=$(mktemp -d -p {params.outdir} arcas_extract.XXXXXX)
-
-        ln -sf $(realpath {input.bam}) "$JOB_TMP/{wildcards.sample}.bam"
-        ln -sf $(realpath {input.bai}) "$JOB_TMP/{wildcards.sample}.bam.bai"
-
-        arcasHLA extract \
-            -t {threads} \
-            -o {params.outdir} \
-            --temp "$JOB_TMP" \
-            -v \
-            "$JOB_TMP/{wildcards.sample}.bam"
-
-        # Trap handles cleanup on exit
-        """
-
-rule r03d_arcashla_genotype:
-    """
-    arcasHLA class I genotyping from the extracted chr6 FASTQs.
-    """
-    input:
-        fq1 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.1.fq.gz",
-        fq2 = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.extracted.2.fq.gz",
-    output:
-        json = "/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json",
-    params:
-        outdir = "/tmp/fastq/13_hla/arcashla/{sample}",
-    threads: 2
-    singularity: "docker://quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2"
-    shell:
-        r"""
-        set -euo pipefail
-
-        JOB_TMP=""
-        trap 'rm -rf "${{JOB_TMP:-}}"' EXIT INT TERM
-
-        JOB_TMP=$(mktemp -d -p {params.outdir} arcas_genotype.XXXXXX)
-
-        arcasHLA genotype \
-            -g A,B,C \
-            -t {threads} \
-            -o {params.outdir} \
-            --temp "$JOB_TMP" \
-            -v \
-            {input.fq1} {input.fq2}
-        """
-
-rule r03e_hla_summary:
-    """
-    Aggregate OptiType and arcasHLA class I HLA calls across all samples
-    into a single comparison TSV, with concordance flagged per gene.
-
-    Output columns (wide format, one row per sample):
-        sample
-        optitype_A1, optitype_A2, optitype_B1, optitype_B2, optitype_C1, optitype_C2
-        arcashla_A1, arcashla_A2, arcashla_B1, arcashla_B2, arcashla_C1, arcashla_C2
-        concord_A, concord_B, concord_C   (values: MATCH / PARTIAL / MISMATCH / MISSING)
-        concord_all                       (MATCH if all three genes match, else mixed)
-
-    All calls are truncated to 2-field resolution (e.g. A*02:01, dropping any
-    3rd-field synonymous-coding subtype) since that's the resolution that
-    matters for downstream NetMHCpan / clinical interpretation. arcasHLA
-    natively reports 3-field; OptiType reports 2-field.
-
-    Concordance per gene compares the two-allele set (order-independent):
-        MATCH    both alleles identical at 2-field
-        PARTIAL  exactly one allele matches; the other differs
-        MISMATCH neither allele matches
-        MISSING  one or both tools failed to call this sample's gene
-    """
-    input:
-        optitype  = expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv",
-                           sample=samples),
-        arcashla  = expand("/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json",
-                           sample=samples),
-    output:
-        tsv = "/tmp/fastq/13_hla/hla_summary.tsv",
-    params:
-        samples_list = samples,
-    threads: 1
-    run:
-        import json
-        import os
-        import pandas as pd
-
-        # ---------------- helpers -----------------------------------------
-        def to_two_field(allele):
-            """
-            Normalize an HLA allele string to 2-field resolution.
-
-            Inputs we have to handle:
-              OptiType:  "A*02:01"           (already 2-field)
-                         ""  / NaN / "no_match"      (call failure)
-              arcasHLA:  "A*02:01:01:02"     (often 3-4 field)
-                         "A*02:01N"          (null/non-expressed suffix)
-                         null in JSON        (call failure)
-
-            Returns "A*02:01" (canonical 2-field) or "" if no valid call.
-            """
-            if allele is None:
-                return ""
-            s = str(allele).strip()
-            if s in ("", "nan", "None", "no_match"):
-                return ""
-            # Drop any trailing modifier letter (N, L, S, Q, etc.) -- these
-            # are nomenclature suffixes for null/low/secreted/questionable
-            # alleles and shouldn't block 2-field equality.
-            s = s.rstrip("NLSQA")
-            # Keep gene*field1:field2 only
-            if "*" not in s:
-                return ""
-            gene, rest = s.split("*", 1)
-            fields = rest.split(":")
-            if len(fields) < 2:
-                return ""
-            return f"{gene}*{fields[0]}:{fields[1]}"
-
-        def parse_optitype(path):
-            """
-            Read OptiType result TSV. Format (one data row):
-                <index>  A1   A2   B1   B2   C1   C2   Reads  Objective
-            Returns dict {A1, A2, B1, B2, C1, C2} (each 2-field or "")
-            """
-            try:
-                df = pd.read_csv(path, sep="\t")
-            except Exception as err:
-                print(f"WARNING: could not read {path}: {err}", flush=True)
-                return {k: "" for k in ("A1", "A2", "B1", "B2", "C1", "C2")}
-            if df.empty:
-                return {k: "" for k in ("A1", "A2", "B1", "B2", "C1", "C2")}
-            row = df.iloc[0]
-            return {
-                col: to_two_field(row[col]) if col in row else ""
-                for col in ("A1", "A2", "B1", "B2", "C1", "C2")
-            }
-
-        def parse_arcashla(path):
-            """
-            Read arcasHLA genotype.json. Format:
-                {"A": ["A*02:01:01:02", "A*03:01:01"], "B": [...], "C": [...]}
-            Returns dict {A1, A2, B1, B2, C1, C2}, ordered so the
-            alphabetically-smaller allele comes first (for stable ordering
-            independent of arcasHLA's output order).
-            """
-            try:
-                with open(path) as fh:
-                    data = json.load(fh)
-            except Exception as err:
-                print(f"WARNING: could not parse {path}: {err}", flush=True)
-                return {k: "" for k in ("A1", "A2", "B1", "B2", "C1", "C2")}
-            out = {}
-            for gene in ("A", "B", "C"):
-                alleles = data.get(gene, []) or []
-                alleles = [to_two_field(a) for a in alleles]
-                alleles = [a for a in alleles if a]  # drop empties
-                # Pad to 2 alleles (homozygous case has 1; failed case has 0)
-                while len(alleles) < 2:
-                    alleles.append(alleles[0] if alleles else "")
-                # Stable order: alphabetical (so homozygous A1==A2)
-                alleles = sorted(alleles[:2])
-                out[f"{gene}1"] = alleles[0]
-                out[f"{gene}2"] = alleles[1]
-            return out
-
-        def concord(opti_pair, arcas_pair):
-            """
-            Compare two 2-allele sets (order-independent). Each pair is a
-            tuple like ("A*02:01", "A*03:01"). Empty strings indicate
-            missing calls.
-
-            Returns one of: MATCH, PARTIAL, MISMATCH, MISSING.
-            """
-            o = sorted(a for a in opti_pair  if a)
-            a = sorted(x for x in arcas_pair if x)
-            # Any tool missing both alleles -> MISSING
-            if len(o) < 2 or len(a) < 2:
-                return "MISSING"
-            if o == a:
-                return "MATCH"
-            shared = set(o) & set(a)
-            if len(shared) >= 1:
-                return "PARTIAL"
-            return "MISMATCH"
-
-        # ---------------- aggregate ---------------------------------------
-        rows = []
-        for sample in params.samples_list:
-            opti_path  = f"/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv"
-            arcas_path = f"/tmp/fastq/13_hla/arcashla/{sample}/{sample}.genotype.json"
-            opti  = parse_optitype(opti_path)  if os.path.exists(opti_path)  else \
-                    {k: "" for k in ("A1","A2","B1","B2","C1","C2")}
-            arcas = parse_arcashla(arcas_path) if os.path.exists(arcas_path) else \
-                    {k: "" for k in ("A1","A2","B1","B2","C1","C2")}
-
-            # Per-gene concordance
-            conc = {}
-            for gene in ("A", "B", "C"):
-                conc[f"concord_{gene}"] = concord(
-                    (opti[f"{gene}1"],  opti[f"{gene}2"]),
-                    (arcas[f"{gene}1"], arcas[f"{gene}2"]),
-                )
-            # Cohort-level overall: MATCH only if all three are MATCH
-            states = [conc[f"concord_{g}"] for g in ("A", "B", "C")]
-            if all(s == "MATCH" for s in states):
-                overall = "MATCH"
-            elif "MISSING" in states:
-                overall = "MISSING"
-            elif "MISMATCH" in states:
-                overall = "MISMATCH"
-            else:
-                overall = "PARTIAL"
-
-            row = {"sample": sample}
-            for gene in ("A", "B", "C"):
-                row[f"optitype_{gene}1"] = opti[f"{gene}1"]
-                row[f"optitype_{gene}2"] = opti[f"{gene}2"]
-            for gene in ("A", "B", "C"):
-                row[f"arcashla_{gene}1"] = arcas[f"{gene}1"]
-                row[f"arcashla_{gene}2"] = arcas[f"{gene}2"]
-            row.update(conc)
-            row["concord_all"] = overall
-            rows.append(row)
-
-        df = pd.DataFrame(rows)
-        # Reorder columns explicitly so the output is human-readable
-        col_order = ["sample"]
-        for tool in ("optitype", "arcashla"):
-            for gene in ("A", "B", "C"):
-                col_order += [f"{tool}_{gene}1", f"{tool}_{gene}2"]
-        col_order += [f"concord_{g}" for g in ("A", "B", "C")] + ["concord_all"]
-        df = df[col_order]
-        df.to_csv(output.tsv, sep="\t", index=False)
-
-        # Brief summary to stdout (visible in the snakemake log)
-        n = len(df)
-        n_all_match  = (df["concord_all"] == "MATCH").sum()
-        n_partial    = (df["concord_all"] == "PARTIAL").sum()
-        n_mismatch   = (df["concord_all"] == "MISMATCH").sum()
-        n_missing    = (df["concord_all"] == "MISSING").sum()
-        print(f"[HLA summary] wrote {output.tsv} -- {n} samples", flush=True)
-        print(f"[HLA summary]   concordant across all 3 genes: {n_all_match}/{n}", flush=True)
-        print(f"[HLA summary]   partial concord:                 {n_partial}/{n}", flush=True)
-        print(f"[HLA summary]   mismatch:                        {n_mismatch}/{n}", flush=True)
-        print(f"[HLA summary]   missing (one tool failed):       {n_missing}/{n}", flush=True)
 
 rule r04a_bqsr_table:
     input:

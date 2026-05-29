@@ -212,6 +212,74 @@ else:
           f"contamination.fa+gtf+gtf_seqnames.tsv or a species.txt in "
           f"{CONTAM_DIR})", file=sys.stderr)
 
+# -----------------------------------------------------------------------------
+# Optional HLA class I typing with arcasHLA
+# -----------------------------------------------------------------------------
+# arcasHLA types HLA class I (and II) directly from RNA-seq reads. It is run
+# here OPTIONALLY: the rules only activate if a fully built arcasHLA reference
+# is present at the expected (post-bind) location. The reference is large and
+# must be built once on the host with the companion installer script
+# (install-arcashla-ref.sh), which handles all the bioconda-biocontainer
+# quirks (the container ships only a partial reference). The host build dir is:
+#
+#   /mnt/data/rnaseq/rnaseq-drop/00_additional_files/arcashla_ref
+#
+# At run time that host directory is bind-mounted so the pipeline sees it at:
+#
+#   /tmp/data/00_additional_files/arcashla_ref
+#
+# and the dat/ subdirectory inside it must additionally be bound OVER the
+# biocontainer's own (incomplete) dat/ directory. See the snakemake invocation
+# note in the installer script and at the bottom of this file: the arcasHLA
+# rules expect both
+#   (a) /tmp:/tmp                                              (outer bind)
+#   (b) arcashla_ref/dat : /usr/local/share/arcas-hla-0.6.0-2/dat   (inner bind)
+#
+# If the reference is not present (e.g., the installer was not run, or this is
+# a fresh machine), ARCASHLA_ENABLED is False and the HLA rules + the HLA
+# summary are simply omitted from the DAG. The rest of the pipeline is
+# unaffected.
+ARCASHLA_REF_DIR = "/tmp/data/00_additional_files/arcashla_ref"
+ARCASHLA_DAT     = f"{ARCASHLA_REF_DIR}/dat"
+ARCASHLA_CONTAINER = "docker://quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2"
+# Container-internal mount point for the dat/ directory. The host
+# arcashla_ref/dat must be bound over this path at run time (see above).
+ARCASHLA_CONTAINER_DAT_PATH = "/usr/local/share/arcas-hla-0.6.0-2/dat"
+
+# Key files that must all exist (non-empty) for the reference to count as
+# fully built. These mirror what install-arcashla-ref.sh verifies after it
+# runs `arcasHLA reference --rebuild`. If any is missing, arcasHLA cannot run.
+_arcashla_key_files = (
+    f"{ARCASHLA_DAT}/IMGTHLA/hla.dat",
+    f"{ARCASHLA_DAT}/IMGTHLA/wmda/hla_nom_p.txt",
+    f"{ARCASHLA_DAT}/ref/hla.p.json",
+    f"{ARCASHLA_DAT}/ref/hla.convert.json",
+    f"{ARCASHLA_DAT}/ref/hla.idx",
+    f"{ARCASHLA_DAT}/ref/hla_partial.idx",
+)
+ARCASHLA_ENABLED = all(
+    os.path.exists(p) and os.path.getsize(p) > 0
+    for p in _arcashla_key_files
+)
+
+if ARCASHLA_ENABLED:
+    print(f"[arcasHLA] enabled -- reference found at {ARCASHLA_DAT}",
+          file=sys.stderr)
+    print(f"[arcasHLA] REMINDER: the snakemake run must bind the host "
+          f"arcashla_ref/dat over {ARCASHLA_CONTAINER_DAT_PATH} "
+          f"(see installer script for the exact --apptainer-args / "
+          f"--singularity-args line)", file=sys.stderr)
+else:
+    _missing = [p for p in _arcashla_key_files
+                if not (os.path.exists(p) and os.path.getsize(p) > 0)]
+    print(f"[arcasHLA] disabled -- reference not fully built at "
+          f"{ARCASHLA_DAT}", file=sys.stderr)
+    print(f"[arcasHLA] missing/empty: {_missing[:3]}"
+          f"{'...' if len(_missing) > 3 else ''}", file=sys.stderr)
+    print(f"[arcasHLA] run install-arcashla-ref.sh on the host to build it, "
+          f"then ensure arcashla_ref/ is bind-mounted into the container",
+          file=sys.stderr)
+
 def get_fastq_path(wildcards):
     """Same logic as your existing get_fastq_path(): paired or single-end."""
     row = sample_data[sample_data.name == wildcards.sample].iloc[0]
@@ -238,6 +306,14 @@ rule all:
         # QC: per-sample Picard CollectRnaSeqMetrics + cohort summary table
         # expand("/tmp/data/04_qc/{sample}/{sample}.rnaseq_metrics.txt", sample=samples),
         "/tmp/data/04_qc/00_qc_summary.tsv",
+        # Optional HLA class I typing (only if the arcasHLA reference is present;
+        # see ARCASHLA_ENABLED gating above).
+        *(["/tmp/data/06_hla/00_hla_summary.tsv"] if ARCASHLA_ENABLED else []),
+        # Optional HLA class II typing (DRB1/DQA1/DQB1/DPA1/DPB1). Same gating;
+        # class II calls are expected to be sparse in brain RNA-seq (expressed
+        # mainly on microglia), so this table will have empty cells for
+        # low-expression samples.
+        *(["/tmp/data/06_hla/00_hla_summary_classII.tsv"] if ARCASHLA_ENABLED else []),
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
@@ -1481,6 +1557,311 @@ rule r04d_qc_summary:
                 flag_vals = [str(flags.get(c, "")) for c in all_flag_cols]
                 fout.write(sample + "\t" + "\t".join(vals)
                            + "\t" + "\t".join(flag_vals) + "\n")
+
+
+
+# =============================================================================
+# Optional HLA class I + class II typing with arcasHLA (RNA-seq)
+# =============================================================================
+# These rules are only added to the DAG when ARCASHLA_ENABLED is True (i.e.
+# the reference at /tmp/data/00_additional_files/arcashla_ref/dat is fully
+# built; see the gating block near the top of this file). arcasHLA is the
+# correct tool for HLA typing from RNA-seq: it pseudo-aligns reads to a cDNA
+# reference, which is exactly what RNA-seq provides.
+#
+# Workflow per sample:
+#   r06a_arcashla_extract           : pull HLA-region reads out of the markdup
+#                                     BAM into a pair of FASTQs (chr6 + decoys,
+#                                     handled by arcasHLA internally).
+#   r06b_arcashla_genotype          : class I alleles A, B, C. Emits
+#                                     {sample}.genotype.json.
+#   r06c_hla_summary                : aggregate class I JSONs into one TSV
+#                                     (00_hla_summary.tsv).
+#   r06d_arcashla_genotype_classII  : class II alleles DRB1, DQA1, DQB1, DPA1,
+#                                     DPB1 from the SAME extracted FASTQs. Kept
+#                                     separate because class II expression (and
+#                                     thus typing reliability) is much lower and
+#                                     patchier in brain RNA-seq. Emits
+#                                     {sample}.genotype.classII.json.
+#   r06e_hla_summary_classII        : aggregate class II JSONs into a separate
+#                                     TSV (00_hla_summary_classII.tsv).
+#
+# IMPORTANT run-time bind requirement: the biocontainer ships an incomplete
+# dat/ directory. The host arcashla_ref/dat must be bound OVER the container's
+# internal dat/. With apptainer that means the snakemake invocation needs
+# something like:
+#
+#   snakemake --use-singularity \
+#     --singularity-args "--bind /mnt/data/rnaseq:/tmp/data ... \
+#       --bind /mnt/data/rnaseq/rnaseq-drop/00_additional_files/arcashla_ref/dat:/usr/local/share/arcas-hla-0.6.0-2/dat"
+#
+# (Adjust the outer bind to whatever maps your data root to /tmp/data.) The
+# installer script prints the exact line for this machine.
+#
+# arcasHLA CLI quirks baked into these rules (learned the hard way):
+#   - NO --paired flag; arcasHLA auto-detects paired vs single from the input.
+#   - -g A,B,C (or the class II gene list) is comma-separated.
+#   - --temp takes a writable scratch dir; we make one per job and clean it up
+#     with a trap. JOB_TMP is initialised empty first so the trap is safe even
+#     under set -u if mktemp has not run yet.
+#   - genotype output is named from the input FASTQ basename, so the class II
+#     rule runs in a private temp dir and renames its output to avoid
+#     clobbering the class I genotype.json.
+# =============================================================================
+
+if ARCASHLA_ENABLED:
+
+    rule r06a_arcashla_extract:
+        """
+        Extract HLA-region reads from the markdup STAR BAM into FASTQs for
+        arcasHLA. arcasHLA extract handles the region selection internally
+        (chr6 plus the IMGT/HLA decoy contigs), so we just hand it the BAM.
+        """
+        input:
+            bam = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam",
+            bai = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam.bai",
+        output:
+            fq1 = "/tmp/data/06_hla/{sample}/{sample}.extracted.1.fq.gz",
+            fq2 = "/tmp/data/06_hla/{sample}/{sample}.extracted.2.fq.gz",
+        params:
+            outdir = "/tmp/data/06_hla/{sample}",
+        threads: 4
+        singularity: ARCASHLA_CONTAINER
+        shell:
+            r"""
+            set -euo pipefail
+            mkdir -p {params.outdir}
+
+            # Initialise JOB_TMP before the trap so cleanup is safe under
+            # set -u even if mktemp below fails.
+            JOB_TMP=""
+            trap 'rm -rf "${{JOB_TMP:-}}"' EXIT INT TERM
+            JOB_TMP=$(mktemp -d -p {params.outdir} arcas_extract.XXXXXX)
+
+            # arcasHLA names its outputs from the BAM basename. The markdup BAM
+            # basename is long <wildcards.sample>.Aligned.sortedByCoord.out.patched.md),
+            # which would yield FASTQs that don't match our expected output
+            # names. Symlink the BAM (and index) to a canonical <sample>.bam in
+            # the temp dir so the output FASTQs are named <sample>.extracted.*.
+
+            ln -sf "$(realpath {input.bam})" "$JOB_TMP/{wildcards.sample}.bam"
+            ln -sf "$(realpath {input.bai})" "$JOB_TMP/{wildcards.sample}.bam.bai"
+
+            arcasHLA extract \
+                -t {threads} \
+                -o {params.outdir} \
+                --temp "$JOB_TMP" \
+                -v \
+                "$JOB_TMP/{wildcards.sample}.bam"
+            """
+
+    rule r06b_arcashla_genotype:
+        """
+        arcasHLA class I genotyping (A, B, C) from the extracted FASTQs.
+        Emits {sample}.genotype.json with the called alleles.
+        """
+        input:
+            fq1 = "/tmp/data/06_hla/{sample}/{sample}.extracted.1.fq.gz",
+            fq2 = "/tmp/data/06_hla/{sample}/{sample}.extracted.2.fq.gz",
+        output:
+            json = "/tmp/data/06_hla/{sample}/{sample}.genotype.json",
+        params:
+            outdir = "/tmp/data/06_hla/{sample}",
+        threads: 4
+        singularity: ARCASHLA_CONTAINER
+        shell:
+            r"""
+            set -euo pipefail
+            mkdir -p {params.outdir}
+
+            JOB_TMP=""
+            trap 'rm -rf "${{JOB_TMP:-}}"' EXIT INT TERM
+            JOB_TMP=$(mktemp -d -p {params.outdir} arcas_genotype.XXXXXX)
+
+            # No --paired flag (arcasHLA auto-detects). -g A,B,C is the
+            # comma-separated gene list. --temp gives it scratch space.
+            arcasHLA genotype \
+                -g A,B,C \
+                -t {threads} \
+                -o {params.outdir} \
+                --temp "$JOB_TMP" \
+                -v \
+                {input.fq1} {input.fq2}
+            """
+
+    rule r06c_hla_summary:
+        """
+        Aggregate per-sample arcasHLA genotype.json files into one TSV with
+        two alleles per class I gene. Pairs are sorted within each gene for
+        determinism (arcasHLA's output order is not guaranteed).
+        """
+        input:
+            jsons = expand("/tmp/data/06_hla/{sample}/{sample}.genotype.json",
+                           sample=samples),
+        output:
+            tsv = "/tmp/data/06_hla/00_hla_summary.tsv",
+        run:
+            import json
+
+            def parse_arcashla(path):
+                # genotype.json maps gene -> list of allele strings, e.g.
+                #   {"A": ["A*02:01:01", "A*30:01:01"], "B": [...], "C": [...]}
+                # We keep 2-field resolution (A*02:01) and sort each pair so
+                # the column assignment is stable across samples.
+                with open(path) as f:
+                    data = json.load(f)
+                out = {}
+                for gene in ("A", "B", "C"):
+                    alleles = data.get(gene, []) or []
+                    twofield = []
+                    for a in alleles:
+                        fields = a.split(":")
+                        twofield.append(":".join(fields[:2]) if len(fields) >= 2 else a)
+                    twofield = sorted(twofield)
+                    # Pad to two entries (homozygous calls may list one allele).
+                    while len(twofield) < 2:
+                        twofield.append(twofield[0] if twofield else "")
+                    out[f"{gene}1"] = twofield[0]
+                    out[f"{gene}2"] = twofield[1]
+                return out
+
+            cols = ["A1", "A2", "B1", "B2", "C1", "C2"]
+            with open(output.tsv, "w") as fout:
+                fout.write("sample\t" + "\t".join(f"arcashla_{c}" for c in cols) + "\n")
+                for path in input.jsons:
+                    sample = os.path.basename(path).replace(".genotype.json", "")
+                    try:
+                        calls = parse_arcashla(path)
+                    except Exception as e:
+                        print(f"[HLA summary] WARN: could not parse {path}: {e}",
+                              file=sys.stderr)
+                        calls = {c: "" for c in cols}
+                    row = [calls.get(c, "") for c in cols]
+                    fout.write(sample + "\t" + "\t".join(row) + "\n")
+            n = len(input.jsons)
+            print(f"[HLA summary] wrote {output.tsv} -- {n} samples", flush=True)
+
+    rule r06d_arcashla_genotype_classII:
+        """
+        arcasHLA class II genotyping from the same extracted FASTQs as class I
+        (class II loci sit in the same chr6 MHC region, so r06a_arcashla_extract
+        already pulled the relevant reads).
+
+        Kept SEPARATE from the class I genotype rule on purpose: class II HLA is
+        expressed mainly on antigen-presenting cells (in brain, chiefly
+        microglia), so in brain RNA-seq class II read depth is low and highly
+        variable -- much patchier than class I. Isolating it keeps the reliable
+        class I summary clean and makes the (less reliable) class II calls easy
+        to evaluate on their own.
+
+        Gene set: the clinically standard DRB1, DQA1, DQB1, DPA1, DPB1. DRB3/4/5
+        are copy-number-variable (present only in some DRB1 haplotypes), so
+        arcasHLA may legitimately report them absent; they are not requested
+        here to keep the output columns fixed.
+
+        IMPORTANT: arcasHLA names its output {basename}.genotype.json from the
+        input FASTQ basename, which is the SAME basename the class I rule uses.
+        Running genotype again in the sample dir would OVERWRITE the class I
+        genotype.json. To avoid that, this rule runs entirely inside a private
+        temp dir and then moves the result to a distinct class II filename.
+        """
+        input:
+            fq1 = "/tmp/data/06_hla/{sample}/{sample}.extracted.1.fq.gz",
+            fq2 = "/tmp/data/06_hla/{sample}/{sample}.extracted.2.fq.gz",
+        output:
+            json = "/tmp/data/06_hla/{sample}/{sample}.genotype.classII.json",
+        params:
+            outdir = "/tmp/data/06_hla/{sample}",
+        threads: 4
+        singularity: ARCASHLA_CONTAINER
+        shell:
+            r"""
+            set -euo pipefail
+            mkdir -p {params.outdir}
+
+            JOB_TMP=""
+            trap 'rm -rf "${{JOB_TMP:-}}"' EXIT INT TERM
+            JOB_TMP=$(mktemp -d -p {params.outdir} arcas_genotype2.XXXXXX)
+
+            # Run genotyping with output directed into the private temp dir so
+            # the class I <sample>.genotype.json in <params.outdir> is not
+            # clobbered. -g lists the class II genes; no --paired (auto-detect).
+
+            arcasHLA genotype \
+                -g DRB1,DQA1,DQB1,DPA1,DPB1 \
+                -t {threads} \
+                -o "$JOB_TMP" \
+                --temp "$JOB_TMP" \
+                -v \
+                {input.fq1} {input.fq2}
+
+            # arcasHLA writes <basename>.genotype.json into $JOB_TMP. The
+            # basename is derived from the FASTQ name (<sample>.extracted ->
+            # arcasHLA strips known suffixes to <sample>). Find whatever
+            # genotype.json it produced and move it to the class II output name.
+
+            produced=$(find "$JOB_TMP" -maxdepth 1 -name '*.genotype.json' | head -n1)
+            if [ -z "$produced" ]; then
+                echo "ERROR: arcasHLA produced no genotype.json in $JOB_TMP" >&2
+                ls -la "$JOB_TMP" >&2
+                exit 1
+            fi
+            mv "$produced" {output.json}
+            """
+
+    rule r06e_hla_summary_classII:
+        """
+        Aggregate per-sample arcasHLA CLASS II genotype JSONs into one TSV.
+        Same 2-field, sorted-pair logic as the class I summary. Expect missing
+        or sparse calls for low-expression samples -- empty cells are normal for
+        class II in brain RNA-seq and indicate insufficient read support, not a
+        pipeline error.
+        """
+        input:
+            jsons = expand("/tmp/data/06_hla/{sample}/{sample}.genotype.classII.json",
+                           sample=samples),
+        output:
+            tsv = "/tmp/data/06_hla/00_hla_summary_classII.tsv",
+        run:
+            import json
+
+            classII_genes = ("DRB1", "DQA1", "DQB1", "DPA1", "DPB1")
+
+            def parse_arcashla_classII(path):
+                with open(path) as f:
+                    data = json.load(f)
+                out = {}
+                for gene in classII_genes:
+                    alleles = data.get(gene, []) or []
+                    twofield = []
+                    for a in alleles:
+                        fields = a.split(":")
+                        twofield.append(":".join(fields[:2]) if len(fields) >= 2 else a)
+                    twofield = sorted(twofield)
+                    while len(twofield) < 2:
+                        twofield.append(twofield[0] if twofield else "")
+                    out[f"{gene}1"] = twofield[0]
+                    out[f"{gene}2"] = twofield[1]
+                return out
+
+            cols = []
+            for g in classII_genes:
+                cols.extend([f"{g}1", f"{g}2"])
+
+            with open(output.tsv, "w") as fout:
+                fout.write("sample\t" + "\t".join(f"arcashla_{c}" for c in cols) + "\n")
+                for path in input.jsons:
+                    sample = os.path.basename(path).replace(".genotype.classII.json", "")
+                    try:
+                        calls = parse_arcashla_classII(path)
+                    except Exception as e:
+                        print(f"[HLA summary II] WARN: could not parse {path}: {e}",
+                              file=sys.stderr)
+                        calls = {c: "" for c in cols}
+                    row = [calls.get(c, "") for c in cols]
+                    fout.write(sample + "\t" + "\t".join(row) + "\n")
+            n = len(input.jsons)
+            print(f"[HLA summary II] wrote {output.tsv} -- {n} samples", flush=True)
 
 
 
