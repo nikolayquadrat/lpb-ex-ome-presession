@@ -33,14 +33,57 @@
 #     Missing genes are zero-padded. The geneID column carries the GTF's
 #     versioned IDs so the output is interchangeable with DROP's own output.
 
+cran_pkgs <- c(
+    "data.table"
+)
+
+bioc_pkgs <- c(
+    "GenomicFeatures"
+)
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager", repos = "https://cloud.r-project.org")
+}
+
+bioc_version <- BiocManager::version()
+
+if (bioc_version >= "3.19") {
+    bioc_pkgs <- c(bioc_pkgs, "txdbmaker")
+}
+
+all_pkgs <- c(cran_pkgs, bioc_pkgs)
+
+missing_pkgs <- all_pkgs[
+    !vapply(all_pkgs, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))
+]
+
+if (length(missing_pkgs) > 0) {
+    BiocManager::install(missing_pkgs, ask = FALSE, update = TRUE)
+}
+
+still_missing <- all_pkgs[
+    !vapply(all_pkgs, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))
+]
+
+if (length(still_missing) > 0) {
+    stop(
+        "The following packages could not be installed: ",
+        paste(still_missing, collapse = ", ")
+    )
+}
+
 suppressPackageStartupMessages({
     library(data.table)
-    library(txdbmaker)
     library(GenomicFeatures)
+
+    if (requireNamespace("txdbmaker", quietly = TRUE)) {
+        library(txdbmaker)
+    }
 })
 
 # ---- argument parsing ----
 args <- commandArgs(trailingOnly = TRUE)
+print(args)
 keep_versions <- "--keep-versions" %in% args
 args <- args[args != "--keep-versions"]
 
@@ -123,7 +166,7 @@ read_gct <- function(path) {
     cat("  GCT version line: ", version_line, "\n", sep = "")
     cat("  GCT dimensions  : ", dims_line, "\n", sep = "")
 
-    dims <- as.integer(strsplit(trimws(dims_line), "\t")[[1]])
+    dims <- as.integer(strsplit(trimws(dims_line), "[[:space:]]+")[[1]])
     if (length(dims) < 2 || any(is.na(dims[1:2]))) {
         stop("Could not parse GCT dimensions line: '", dims_line, "'")
     }
@@ -281,5 +324,15 @@ cat("  order matches canonical: TRUE\n")
 # ---- Step 4: write ----
 cat("\nWriting aligned counts to:\n  ", COUNTS_OUT_PATH, "\n", sep = "")
 fwrite(result, COUNTS_OUT_PATH, sep = "\t", quote = FALSE)
+
+# Sidecar file listing the sample IDs (count-matrix column names in their
+# written order, one per line). Useful for downstream tools that need the
+# sample list without re-reading the (often large) count matrix. The path is
+# derived by appending ".samples.txt" to the count-matrix path, so
+# foo.tsv -> foo.tsv.samples.txt and foo.tsv.gz -> foo.tsv.gz.samples.txt.
+SAMPLES_OUT_PATH <- paste0(COUNTS_OUT_PATH, ".samples.txt")
+cat("Writing sample IDs to:\n  ", SAMPLES_OUT_PATH, "\n", sep = "")
+writeLines(sample_cols, SAMPLES_OUT_PATH)
+cat("  ", length(sample_cols), " sample IDs written\n", sep = "")
 
 cat("\nDone.\n")
