@@ -1224,7 +1224,7 @@ if CONTAMINATION_ENABLED:
         """
         Align the entropy-filtered unmapped reads to the contamination
         reference with conservative bwa-mem2 parameters, then attribute
-        per-species read counts via the seqname->species map.
+        per-species alignment counts via the seqname->species map.
 
         bwa-mem2 parameters:
           -T 95   : minimum alignment score (default 30). A 95bp read
@@ -1235,8 +1235,23 @@ if CONTAMINATION_ENABLED:
                     reject short noisy matches before extension.
           -r 2.0  : re-seed threshold multiplier (default 1.5). Less
                     aggressive re-seeding, fewer marginal alignments.
-        Plus the post-filter samtools view -q 30 (MAPQ confidence >= 30)
-        to drop ambiguous multi-mappers across organisms.
+          -h 50   : report up to 50 tied-best alternatives in the XA
+                    tag (default 5). Ensures all same-score alignments
+                    to closely related references are captured.
+
+        Multi-mapping handling: a read aligning equally well to N
+        references is COUNTED ONCE PER REFERENCE it hits (primary +
+        each XA-tag alternative). This means per-species counts
+        represent "alignments supporting this species" rather than
+        strict per-read counts; the sum across species can EXCEED
+        total_mapped_to_contamination. Rationale: the strict alignment
+        parameters (-T 95 -k 35) together with the upstream rRNA /
+        conserved-region masking (r05a0_mask_conserved_regions) make
+        per-genome attribution of multi-mappers a sensitivity recovery
+        rather than a specificity risk. Without this change, closely
+        related references (e.g., multiple Streptomyces species)
+        cancel each other out at MAPQ filtering and ALL get
+        undercounted.
 
         Per-species attribution uses the user-supplied gtf_seqnames.tsv
         (header: species_id<TAB>seqname). Reads whose accession is
@@ -1265,27 +1280,31 @@ if CONTAMINATION_ENABLED:
             # bwa-mem2 with -p reads interleaved paired-end from stdin
             # (matches bbduk's int=t output and samtools fastq -N).
             # Works correctly for SE input too since singletons stream
-            # through the same path.
+            # through the same path. -h 50 raises the XA-tag alternative
+            # cap from 5 to 50 so all tied-best multi-mappers are kept.
+            
             zcat {input.fq} \
-                | bwa-mem2 mem -t {threads} -p -T 95 -k 35 -r 2.0 -B 6 -O 8 -L 10 \
+                | bwa-mem2 mem -t {threads} -p -T 95 -k 35 -r 2.0 -B 6 -O 8 -L 10 -h 50 \
                       "$INDEX_FA" - 2>/dev/null \
                 | samtools view -b -F 4 - > {output.bam}
 
             # Totals: total unmapped reads in the host BAM (denominator
-            # context only; the QC summary uses Input_reads as the
-            # percentage denominator), and total confidently-mapped to
-            # any contaminant genome.
+            # context only) and total READS confidently mapped to any
+            # contaminant genome (no MAPQ filter; the strict alignment
+            # parameters already filter out marginal alignments). Note
+            # that the sum of per-species counts below can exceed this
+            # because multi-mappers are counted once per sequence.
+
             TOTAL_UNMAPPED=$(samtools view -c -f 4 -F 256 {input.bam})
-            TOTAL_MAPPED=$(samtools view -c -F 260 -q 30 {output.bam})
+            TOTAL_MAPPED=$(samtools view -c -F 260 {output.bam})
 
             # Per-species counts via samtools view + awk join on the
-            # gtf_seqnames.tsv map. All species from the map are emitted
-            # (with count 0 if absent in this sample) so the cohort
-            # summary has consistent columns across samples. NOTE: the
-            # seqname-map header is "species_id<TAB>seqname" so we key
-            # the lookup on the SECOND column (seqname / NCBI accession)
-            # -> FIRST column (species_id).
-            samtools view -F 260 -q 30 {output.bam} \
+            # gtf_seqnames.tsv map. The awk parses both the primary
+            # alignment reference (column 3) AND the XA tag (when
+            # present) so reads aligning equally well to multiple
+            # references are counted once per reference.
+
+            samtools view -F 260 {output.bam} \
                 | awk -v map="{input.species_map}" \
                       -v sample="{wildcards.sample}" \
                       -v total_unmapped="$TOTAL_UNMAPPED" \
@@ -1304,10 +1323,34 @@ if CONTAMINATION_ENABLED:
                         }}
                         close(map)
                     }}
-                    {{
-                        species = (($3 in seqname2species) ? seqname2species[$3] : "unknown")
+                    function attribute(seqname,    species) {{
+                        species = (seqname in seqname2species) ? seqname2species[seqname] : "unknown"
                         counts[species]++
                         all_species[species] = 1
+                    }}
+                    {{
+                        # Always count the primary alignment.
+                        attribute($3)
+                        # Scan optional fields (columns 12..NF) for an XA
+                        # tag and credit each comma-delimited alternative.
+                        # XA format: XA:Z:chr,pos,CIGAR,NM;chr,pos,CIGAR,NM;
+                        # The accession is the substring before the first
+                        # comma in each ";"-delimited entry.
+
+                        for (i = 12; i <= NF; i++) {{
+                            if (substr($i, 1, 5) == "XA:Z:") {{
+                                xa_payload = substr($i, 6)
+                                ne = split(xa_payload, xa_entries, ";")
+                                for (e = 1; e <= ne; e++) {{
+                                    if (xa_entries[e] == "") continue
+                                    split(xa_entries[e], xa_fields, ",")
+                                    if (xa_fields[1] != "" && xa_fields[1] != $3) {{
+                                        attribute(xa_fields[1])
+                                    }}
+                                }}
+                                break
+                            }}
+                        }}
                     }}
                     END {{
                         print "metric", "value" > out_counts
@@ -1331,7 +1374,6 @@ if CONTAMINATION_ENABLED:
                     }}
                 '
             """
-
 
 rule r04d_qc_summary:
     """
