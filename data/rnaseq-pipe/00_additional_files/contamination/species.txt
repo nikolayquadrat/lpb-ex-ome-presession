@@ -94,7 +94,7 @@ bradyrhizobium_diazoefficiens	GCF_000011365.1
 bradyrhizobium_japonicum	GCF_013752735.1
 cupriavidus_metallidurans	GCF_000196015.1
 cupriavidus_necator	GCF_000009285.1
-ralstonia_pickettii	GCF_000020205.1
+ralstonia_pickettii	GCF_014142625.1
 ralstonia_insidiosa	GCF_001663855.1
 ralstonia_pseudosolanacearum	GCF_000009125.1
 clostridium_perfringens	GCF_016027375.1
