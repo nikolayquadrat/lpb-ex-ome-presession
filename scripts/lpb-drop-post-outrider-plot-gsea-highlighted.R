@@ -1,20 +1,6 @@
 #' Plot a GSEA results table with tier-gene highlighting + leading edge
 #'
-#' A drop-in replacement for fgsea::plotGseaTable() that
-#'   (a) renders rank-ticks with HEIGHT proportional to each gene's ranking
-#'       statistic (matching fgsea's original behavior, so tick shape reflects
-#'       z-score magnitude and sign across the ranked list),
-#'   (b) colors ticks for pathway genes in the LEADING EDGE separately from
-#'       regular pathway-set genes (default: leading edge green, others black),
-#'   (c) draws ticks for any gene in `highlight_genes` (e.g., tier-A LoF hits
-#'       from your exome pipeline) in a distinct color on top of the other
-#'       layers, and
-#'   (d) adds an extra column on the right listing the highlight genes that
-#'       appear in each pathway, ordered by their rank; genes that are also
-#'       in the pathway's leading edge get a "*" suffix.
-#'
-#' Mirrors the layout of fgsea's plotGseaTable so the output is visually
-#' compatible with the rest of your figures.
+#' Mirrors the layout of fgsea's plotGseaTable.
 #'
 #' @param pathways      Named list of gene-set vectors (gene symbols matching
 #'                      names(stats)). Same as plotGseaTable's first arg.
@@ -221,10 +207,7 @@ plotGseaTableHighlighted <- function(pathways,
         ggplot2::ggplotGrob(p)
     }
 
-    # Helper: format a numeric padj value the way plotGseaTable does, but as
-    # plain text (grid::textGrob doesn't support `parse=`; if you want
-    # bquote-style "3.7 . 10^{-1}" rendering you'd need a ggplotGrob-wrapped
-    # annotation. Plain "3.7e-01" reads fine and matches most journals.)
+    # Helper: format a numeric padj value the way plotGseaTable does
     fmt_padj <- function(p) {
         if (is.na(p)) return("NA")
         if (p == 0)  return("<1e-300")
