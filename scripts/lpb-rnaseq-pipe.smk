@@ -1377,29 +1377,31 @@ if CONTAMINATION_ENABLED:
             """
 rule r05e_contamination_summary:
         """
-        Aggregate per-sample contamination counts into a single wide
-        TSV (one row per sample, one column per species). Independent
-        of r04d_qc_summary: no Input_reads percentages, no flags, no
-        Picard merging - just the raw per-species alignment counts
-        from r05d for inspection or downstream analysis.
+        Aggregate per-sample contamination counts into a single wide TSV
+        (one row per sample, one column per species). Independent of
+        r04d_qc_summary: no Input_reads percentages, no flags, no Picard
+        merging -- just the raw per-species alignment counts from r05d
+        for inspection or downstream analysis.
+
+        Column order matches the species.txt source file (with comments
+        and blank lines stripped), preserving the user's intended
+        ordering. When species.txt is not present (prebuilt-only mode),
+        falls back to first-occurrence order in the seqname map.
 
         Columns:
           - sample
           - total_unmapped_in_star_bam        (reads unmapped in host BAM)
           - total_mapped_to_contamination     (reads aligned to contam ref;
-                                               note multi-mappers are counted
-                                               once per matched sequence in
-                                               the per-species columns below,
-                                               so sum(species_*) >= this)
-          - one column per species_id from the seqname map, holding the
+                                               note multi-mappers are
+                                               counted once per matched
+                                               sequence in the per-species
+                                               columns below, so
+                                               sum(species_*) >= this)
+          - one column per species_id, in species.txt order, holding the
             "alignments supporting this species" count from r05d (see
             r05d docstring for multi-mapping semantics)
-
-        Species columns are sorted alphabetically by species_id so column
-        order is stable across runs and consistent with r04d_qc_summary.
-        Samples for which r05d produced no output (e.g., because the rule
-        failed or was skipped) appear with blank species cells; a warning
-        is logged so the omission is visible.
+          - "unknown" column appended at the end IF any sample has reads
+            attributed to the unknown bucket (contig not in seqname map)
         """
         input:
             counts = expand(
@@ -1410,65 +1412,75 @@ rule r05e_contamination_summary:
         output:
             tsv = "/tmp/data/05_contamination/00_contamination_summary.tsv",
         run:
-            # Build the master species list from the seqname map (first
-            # column = species_id). Sort for column-order stability.
-            species_set = set()
+            # Canonical species ordering from species.txt (or seqname map
+            # fallback). Helper handles blank lines, comments, whitespace
+            # sanitisation -- see _read_species_order() definition near
+            # the top of this file.
+            species_order = _read_species_order(
+                CONTAM_SPECIES_LIST,
+                input.species_map,
+            )
+            # Catch species in the seqname map that aren't in species.txt
+            # (post-build edits to the map). Append at end, alphabetically,
+            # so they're visible rather than silently dropped.
+            in_order = set(species_order)
+            extras = set()
             with open(input.species_map) as f:
-                next(f)  # skip header (species_id<TAB>seqname)
+                next(f)
                 for line in f:
                     parts = line.rstrip("\n").split("\t")
-                    if len(parts) == 2:
-                        species_set.add(parts[0])
-            species_sorted = sorted(species_set)
+                    if len(parts) == 2 and parts[0] and parts[0] not in in_order:
+                        extras.add(parts[0])
+            if extras:
+                print(f"[contam summary] WARN: {len(extras)} species_ids in "
+                      f"seqname map but not in species.txt; appending at end: "
+                      f"{sorted(extras)[:5]}...", file=sys.stderr)
+                species_order = species_order + sorted(extras)
 
-            cols = (
-                ["sample",
-                 "total_unmapped_in_star_bam",
-                 "total_mapped_to_contamination"]
-                + species_sorted
-            )
+            base_cols = [
+                "sample",
+                "total_unmapped_in_star_bam",
+                "total_mapped_to_contamination",
+            ]
 
-            # Parse each per-sample contamination_counts.tsv. Long-form key/value
-            # format (one "metric<TAB>value" per row). The "unknown" bucket
-            # (species not in the seqname map) is folded into a column named
-            # "unknown" so it doesn't silently disappear; emit only if present.
-            n_rows_written = 0
+            # Two-pass: scan all files to (a) parse counts and (b) detect
+            # whether any sample has an "unknown" bucket, so we only emit
+            # that column when relevant.
+            parsed = {}
             saw_unknown = False
-            with open(output.tsv, "w") as fout:
-                # Header (with "unknown" appended last if any sample has it)
-                # We do a 2-pass: first scan all files to decide if "unknown" is
-                # ever non-zero, then write.
-                parsed = {}
-                for path in input.counts:
-                    data = {}
-                    with open(path) as fh:
-                        next(fh)  # skip header (metric<TAB>value)
-                        for line in fh:
-                            parts = line.rstrip("\n").split("\t", 1)
-                            if len(parts) == 2:
-                                data[parts[0]] = parts[1]
-                    sample = data.get("sample", "")
-                    if not sample:
-                        print(f"[contam summary] WARN: no sample id in {path}, skipping",
-                              file=sys.stderr)
-                        continue
-                    parsed[sample] = data
-                    if int(data.get("species:unknown", 0) or 0) > 0:
+            for path in input.counts:
+                data = {}
+                with open(path) as fh:
+                    next(fh)  # header (metric<TAB>value)
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t", 1)
+                        if len(parts) == 2:
+                            data[parts[0]] = parts[1]
+                sample = data.get("sample", "")
+                if not sample:
+                    print(f"[contam summary] WARN: no sample id in {path}, skipping",
+                          file=sys.stderr)
+                    continue
+                parsed[sample] = data
+                try:
+                    if int(data.get("species:unknown", "0") or 0) > 0:
                         saw_unknown = True
+                except ValueError:
+                    pass
 
-                header = cols + (["unknown"] if saw_unknown else [])
+            with open(output.tsv, "w") as fout:
+                header = base_cols + species_order + (["unknown"] if saw_unknown else [])
                 fout.write("\t".join(header) + "\n")
 
-                # Emit rows in sample-list order so the summary matches the
-                # cohort ordering used elsewhere (rather than dict order).
+                n_rows_written = 0
+                # Emit rows in cohort sample-list order (consistent with
+                # other summary tables) rather than file-discovery order.
                 for sample in samples:
                     if sample not in parsed:
                         print(f"[contam summary] WARN: no contamination counts "
                               f"for sample {sample}; row will be blank",
                               file=sys.stderr)
-                        row = [sample] + ["" for _ in cols[1:]]
-                        if saw_unknown:
-                            row.append("")
+                        row = [sample] + ["" for _ in header[1:]]
                         fout.write("\t".join(row) + "\n")
                         continue
                     data = parsed[sample]
@@ -1477,7 +1489,7 @@ rule r05e_contamination_summary:
                         data.get("total_unmapped_in_star_bam", "0"),
                         data.get("total_mapped_to_contamination", "0"),
                     ]
-                    for sp in species_sorted:
+                    for sp in species_order:
                         row.append(data.get(f"species:{sp}", "0"))
                     if saw_unknown:
                         row.append(data.get("species:unknown", "0"))
@@ -1485,9 +1497,10 @@ rule r05e_contamination_summary:
                     n_rows_written += 1
 
             print(f"[contam summary] wrote {output.tsv} -- "
-                  f"{n_rows_written} samples x {len(species_sorted)} species"
+                  f"{n_rows_written} samples x {len(species_order)} species"
                   f"{' (+ unknown bucket)' if saw_unknown else ''}",
                   flush=True)
+
 
 rule r04d_qc_summary:
     """
@@ -1635,18 +1648,33 @@ rule r04d_qc_summary:
         contam_flag_cols = []      # Flag columns appended after the RNA flags
         species_sorted = []        # Stable ordering for column emission
         if CONTAMINATION_ENABLED:
-            # Build species list from the user-supplied seqname map. The
-            # map's first column is species_id (species name + GCF
-            # accession joined by underscores), second column is seqname
-            # (NCBI accession of one contig from that species).
-            species_set = set()
+            # Column order matches the species.txt source file (with comments
+            # and blank lines stripped). When species.txt is not present
+            # (prebuilt-only mode), falls back to first-occurrence order in
+            # the seqname map. Both branches deduplicate, so a species listed
+            # twice still occupies a single column at its first position.
+            # See _read_species_order() near the top of this file for details.
+            species_sorted = _read_species_order(
+                CONTAM_SPECIES_LIST,
+                input.contam_species_map,
+            )
+            # Defensive: any species_ids present in the seqname map but not
+            # in species.txt are appended at the end in alphabetical order so
+            # they don't silently disappear from the summary. This catches
+            # post-build edits to the seqname map (rare but possible).
+            in_order = set(species_sorted)
+            extras = set()
             with open(input.contam_species_map) as f:
-                next(f)  # skip header (species_id<TAB>seqname)
+                next(f)
                 for line in f:
                     parts = line.rstrip("\n").split("\t")
-                    if len(parts) == 2:
-                        species_set.add(parts[0])
-            species_sorted = sorted(species_set)
+                    if len(parts) == 2 and parts[0] and parts[0] not in in_order:
+                        extras.add(parts[0])
+            if extras:
+                print(f"[qc summary] WARN: {len(extras)} species_ids in "
+                      f"seqname map are not in species.txt; appending at end: "
+                      f"{sorted(extras)[:5]}...", file=sys.stderr)
+                species_sorted = species_sorted + sorted(extras)
 
             contam_cols = (
                 ["total_mapped_to_contamination",
