@@ -1,12 +1,14 @@
-# Disease-relevant neurotropic / neuroinvasive pathogens
-toxoplasma_gondii	GCF_000006565.2
+# I. CNS-neuroinvasive / neurotropic pathogens
+# Entries are grouped by organism type.
+# Some opportunistic CNS pathogens also function as contamination sentinels.
+
+## Viruses
 hhv6a_u1102	GCF_000845685.2
 hhv6b_z29	GCF_000846365.1
 hsv1_strain17	GCF_000859985.2
-ebv_b95_8	GCF_002402265.1
-cmv_merlin	GCF_000845245.1
 hsv2_hg52	GCF_000858385.2
 vzv_dumas	GCF_000858285.1
+ebv_b95_8	GCF_002402265.1
 hhv7_rk	GCF_000848125.1
 jcv	GCF_000863805.1
 betapolyomavirus_hominis	GCF_000837865.1
@@ -15,29 +17,43 @@ borna_disease_virus_1	GCA_002366305.1
 variegated_squirrel_bornavirus_1	GCF_001698295.1
 influenza_a_h1n1	GCA_039000265.1
 influenza_a_h3n2	GCA_039834415.1
-west_nile_virus	GCF_000861085.1
 usutu_virus	GCF_000854945.1
+japanese_encephalitis_virus	GCF_000862145.1
+powassan_virus	GCF_000860485.1
+tbev	GCF_000863125.1
 toscana_virus	GCA_031497085.1
 rabies_lyssavirus	GCF_000859625.1
 eblv1	GCF_000870765.1
 eblv2	GCF_000871625.2
 measles_morbillivirus	GCF_000854845.1
-hiv1	GCF_000864765.1
+mumps_orthorubulavirus	GCF_000856685.1
+henipavirus_nipahense	GCF_000863625.1
 ev71	GCA_008766895.1
 evd68	GCF_002816725.1
 poliovirus_pv1	GCA_031102545.1
 echovirus_e11	GCA_031102535.1
-mumps_orthorubulavirus	GCF_000856685.1
-japanese_encephalitis_virus	GCF_000862145.1
-eastern_equine_encephalitis_virus	GCF_000862705.1
-powassan_virus	GCF_000860485.1
-henipavirus_nipahense	GCF_000863625.1
-tbev	GCF_000863125.1
 human_parechovirus_3	GCA_031116775.1
+eastern_equine_encephalitis_virus	GCF_000862705.1
+
+## Bacteria
+# staphylococcus_aureus can also be a skin or handling background signal.
 listeria_monocytogenes	GCF_000196035.1
 neisseria_meningitidis	GCF_000008805.1
 streptococcus_pneumoniae_d39	GCF_000014365.2
 streptococcus_agalactiae	GCF_001552035.1
+haemophilus_influenzae	GCF_020736045.1
+escherichia_coli_k1	GCF_000471505.1
+borreliella_burgdorferi_b31	GCF_000008685.2
+borrelia_miyamotoi	GCF_019668505.1
+mycobacterium_tuberculosis	GCF_000195955.2
+nocardia_asteroides	GCF_900637185.1
+nocardia_farcinica	GCF_000009805.1
+mycoplasmoides_pneumoniae	GCF_900660465.1
+brucella_melitensis	GCF_000007125.1
+staphylococcus_aureus	GCF_000013425.1
+
+## Fungi
+# candida_albicans and aspergillus_fumigatus can be genuine CNS pathogens, although they can also appear as environmental or laboratory background.
 cryptococcus_neoformans	GCF_000149245.1
 cryptococcus_gattii	GCF_000185945.1
 coccidioides_immitis	GCF_000149335.2
@@ -45,16 +61,16 @@ coccidioides_posadasii	GCF_018416015.2
 histoplasma_capsulatum	GCF_000150115.1
 blastomyces_dermatitidis	GCF_000003525.1
 cladophialophora_bantiana	GCF_000835475.1
-treponema_pallidum_nichols	GCF_000410535.2
-borreliella_burgdorferi_b31	GCF_000008685.2
-borrelia_miyamotoi	GCF_019668505.1
-mycobacterium_tuberculosis	GCF_000195955.2
+candida_albicans	GCF_000182965.3
+aspergillus_fumigatus	GCF_000002655.1
+
+## Protozoa and free-living amoebae
+toxoplasma_gondii	GCF_000006565.2
 naegleria_fowleri	GCF_008403515.1
 acanthamoeba_castellanii	GCF_000313135.1
-trypanosoma_cruzi	GCF_000209065.1
-trypanosoma_brucei	GCF_000002445.2
-nocardia_asteroides	GCF_900637185.1
-nocardia_farcinica	GCF_000009805.1
+balamuthia_mandrillaris	GCA_031835245.2
+
+## Helminths
 schistosoma_japonicum	GCA_025215515.1
 taenia_solium	GCA_001870725.1
 toxocara_canis	GCA_000803305.1
@@ -62,53 +78,50 @@ echinococcus_granulosus	GCF_000524195.1
 angiostrongylus_cantonensis	GCA_009735665.1
 baylisascaris_procyonis	GCA_037389465.1
 gnathostoma_spinigerum	GCA_043882145.1
-balamuthia_mandrillaris	GCA_031835245.2
-mycoplasmoides_pneumoniae	GCF_900660465.1
-haemophilus_influenzae	GCF_020736045.1
-escherichia_coli_k1	GCF_000471505.1
-brucella_melitensis	GCF_000007125.1
 
-# Post-mortem / environmental signature (autopsy & dissection contamination)
-escherichia_coli_k12	GCF_000005845.2
-cutibacterium_acnes	GCF_000008345.1
-pseudomonas_aeruginosa_pao1	GCF_000006765.1
-klebsiella_pneumoniae_hs11286	GCF_000240185.1
-staphylococcus_aureus	GCF_000013425.1
-staphylococcus_epidermidis	GCF_006094375.1
-malassezia_restricta	GCF_003290485.1
+# II. Blood-borne / transfusion-associated pathogens
+## Viruses
+## HIV1, West Nile Virus, CMV could be neurotropic
+hepatitis_b GCA_003114255.1
+hepatitis_c_h77 GCF_000861845.1
+hiv1    GCF_000864765.1
+hiv2    GCF_000856385.1
+htlv1   GCF_000863585.1
+htlv2   GCF_000847505.1
+hepatitis_e GCA_048568685.1
+parvovirus_b19  GCF_000839645.1
+hepatitis_delta GCF_018547925.1
+hepatitis_a GCA_031116825.1
+west_nile_virus	GCF_000861085.1
+zika_virus  GCF_000882815.3
+dengue_virus_1  GCF_000862125.1
+dengue_virus_2  GCF_000871845.1
+dengue_virus_3  GCF_000866625.1
+dengue_virus_4  GCF_000865065.1
+chikungunya_virus   GCF_000854045.1
+cmv_merlin	GCF_000845245.1
 
-# Cell-culture / lab-contamination panel (mycoplasmas + fungi)
-mesomycoplasma_hyorhinis	GCF_001705605.1
-metamycoplasma_orale	GCF_000420105.1
-metamycoplasma_salivarium	GCF_900660445.2
-mycoplasmopsis_arginini	GCF_001547975.1
-mycoplasmopsis_fermentans	GCF_000209735.1
-metamycoplasma_hominis	GCF_000935865.1
-acholeplasma_laidlawii	GCF_000018785.1
-candida_albicans	GCF_000182965.3
-aspergillus_fumigatus	GCF_000002655.1
-penicillium_rubens	GCF_028828025.1
-cladosporium_sphaerospermum	GCA_023621355.1
-delftia_acidovorans	GCF_000018665.1
-bradyrhizobium_diazoefficiens	GCF_000011365.1
-bradyrhizobium_japonicum	GCF_013752735.1
-cupriavidus_metallidurans	GCF_000196015.1
-cupriavidus_necator	GCF_000009285.1
-ralstonia_pickettii	GCF_014142625.1
-ralstonia_insidiosa	GCF_001663855.1
-ralstonia_pseudosolanacearum	GCF_000009125.1
-clostridium_perfringens	GCF_016027375.1
-micrococcus_luteus	GCF_900475555.1
-corynebacterium_accolens	GCF_023520795.1
-sphingomonas_paucimobilis	GCF_016027095.1
-methylorubrum_extorquens	GCF_000083545.1
-stenotrophomonas_maltophilia	GCF_020641395.2
-burkholderia_cepacia	GCF_009586235.1
-saccharomyces_cerevisiae	GCF_000146045.2
-mycoplasmoides_pirum	GCF_000685905.1
-mycoplasma_bovis	GCF_000183385.1
+## Protozoa
+plasmodium_falciparum	GCF_000002765.6
+plasmodium_vivax    GCF_000002415.2
+plasmodium_malariae GCF_900090045.1
+plasmodium_ovale_curtisi    GCA_900088565.1
+plasmodium_ovale_wallikeri  GCA_900088485.1
+babesia_divergens   GCA_001077455.2
+babesia_microti	GCA_001650055.1
+trypanosoma_cruzi	GCF_000209065.1
+trypanosoma_brucei	GCF_000002445.2
+leishmania_donovani	GCF_000227135.1
+leishmania_infantum	GCF_000002875.2
 
-# Other pathogens / transfusion-associated sentinel
+## Bacteria
+## Treponema Pallidum could be neurotropic
+yersinia_enterocolitica GCF_000253175.1
+treponema_pallidum_nichols	GCF_000410535.2
+
+# III. Additional clinically relevant or systemic pathogen sentinels
+
+## Bacteria
 streptococcus_pyogenes	GCF_000006785.2
 enterococcus_faecalis	GCF_000007785.1
 enterococcus_faecium	GCF_003071425.1
@@ -117,10 +130,123 @@ enterobacter_cloacae_atcc13047	GCF_000025565.1
 salmonella_enterica	GCF_000006945.2
 acinetobacter_baumannii_ab307	GCF_000021145.1
 bacillus_cereus	GCF_006094295.1
-babesia_microti	GCA_001650055.1
-plasmodium_falciparum	GCF_000002765.6
-leishmania_donovani	GCF_000227135.1
-leishmania_infantum	GCF_000002875.2
-sars_cov_2_wuhan_hu_1	GCF_009858895.2
 corynebacterium_diphtheriae	GCF_001457455.1
 
+# Priority 2: Brain post-mortem / autopsy background signatures
+# These entries help distinguish ante-mortem biology from post-mortem translocation, dissection carryover, and handling background.
+# Some entries are also opportunistic pathogens and should be interpreted in context.
+
+## Enteric, water-associated, and post-mortem translocation sentinels
+escherichia_coli_k12	GCF_000005845.2
+pseudomonas_aeruginosa_pao1	GCF_000006765.1
+klebsiella_pneumoniae_hs11286	GCF_000240185.1
+clostridium_perfringens	GCF_016027375.1
+
+## Skin and dissection-background sentinels
+cutibacterium_acnes	GCF_000008345.1
+staphylococcus_epidermidis	GCF_006094375.1
+
+# IV. Nasal-biopsy-associated background and local pathogens
+# These entries are useful for nasal mucosa, olfactory epithelium, sinus tissue, and transnasal sampling routes.
+
+## Nasal and skin-associated bacteria
+staphylococcus_hominis	GCF_003812505.1
+staphylococcus_capitis	GCF_040739495.1
+dolosigranulum_pigrum	GCF_000245815.1
+corynebacterium_accolens	GCF_023520795.1
+corynebacterium_pseudodiphtheriticum	GCF_023509295.1
+corynebacterium_propinquum	GCF_016728665.1
+moraxella_catarrhalis	GCF_900476075.1
+micrococcus_luteus	GCF_900475555.1
+
+## Nasal, skin-associated, and inhaled fungal background
+alternaria_alternata	GCF_001642055.1
+malassezia_restricta	GCF_003290485.1
+malassezia_globosa	GCF_000181695.2
+aspergillus_flavus	GCF_009017415.1
+aspergillus_niger	GCF_000002855.4
+penicillium_rubens	GCF_028828025.1
+cladosporium_sphaerospermum	GCA_023621355.1
+
+## Sinonasal invasive or opportunistic fungi
+rhizopus_arrhizus	GCA_048164915.1
+mucor_circinelloides	GCA_051295215.1
+lichtheimia_corymbifera	GCA_000697475.1
+fusarium_solani	GCF_023522795.1
+fusarium_oxysporum	GCF_013085055.1
+scedosporium_apiospermum	GCF_000732125.1
+
+## Sinonasal and oral anaerobic background
+prevotella_melaninogenica	GCF_000144405.1
+fusobacterium_nucleatum	GCF_003019295.1
+veillonella_parvula	GCF_900186885.1
+finegoldia_magna	GCF_002243135.1
+anaerococcus_prevotii	GCF_000024105.1
+peptoniphilus_harei	GCF_016726485.1
+porphyromonas_gingivalis	GCF_000010505.1
+
+## Nasal and respiratory viruses
+rhinovirus_a	GCF_002816835.1
+rhinovirus_b14	GCF_000861265.1
+rhinovirus_c	GCF_000872325.1
+respiratory_syncytial_virus_a	GCF_000856445.1
+respiratory_syncytial_virus_b	GCA_003267885.1
+influenza_b	GCF_000820495.2
+coronavirus_229e	GCF_000853505.1
+coronavirus_nl63	GCF_000853865.1
+coronavirus_oc43	GCF_003972325.1
+coronavirus_hku1	GCF_002816235.1
+metapneumovirus	GCF_002815375.1
+hpiv1	GCF_000848705.1
+hpiv2	GCF_000863525.1
+hpiv3	GCF_000850205.1
+hpiv4a	GCF_000910675.1
+HAdV_C	GCF_000845085.1
+sars_cov_2_wuhan_hu_1	GCF_009858895.2
+
+# V. Laboratory and environmental contamination sentinels
+# These entries represent cell-culture, reagent, water, and general laboratory background.
+
+## Cell-culture mycoplasma and acholeplasma sentinels
+mesomycoplasma_hyorhinis	GCF_001705605.1
+metamycoplasma_orale	GCF_000420105.1
+metamycoplasma_salivarium	GCF_900660445.2
+mycoplasmopsis_arginini	GCF_001547975.1
+mycoplasmopsis_fermentans	GCF_000209735.1
+metamycoplasma_hominis	GCF_000935865.1
+acholeplasma_laidlawii	GCF_000018785.1
+mycoplasmoides_pirum	GCF_000685905.1
+mycoplasma_bovis	GCF_000183385.1
+
+## Reagent, water, and environmental bacterial sentinels
+delftia_acidovorans	GCF_000018665.1
+bradyrhizobium_diazoefficiens	GCF_000011365.1
+bradyrhizobium_japonicum	GCF_013752735.1
+cupriavidus_metallidurans	GCF_000196015.1
+cupriavidus_necator	GCF_000009285.1
+ralstonia_pickettii	GCF_014142625.1
+ralstonia_insidiosa	GCF_001663855.1
+ralstonia_pseudosolanacearum	GCF_000009125.1
+sphingomonas_paucimobilis	GCF_016027095.1
+methylorubrum_extorquens	GCF_000083545.1
+stenotrophomonas_maltophilia	GCF_020641395.2
+burkholderia_cepacia	GCF_009586235.1
+
+## General laboratory fungal and yeast sentinels
+saccharomyces_cerevisiae	GCF_000146045.2
+
+# VI. Computational decoy controls
+# These are natural-organism decoys rather than logically absolute negatives.
+
+## Bacterial decoys
+aquifex_aeolicus_vf5	GCF_000008625.1
+thermus_thermophilus_hb8	GCF_000091545.1
+deinococcus_radiodurans	GCF_020546685.1
+
+## Fungal decoys
+mycosarcoma_maydis	GCF_000328475.2
+schizosaccharomyces_pombe	GCF_000002945.2
+
+## Protist decoys
+tetrahymena_thermophila	GCF_000189635.1
+paramecium_tetraurelia	GCF_000165425.1
