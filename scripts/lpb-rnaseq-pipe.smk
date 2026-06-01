@@ -361,6 +361,7 @@ rule all:
         # QC: per-sample Picard CollectRnaSeqMetrics + cohort summary table
         # expand("/tmp/data/04_qc/{sample}/{sample}.rnaseq_metrics.txt", sample=samples),
         "/tmp/data/04_qc/00_qc_summary.tsv",
+        "/tmp/data/05_contamination/00_contamination_summary.tsv",
         # Optional HLA class I typing (only if the arcasHLA reference is present;
         # see ARCASHLA_ENABLED gating above).
         *(["/tmp/data/06_hla/00_hla_summary.tsv"] if ARCASHLA_ENABLED else []),
@@ -1374,6 +1375,119 @@ if CONTAMINATION_ENABLED:
                     }}
                 '
             """
+rule r05e_contamination_summary:
+        """
+        Aggregate per-sample contamination counts into a single wide
+        TSV (one row per sample, one column per species). Independent
+        of r04d_qc_summary: no Input_reads percentages, no flags, no
+        Picard merging - just the raw per-species alignment counts
+        from r05d for inspection or downstream analysis.
+
+        Columns:
+          - sample
+          - total_unmapped_in_star_bam        (reads unmapped in host BAM)
+          - total_mapped_to_contamination     (reads aligned to contam ref;
+                                               note multi-mappers are counted
+                                               once per matched sequence in
+                                               the per-species columns below,
+                                               so sum(species_*) >= this)
+          - one column per species_id from the seqname map, holding the
+            "alignments supporting this species" count from r05d (see
+            r05d docstring for multi-mapping semantics)
+
+        Species columns are sorted alphabetically by species_id so column
+        order is stable across runs and consistent with r04d_qc_summary.
+        Samples for which r05d produced no output (e.g., because the rule
+        failed or was skipped) appear with blank species cells; a warning
+        is logged so the omission is visible.
+        """
+        input:
+            counts = expand(
+                "/tmp/data/05_contamination/{sample}/{sample}.contamination_counts.tsv",
+                sample=samples,
+            ),
+            species_map = CONTAM_SEQNAMES,
+        output:
+            tsv = "/tmp/data/05_contamination/00_contamination_summary.tsv",
+        run:
+            # Build the master species list from the seqname map (first
+            # column = species_id). Sort for column-order stability.
+            species_set = set()
+            with open(input.species_map) as f:
+                next(f)  # skip header (species_id<TAB>seqname)
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) == 2:
+                        species_set.add(parts[0])
+            species_sorted = sorted(species_set)
+
+            cols = (
+                ["sample",
+                 "total_unmapped_in_star_bam",
+                 "total_mapped_to_contamination"]
+                + species_sorted
+            )
+
+            # Parse each per-sample contamination_counts.tsv. Long-form key/value
+            # format (one "metric<TAB>value" per row). The "unknown" bucket
+            # (species not in the seqname map) is folded into a column named
+            # "unknown" so it doesn't silently disappear; emit only if present.
+            n_rows_written = 0
+            saw_unknown = False
+            with open(output.tsv, "w") as fout:
+                # Header (with "unknown" appended last if any sample has it)
+                # We do a 2-pass: first scan all files to decide if "unknown" is
+                # ever non-zero, then write.
+                parsed = {}
+                for path in input.counts:
+                    data = {}
+                    with open(path) as fh:
+                        next(fh)  # skip header (metric<TAB>value)
+                        for line in fh:
+                            parts = line.rstrip("\n").split("\t", 1)
+                            if len(parts) == 2:
+                                data[parts[0]] = parts[1]
+                    sample = data.get("sample", "")
+                    if not sample:
+                        print(f"[contam summary] WARN: no sample id in {path}, skipping",
+                              file=sys.stderr)
+                        continue
+                    parsed[sample] = data
+                    if int(data.get("species:unknown", 0) or 0) > 0:
+                        saw_unknown = True
+
+                header = cols + (["unknown"] if saw_unknown else [])
+                fout.write("\t".join(header) + "\n")
+
+                # Emit rows in sample-list order so the summary matches the
+                # cohort ordering used elsewhere (rather than dict order).
+                for sample in samples:
+                    if sample not in parsed:
+                        print(f"[contam summary] WARN: no contamination counts "
+                              f"for sample {sample}; row will be blank",
+                              file=sys.stderr)
+                        row = [sample] + ["" for _ in cols[1:]]
+                        if saw_unknown:
+                            row.append("")
+                        fout.write("\t".join(row) + "\n")
+                        continue
+                    data = parsed[sample]
+                    row = [
+                        sample,
+                        data.get("total_unmapped_in_star_bam", "0"),
+                        data.get("total_mapped_to_contamination", "0"),
+                    ]
+                    for sp in species_sorted:
+                        row.append(data.get(f"species:{sp}", "0"))
+                    if saw_unknown:
+                        row.append(data.get("species:unknown", "0"))
+                    fout.write("\t".join(row) + "\n")
+                    n_rows_written += 1
+
+            print(f"[contam summary] wrote {output.tsv} -- "
+                  f"{n_rows_written} samples x {len(species_sorted)} species"
+                  f"{' (+ unknown bucket)' if saw_unknown else ''}",
+                  flush=True)
 
 rule r04d_qc_summary:
     """
