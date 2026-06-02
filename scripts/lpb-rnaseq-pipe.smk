@@ -26,17 +26,6 @@
 #       (STAR's gene-level counts, mergeable with GTEx V11 count matrix)
 #   - 03_bam_star/{sample}/{sample}.SJ.out.tab
 #       (splice junction file, used by FRASER)
-#
-# Differences from your previous pipeline:
-#   - STAR parameters now match GTEx V11 exactly (twopassMode, chim*, etc.)
-#   - Genome FASTA is the GTEx-specific one (no ALT/HLA/decoy contigs) - this
-#     matters because STAR auto-prefers ALT contigs when present, which would
-#     produce different alignments than GTEx
-#   - Reference annotation is GENCODE v47, not Ensembl 109
-#   - STAR index uses --sjdbOverhang appropriate for YOUR reads
-#   - Picard MarkDuplicates is run after sorting (GTEx pattern)
-#   - Salmon/HISAT2/contamination paths from your earlier pipeline are removed
-#     (this Snakefile is DROP-focused; keep the other one for general work)
 # =============================================================================
 
 import pandas as pd
@@ -53,7 +42,7 @@ import sys
 READ_LENGTH = 150   # <-- ADJUST TO ACTUAL READ LENGTH
 SJDB_OVERHANG = READ_LENGTH - 1
 
-# Sample table: same format as your previous pipeline, with
+# Sample table
 # columns: name, path, dataset1, dataset2, extension, include_in_analysis
 SAMPLE_FILE = "/tmp/data/00_additional_files/sample_data.txt"
 sample_data = pd.read_csv(SAMPLE_FILE, sep="\t")
@@ -131,9 +120,7 @@ BBMAP_CONTAINER = "docker://quay.io/biocontainers/bbmap:39.06--h92535d8_0"
 # spurious contamination hits regardless of alignment stringency.
 BEDTOOLS_CONTAINER = "docker://quay.io/biocontainers/bedtools:2.31.1--hf5e1c6e_2"
 
-# NCBI datasets CLI container, used by r05_prep_contamination_refs when
-# the user supplies species.txt and asks the pipeline to build the
-# contamination reference on the fly. Ships `datasets` and `unzip`.
+# NCBI datasets CLI container, used by r05_prep_contamination_refs
 # DATASETS_CONTAINER = "docker://quay.io/biocontainers/ncbi-datasets-cli:14.26.0"
 DATASETS_CONTAINER = "docker://biocontainers/ncbi-datasets-cli:16.22.1_cv1"
 
@@ -147,8 +134,7 @@ DATASETS_CONTAINER = "docker://biocontainers/ncbi-datasets-cli:16.22.1_cv1"
 #
 #   (B) ON-DEMAND: if (A)'s files are not all present but species.txt IS
 #       present, the pipeline downloads each species' genome+GTF from NCBI
-#       using the `datasets` CLI tool (mirroring the user-supplied
-#       download_species.sh pattern), concatenates the FASTAs into
+#       using the `datasets` CLI tool, concatenates the FASTAs into
 #       contamination.fa, the GTFs into contamination.gtf, and emits a
 #       gtf_seqnames.tsv that maps each FASTA seqname (NCBI accession) to
 #       a species_id of the form <name>_<assembly_accession>.
@@ -189,6 +175,75 @@ _have_species_list = (
     os.path.exists(CONTAM_SPECIES_LIST)
     and os.path.getsize(CONTAM_SPECIES_LIST) > 0
 )
+def _read_species_order(species_txt_path, seqname_map_path):
+    """
+    Return a list of species_id values in the canonical order they appear
+    in species.txt. If species.txt is not present (i.e., prebuilt mode
+    without the source list), fall back to deriving the ordering from the
+    seqname map -- which guarantees consistent column ordering even when
+    species.txt is unavailable, but reflects whatever order the seqname
+    map was emitted in.
+
+    species.txt parsing rules (matching r05_prep_contamination_reference):
+      - Tab-separated: <species_name><TAB><accession>
+      - Blank lines skipped
+      - Lines starting with '#' skipped (after optional leading whitespace)
+      - species_id = "<species_name>_<accession>", with whitespace in the
+        species name replaced by underscores (matching how the seqname-map
+        first column is constructed)
+      - First occurrence wins on duplicates
+    """
+    order = []
+    seen = set()
+
+    # Path A: species.txt is present -- use it as the canonical source
+    if species_txt_path and os.path.exists(species_txt_path) and os.path.getsize(species_txt_path) > 0:
+        with open(species_txt_path) as f:
+            for raw in f:
+                line = raw.rstrip("\r\n")
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("#"):
+                    continue
+                # Tab-split; tolerate stray whitespace around fields
+                parts = [p.strip() for p in line.split("\t")]
+                if len(parts) < 2:
+                    # Malformed row (no tab) -- skip silently; the autobuild
+                    # rule already errors on these and won't write the FASTA
+                    continue
+                species_name, accession = parts[0], parts[1]
+                if not species_name or not accession:
+                    continue
+                # Same sanitisation as the autobuild rule:
+                # collapse internal whitespace, '/' and '\\' to '_'
+                safe = species_name
+                for ch in (" ", "\t", "/", "\\"):
+                    safe = safe.replace(ch, "_")
+                # Collapse multiple underscores
+                while "__" in safe:
+                    safe = safe.replace("__", "_")
+                species_id = f"{safe}_{accession}"
+                if species_id not in seen:
+                    seen.add(species_id)
+                    order.append(species_id)
+        return order
+
+    # Path B: fallback -- read from the seqname map. Each species appears
+    # on multiple lines (one per contig); we keep the first occurrence to
+    # respect whatever order the autobuild rule emitted.
+    if seqname_map_path and os.path.exists(seqname_map_path):
+        with open(seqname_map_path) as f:
+            header_skipped = False
+            for raw in f:
+                if not header_skipped:
+                    header_skipped = True
+                    continue
+                parts = raw.rstrip("\n").split("\t")
+                if len(parts) == 2 and parts[0] and parts[0] not in seen:
+                    seen.add(parts[0])
+                    order.append(parts[0])
+    return order
 
 # CONTAMINATION_ENABLED can be forced on/off via the CONTAMINATION_ENABLED
 # environment variable. Set to "0"/"false"/"no"/"off" to force-disable (skip
@@ -209,8 +264,7 @@ else:
     CONTAMINATION_ENABLED = _prebuilt or _have_species_list
 
 # AUTOBUILD only makes sense when no prebuilt files exist AND we have a
-# species list to download from. Independent of the override (a force-on user
-# still needs species.txt to trigger autobuild).
+# species list to download from. Independent of the override.
 CONTAMINATION_AUTOBUILD = (not _prebuilt) and _have_species_list
 
 # Warn the user if a forced-on flag will produce broken downstream rules
@@ -336,7 +390,7 @@ else:
 
 
 def get_fastq_path(wildcards):
-    """Same logic as your existing get_fastq_path(): paired or single-end."""
+    """Same logic as existing get_fastq_path(): paired or single-end."""
     row = sample_data[sample_data.name == wildcards.sample].iloc[0]
     fwd = f"/tmp/data/{row['path']}/{row['dataset1']}.{row['extension']}"
     if str(row['dataset2']).strip().lower() == "nan":
@@ -777,8 +831,7 @@ rule r04c_picard_rnaseq_metrics:
 #   r05_prep_contamination_refs : (only when CONTAMINATION_AUTOBUILD)
 #       Downloads each species' genome+GTF from NCBI using `datasets` and
 #       concatenates them into contamination.fa / contamination.gtf /
-#       gtf_seqnames.tsv. Mirrors the structure of the user's
-#       download_species.sh helper.
+#       gtf_seqnames.tsv.
 #   r05a0_mask_conserved_regions: hard-mask rRNA/tRNA regions in
 #                                 contamination.fa using bedtools
 #                                 maskfasta. These regions cross-map to
@@ -1254,8 +1307,8 @@ if CONTAMINATION_ENABLED:
         cancel each other out at MAPQ filtering and ALL get
         undercounted.
 
-        Per-species attribution uses the user-supplied gtf_seqnames.tsv
-        (header: species_id<TAB>seqname). Reads whose accession is
+        Per-species attribution uses the user-supplied headers in gtf_seqnames.tsv
+        (species_id<TAB>seqname). Reads whose accession is
         absent from the map are bucketed into 'unknown' rather than
         dropped, so additions to the FASTA without matching seqname-map
         entries are still counted and visibly attributed.
@@ -1834,7 +1887,7 @@ rule r04d_qc_summary:
 #     --singularity-args "--bind /mnt/data/rnaseq:/tmp/data ... \
 #       --bind /mnt/data/rnaseq/rnaseq-drop/00_additional_files/arcashla_ref/dat:/usr/local/share/arcas-hla-0.6.0-2/dat"
 #
-# (Adjust the outer bind to whatever maps your data root to /tmp/data.) The
+# (Adjust the outer bind to whatever maps data root to /tmp/data.) The
 # installer script prints the exact line for this machine.
 #
 # arcasHLA CLI quirks baked into these rules (learned the hard way):
@@ -2111,11 +2164,9 @@ if ARCASHLA_ENABLED:
 #    This file is on Google Cloud Storage:
 #      gsutil cp gs://gtex-resources/references/Homo_sapiens_assembly38_noALT_noHLA_noDecoy.fasta \
 #                /tmp/data/00_additional_files/gtex_v11_refs/
-#    (gsutil is from the gcloud SDK; alternatively use rclone or the public
-#    URL if you don't have a GCP account.)
+#    (gsutil is from the gcloud SDK)
 #
-#    If you cannot use gsutil, the same FASTA is served by the Broad's TOPMed
-#    public bucket:
+#    The same FASTA is served by the Broad's TOPMed public bucket:
 #      wget https://storage.googleapis.com/gtex-resources/references/Homo_sapiens_assembly38_noALT_noHLA_noDecoy.fasta
 #
 # 2. GENCODE v47 GTF
