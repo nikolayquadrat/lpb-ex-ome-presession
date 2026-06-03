@@ -24,8 +24,6 @@
 #       (transcriptome-coordinate BAM, for downstream RSEM if desired)
 #   - 03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab
 #       (STAR's gene-level counts, mergeable with GTEx V11 count matrix)
-#   - 03_bam_star/{sample}/{sample}.SJ.out.tab
-#       (splice junction file, used by FRASER)
 # =============================================================================
 
 import pandas as pd
@@ -296,6 +294,13 @@ else:
           f"{CONTAM_DIR}, or unset CONTAMINATION_ENABLED if it is forced off)",
           file=sys.stderr)
 
+# Typical aligned read length (bp), used by r05f_contamination_uniformity
+# in the Lander-Waterman expected-breadth formula. RNA-seq read lengths
+# typically range 75-150 bp; the uniformity ratio is robust to +/-20%
+# error so 75 is a reasonable default. Override here if your data is
+# very different (e.g., long-read sequencing).
+CONTAM_READ_LENGTH = 150
+
 # -----------------------------------------------------------------------------
 # Optional HLA class I typing with arcasHLA
 # -----------------------------------------------------------------------------
@@ -415,7 +420,22 @@ rule all:
         # QC: per-sample Picard CollectRnaSeqMetrics + cohort summary table
         # expand("/tmp/data/04_qc/{sample}/{sample}.rnaseq_metrics.txt", sample=samples),
         "/tmp/data/04_qc/00_qc_summary.tsv",
-        "/tmp/data/05_contamination/00_contamination_summary.tsv",
+        # Optional standalone contamination summary (wide TSV, one row per
+        # sample, one column per species in species.txt order). Independent
+        # of the QC summary -- same data but no percentages, flags, or
+        # Picard merging. Gated on CONTAMINATION_ENABLED.
+        *(["/tmp/data/05_contamination/00_contamination_summary.tsv"]
+          if CONTAMINATION_ENABLED else []),
+        # Optional per-species coverage uniformity (breadth-of-coverage,
+        # fraction 0-1 of genome covered by >=1 read). Distinguishes real
+        # presence (high read count + high uniformity) from off-target
+        # alignment artifacts (high read count + low uniformity).
+        *(["/tmp/data/05_contamination/00_contamination_uniformity.tsv"]
+          if CONTAMINATION_ENABLED else []),
+        # Optional per-species read fractions (of the post-entropy-filter
+        # read pool fed to bwa-mem2). Same wide format as the summary.
+        *(["/tmp/data/05_contamination/00_contamination_fractions.tsv"]
+          if CONTAMINATION_ENABLED else []),
         # Optional HLA class I typing (only if the arcasHLA reference is present;
         # see ARCASHLA_ENABLED gating above).
         *(["/tmp/data/06_hla/00_hla_summary.tsv"] if ARCASHLA_ENABLED else []),
@@ -1307,8 +1327,8 @@ if CONTAMINATION_ENABLED:
         cancel each other out at MAPQ filtering and ALL get
         undercounted.
 
-        Per-species attribution uses the user-supplied headers in gtf_seqnames.tsv
-        (species_id<TAB>seqname). Reads whose accession is
+        Per-species attribution uses the user-supplied gtf_seqnames.tsv
+        (header: species_id<TAB>seqname). Reads whose accession is
         absent from the map are bucketed into 'unknown' rather than
         dropped, so additions to the FASTA without matching seqname-map
         entries are still counted and visibly attributed.
@@ -1320,6 +1340,7 @@ if CONTAMINATION_ENABLED:
             species_map = CONTAM_SEQNAMES,
         output:
             counts = "/tmp/data/05_contamination/{sample}/{sample}.contamination_counts.tsv",
+            breadth = "/tmp/data/05_contamination/{sample}/{sample}.contamination_breadth.tsv",
             bam = temp("/tmp/data/05_contamination/{sample}/{sample}.contamination.bam"),
         threads: 4
         singularity: BWA_CONTAINER
@@ -1328,15 +1349,27 @@ if CONTAMINATION_ENABLED:
             set -euo pipefail
             OUTDIR=$(dirname {output.counts})
             mkdir -p "$OUTDIR"
+            echo "$OUTDIR"
 
             INDEX_FA=$(dirname {input.index_done})/contamination.fa
+
+            # Count post-entropy-filter reads (the read pool that actually
+            # entered bwa-mem2). This is the right denominator for "fraction
+            # of attempted reads attributed to each species" in r05g. We
+            # count the input FASTQ directly because samtools view -c on the
+            # output BAM counts ALIGNMENT records, not reads (a read with
+            # supplementary alignments would be counted more than once).
+            # 4 lines per FASTQ record -> divide by 4. zcat is fine since
+            # the entropy filter always emits gzip-compressed output.
+
+            TOTAL_READS_ALIGNED=$(zcat {input.fq} | awk 'END {{print int(NR/4)}}')
 
             # bwa-mem2 with -p reads interleaved paired-end from stdin
             # (matches bbduk's int=t output and samtools fastq -N).
             # Works correctly for SE input too since singletons stream
             # through the same path. -h 50 raises the XA-tag alternative
             # cap from 5 to 50 so all tied-best multi-mappers are kept.
-            
+
             zcat {input.fq} \
                 | bwa-mem2 mem -t {threads} -p -T 95 -k 35 -r 2.0 -B 6 -O 8 -L 10 -h 50 \
                       "$INDEX_FA" - 2>/dev/null \
@@ -1352,6 +1385,28 @@ if CONTAMINATION_ENABLED:
             TOTAL_UNMAPPED=$(samtools view -c -f 4 -F 256 {input.bam})
             TOTAL_MAPPED=$(samtools view -c -F 260 {output.bam})
 
+            # Per-contig coverage breadth via samtools coverage. The
+            # 'coverage' column is the percentage of contig bases with
+            # >=1 read, i.e. the breadth of coverage. r05f aggregates
+            # this across contigs of the same species (weighted by
+            # contig length) into a per-species uniformity score.
+            # Note: samtools coverage needs a sorted+indexed BAM. We
+            # sort to a side-temp BAM rather than the rule's main BAM
+            # (the main BAM is consumed unsorted by the awk pipeline
+            # above; sorting it in place would invalidate the layout
+            # other tools may expect from a contamination BAM).
+
+            TMP_SORT_DIR=$(mktemp -d "$OUTDIR/sorted.XXXXXX")
+            SORTED_BAM="$TMP_SORT_DIR/sorted.bam"
+            trap 'rm -rf -- "${{TMP_SORT_DIR:-}}"' EXIT INT TERM
+            samtools sort -@ {threads} -o "$SORTED_BAM" {output.bam:q}
+            samtools index "$SORTED_BAM"
+
+            # Header line begins with '#rname'. samtools coverage emits
+            # one row per reference contig.
+
+            samtools coverage "$SORTED_BAM" > {output.breadth}
+
             # Per-species counts via samtools view + awk join on the
             # gtf_seqnames.tsv map. The awk parses both the primary
             # alignment reference (column 3) AND the XA tag (when
@@ -1363,6 +1418,7 @@ if CONTAMINATION_ENABLED:
                       -v sample="{wildcards.sample}" \
                       -v total_unmapped="$TOTAL_UNMAPPED" \
                       -v total_mapped="$TOTAL_MAPPED" \
+                      -v total_reads_aligned="$TOTAL_READS_ALIGNED" \
                       -v out_counts="{output.counts}" '
                     BEGIN {{
                         OFS="\t"
@@ -1410,6 +1466,7 @@ if CONTAMINATION_ENABLED:
                         print "metric", "value" > out_counts
                         print "sample", sample > out_counts
                         print "total_unmapped_in_star_bam", total_unmapped > out_counts
+                        print "total_reads_aligned", total_reads_aligned > out_counts
                         print "total_mapped_to_contamination", total_mapped > out_counts
                         # emit a deterministic order of species rows
                         n = 0
@@ -1428,33 +1485,362 @@ if CONTAMINATION_ENABLED:
                     }}
                 '
             """
-rule r05e_contamination_summary:
+
+    rule r05e_contamination_summary:
+            """
+            Aggregate per-sample contamination counts into a single wide TSV
+            (one row per sample, one column per species). Independent of
+            r04d_qc_summary: no Input_reads percentages, no flags, no Picard
+            merging -- just the raw per-species alignment counts from r05d
+            for inspection or downstream analysis.
+
+            Column order matches the species.txt source file (with comments
+            and blank lines stripped), preserving the user's intended
+            ordering. When species.txt is not present (prebuilt-only mode),
+            falls back to first-occurrence order in the seqname map.
+
+            Columns:
+            - sample
+            - total_unmapped_in_star_bam        (reads unmapped in host BAM)
+            - total_mapped_to_contamination     (reads aligned to contam ref;
+                                                note multi-mappers are
+                                                counted once per matched
+                                                sequence in the per-species
+                                                columns below, so
+                                                sum(species_*) >= this)
+            - one column per species_id, in species.txt order, holding the
+                "alignments supporting this species" count from r05d (see
+                r05d docstring for multi-mapping semantics)
+            - "unknown" column appended at the end IF any sample has reads
+                attributed to the unknown bucket (contig not in seqname map)
+            """
+            input:
+                counts = expand(
+                    "/tmp/data/05_contamination/{sample}/{sample}.contamination_counts.tsv",
+                    sample=samples,
+                ),
+                species_map = CONTAM_SEQNAMES,
+            output:
+                tsv = "/tmp/data/05_contamination/00_contamination_summary.tsv",
+            run:
+                # Canonical species ordering from species.txt (or seqname map
+                # fallback). Helper handles blank lines, comments, whitespace
+                # sanitisation -- see _read_species_order() definition near
+                # the top of this file.
+                species_order = _read_species_order(
+                    CONTAM_SPECIES_LIST,
+                    input.species_map,
+                )
+                # Catch species in the seqname map that aren't in species.txt
+                # (post-build edits to the map). Append at end, alphabetically,
+                # so they're visible rather than silently dropped.
+                in_order = set(species_order)
+                extras = set()
+                with open(input.species_map) as f:
+                    next(f)
+                    for line in f:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) == 2 and parts[0] and parts[0] not in in_order:
+                            extras.add(parts[0])
+                if extras:
+                    print(f"[contam summary] WARN: {len(extras)} species_ids in "
+                        f"seqname map but not in species.txt; appending at end: "
+                        f"{sorted(extras)[:5]}...", file=sys.stderr)
+                    species_order = species_order + sorted(extras)
+
+                base_cols = [
+                    "sample",
+                    "total_unmapped_in_star_bam",
+                    "total_mapped_to_contamination",
+                ]
+
+                # Two-pass: scan all files to (a) parse counts and (b) detect
+                # whether any sample has an "unknown" bucket, so we only emit
+                # that column when relevant.
+                parsed = {}
+                saw_unknown = False
+                for path in input.counts:
+                    data = {}
+                    with open(path) as fh:
+                        next(fh)  # header (metric<TAB>value)
+                        for line in fh:
+                            parts = line.rstrip("\n").split("\t", 1)
+                            if len(parts) == 2:
+                                data[parts[0]] = parts[1]
+                    sample = data.get("sample", "")
+                    if not sample:
+                        print(f"[contam summary] WARN: no sample id in {path}, skipping",
+                            file=sys.stderr)
+                        continue
+                    parsed[sample] = data
+                    try:
+                        if int(data.get("species:unknown", "0") or 0) > 0:
+                            saw_unknown = True
+                    except ValueError:
+                        pass
+
+                with open(output.tsv, "w") as fout:
+                    header = base_cols + species_order + (["unknown"] if saw_unknown else [])
+                    fout.write("\t".join(header) + "\n")
+
+                    n_rows_written = 0
+                    # Emit rows in cohort sample-list order (consistent with
+                    # other summary tables) rather than file-discovery order.
+                    for sample in samples:
+                        if sample not in parsed:
+                            print(f"[contam summary] WARN: no contamination counts "
+                                f"for sample {sample}; row will be blank",
+                                file=sys.stderr)
+                            row = [sample] + ["" for _ in header[1:]]
+                            fout.write("\t".join(row) + "\n")
+                            continue
+                        data = parsed[sample]
+                        row = [
+                            sample,
+                            data.get("total_unmapped_in_star_bam", "0"),
+                            data.get("total_mapped_to_contamination", "0"),
+                        ]
+                        for sp in species_order:
+                            row.append(data.get(f"species:{sp}", "0"))
+                        if saw_unknown:
+                            row.append(data.get("species:unknown", "0"))
+                        fout.write("\t".join(row) + "\n")
+                        n_rows_written += 1
+
+                print(f"[contam summary] wrote {output.tsv} -- "
+                    f"{n_rows_written} samples x {len(species_order)} species"
+                    f"{' (+ unknown bucket)' if saw_unknown else ''}",
+                    flush=True)
+
+    rule r05f_contamination_uniformity:
         """
-        Aggregate per-sample contamination counts into a single wide TSV
-        (one row per sample, one column per species). Independent of
-        r04d_qc_summary: no Input_reads percentages, no flags, no Picard
-        merging -- just the raw per-species alignment counts from r05d
-        for inspection or downstream analysis.
+        Aggregate per-sample coverage data into a per-species uniformity
+        ratio. One row per sample, one column per species in species.txt
+        order.
 
-        Column order matches the species.txt source file (with comments
-        and blank lines stripped), preserving the user's intended
-        ordering. When species.txt is not present (prebuilt-only mode),
-        falls back to first-occurrence order in the seqname map.
+        SCORE: Lander-Waterman uniformity ratio
+        ---------------------------------------
+        For each (sample, species), the score is:
 
-        Columns:
-          - sample
-          - total_unmapped_in_star_bam        (reads unmapped in host BAM)
-          - total_mapped_to_contamination     (reads aligned to contam ref;
-                                               note multi-mappers are
-                                               counted once per matched
-                                               sequence in the per-species
-                                               columns below, so
-                                               sum(species_*) >= this)
-          - one column per species_id, in species.txt order, holding the
-            "alignments supporting this species" count from r05d (see
-            r05d docstring for multi-mapping semantics)
-          - "unknown" column appended at the end IF any sample has reads
-            attributed to the unknown bucket (contig not in seqname map)
+            rho_s = B_observed / E[B]_uniform
+
+        where
+          - B_observed  = sum(covbases) across the species's contigs
+                          (bases of the species's genome covered by >=1 read)
+          - E[B]_uniform = L * (1 - exp(-N*r/L))
+            is the expected covered bases under random uniform placement
+            of N reads of length r on L bases of genome
+          - N            = total read count across the species's contigs
+          - L            = sum of contig lengths for the species
+          - r            = typical read length (CONTAM_READ_LENGTH, default 75)
+
+        Interpretation
+        --------------
+          - rho ~ 1.0  : reads are placed about as uniformly as random
+                         placement would predict (consistent with reads
+                         genuinely originating from many loci across the
+                         organism's genome)
+          - rho ~ 0    : reads are heavily clustered relative to uniform
+                         expectation (consistent with off-target alignment
+                         to a few conserved loci, OR with biology that
+                         legitimately concentrates reads, e.g., bradyzoite
+                         stage of latent Toxoplasma where only a subset
+                         of genes is expressed)
+          - rho > 1    : observed breadth exceeds uniform expectation;
+                         can happen due to read-length under-estimation
+                         or under-dispersion of reads. Values slightly
+                         above 1 are normal; values much above 1 suggest
+                         the CONTAM_READ_LENGTH constant is too low for
+                         this dataset
+          - empty cell : no reads aligned to this species in this sample
+
+        Key advantage over raw breadth (covbases/L)
+        -------------------------------------------
+        Raw breadth is bounded above by N*r/L, which is tiny for large
+        genomes at low read counts. So real and spurious alignments give
+        similar tiny breadth values when N*r << L (e.g., 10000 reads on
+        a 65 Mb Toxoplasma genome gives raw breadth ~0.01 even at perfect
+        uniformity). The ratio rho factors out N and L, making the score
+        comparable across species of vastly different genome sizes and
+        across samples with vastly different read counts.
+
+        Caveats
+        -------
+          - r is approximated by CONTAM_READ_LENGTH = 75 (configurable at
+            the top of this file). Robust to ~20% error.
+          - At very low N (say N < 10), the expectation is small and
+            noisy; rho can swing wildly between samples. The "raw
+            breadth" was also unreliable in this regime. Read this
+            score alongside the read-count from r05e.
+          - rho measures spatial uniformity, not biological reality. A
+            real organism in a developmental stage with restricted
+            expression (e.g., bradyzoite tissue cysts) will give LOW rho
+            even when present. Combine with the fraction-vs-controls
+            analysis (r05g + cell-line controls) for a complete picture.
+
+        Reference: Lander & Waterman, Genomics 1988 (original derivation
+        of expected coverage for random shotgun sequencing).
+        """
+        input:
+            breadth = expand(
+                "/tmp/data/05_contamination/{sample}/{sample}.contamination_breadth.tsv",
+                sample=samples,
+            ),
+            species_map = CONTAM_SEQNAMES,
+        output:
+            tsv = "/tmp/data/05_contamination/00_contamination_uniformity.tsv",
+        run:
+            import math
+
+            # Canonical species ordering from species.txt (or seqname map
+            # fallback). Same helper r05e uses.
+            species_order = _read_species_order(
+                CONTAM_SPECIES_LIST,
+                input.species_map,
+            )
+            # Append any species_ids in the seqname map that aren't in
+            # species.txt (post-build edits) at end, alphabetically.
+            in_order = set(species_order)
+            extras = set()
+            seqname_to_species = {}
+            with open(input.species_map) as f:
+                next(f)  # header
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) == 2 and parts[0]:
+                        seqname_to_species[parts[1]] = parts[0]
+                        if parts[0] not in in_order:
+                            extras.add(parts[0])
+            if extras:
+                print(f"[contam uniformity] WARN: {len(extras)} species_ids "
+                      f"in seqname map but not in species.txt; appending at end: "
+                      f"{sorted(extras)[:5]}...", file=sys.stderr)
+                species_order = species_order + sorted(extras)
+
+            # Parse each per-sample breadth file (samtools coverage output).
+            # Columns from samtools coverage:
+            #   1: #rname (contig)
+            #   2: startpos
+            #   3: endpos
+            #   4: numreads
+            #   5: covbases  (bases covered by >=1 read)
+            #   6: coverage  (covbases / contig_length * 100, percentage)
+            #   7-9: meandepth, meanbaseq, meanmapq
+            #
+            # We aggregate per (sample, species):
+            #   N_s = sum(numreads), L_s = sum(contig_length), B_s = sum(covbases)
+            r = CONTAM_READ_LENGTH
+
+            def lw_ratio(B_obs, N, L, r=r):
+                """
+                Lander-Waterman uniformity ratio.
+                E[B]_uniform = L * (1 - exp(-N*r/L))
+                For very small expected B (i.e., N*r/L approx 0), returns
+                None to signal "undefined" rather than a noisy ratio.
+                """
+                if N <= 0 or L <= 0:
+                    return None
+                lam = (N * r) / L  # mean coverage in reads-per-base
+                E_B = L * (1.0 - math.exp(-lam))
+                if E_B <= 0:
+                    return None
+                return B_obs / E_B
+
+            parsed = {}  # sample -> {species_id -> (B_obs, N, L)}
+            for path in input.breadth:
+                sample = os.path.basename(path).replace(".contamination_breadth.tsv", "")
+                per_species = {}  # species_id -> [B_obs, N, L]
+                with open(path) as fh:
+                    header = fh.readline()
+                    if not header.startswith("#"):
+                        parsed[sample] = {}
+                        continue
+                    for line in fh:
+                        parts = line.rstrip("\n").split("\t")
+                        if len(parts) < 6:
+                            continue
+                        rname = parts[0]
+                        try:
+                            startpos_i = int(parts[1])
+                            endpos_i = int(parts[2])
+                            numreads = int(parts[3])
+                            covbases = int(parts[4])
+                        except ValueError:
+                            continue
+                        contig_len = endpos_i - startpos_i + 1
+                        species = seqname_to_species.get(rname, "unknown")
+                        if species not in per_species:
+                            per_species[species] = [0, 0, 0]  # B, N, L
+                        per_species[species][0] += covbases
+                        per_species[species][1] += numreads
+                        per_species[species][2] += contig_len
+                parsed[sample] = per_species
+
+            # Decide whether to emit an "unknown" column
+            saw_unknown = any(
+                "unknown" in d and d["unknown"][1] > 0
+                for d in parsed.values()
+            )
+
+            with open(output.tsv, "w") as fout:
+                header_cols = ["sample"] + species_order + (["unknown"] if saw_unknown else [])
+                fout.write("\t".join(header_cols) + "\n")
+                for sample in samples:
+                    if sample not in parsed:
+                        print(f"[contam uniformity] WARN: no breadth file "
+                              f"for sample {sample}; row will be blank",
+                              file=sys.stderr)
+                        row = [sample] + ["" for _ in header_cols[1:]]
+                        fout.write("\t".join(row) + "\n")
+                        continue
+                    d = parsed[sample]
+                    row = [sample]
+                    for sp in species_order:
+                        if sp in d:
+                            B, N, L = d[sp]
+                            rho = lw_ratio(B, N, L)
+                            row.append(f"{rho:.4f}" if rho is not None else "")
+                        else:
+                            row.append("")
+                    if saw_unknown:
+                        if "unknown" in d:
+                            B, N, L = d["unknown"]
+                            rho = lw_ratio(B, N, L)
+                            row.append(f"{rho:.4f}" if rho is not None else "")
+                        else:
+                            row.append("")
+                    fout.write("\t".join(row) + "\n")
+
+            print(f"[contam uniformity] wrote {output.tsv} -- "
+                  f"{len(samples)} samples x {len(species_order)} species "
+                  f"(read length assumed {r} bp)"
+                  f"{' (+ unknown bucket)' if saw_unknown else ''}",
+                  flush=True)
+
+
+    rule r05g_contamination_fractions:
+        """
+        Aggregate per-sample contamination counts as FRACTIONS of the
+        post-entropy-filter read pool (i.e., the reads that actually
+        entered bwa-mem2). Wide TSV with the same species column order
+        as r05e/r05f.
+
+        Denominator: total_reads_aligned (the post-entropy-filter
+        FASTQ read count, tracked per sample by r05d). This is the
+        correct denominator for "of the reads we tried to attribute,
+        what fraction landed in each species" -- it accounts for
+        entropy-filter dropouts (low-complexity reads removed before
+        alignment) so the fractions sum to <= the total fraction of
+        reads attributed to ANY contaminant.
+
+        Because multi-mapping reads are counted once per matched
+        species (r05d's XA-tag-aware counting), the sum of per-species
+        fractions can exceed total_mapped_to_contamination / total_reads_aligned.
+        That's by design -- a read with same-best alignments to N species
+        contributes 1 to each species's numerator.
+
+        Values are emitted as plain decimal fractions (e.g., 0.0123 for
+        1.23 percent). Multiply by 100 downstream for percentage display.
         """
         input:
             counts = expand(
@@ -1463,19 +1849,12 @@ rule r05e_contamination_summary:
             ),
             species_map = CONTAM_SEQNAMES,
         output:
-            tsv = "/tmp/data/05_contamination/00_contamination_summary.tsv",
+            tsv = "/tmp/data/05_contamination/00_contamination_fractions.tsv",
         run:
-            # Canonical species ordering from species.txt (or seqname map
-            # fallback). Helper handles blank lines, comments, whitespace
-            # sanitisation -- see _read_species_order() definition near
-            # the top of this file.
             species_order = _read_species_order(
                 CONTAM_SPECIES_LIST,
                 input.species_map,
             )
-            # Catch species in the seqname map that aren't in species.txt
-            # (post-build edits to the map). Append at end, alphabetically,
-            # so they're visible rather than silently dropped.
             in_order = set(species_order)
             extras = set()
             with open(input.species_map) as f:
@@ -1485,34 +1864,25 @@ rule r05e_contamination_summary:
                     if len(parts) == 2 and parts[0] and parts[0] not in in_order:
                         extras.add(parts[0])
             if extras:
-                print(f"[contam summary] WARN: {len(extras)} species_ids in "
-                      f"seqname map but not in species.txt; appending at end: "
-                      f"{sorted(extras)[:5]}...", file=sys.stderr)
+                print(f"[contam fractions] WARN: {len(extras)} species_ids "
+                        f"in seqname map but not in species.txt; appending at end: "
+                        f"{sorted(extras)[:5]}...", file=sys.stderr)
                 species_order = species_order + sorted(extras)
 
-            base_cols = [
-                "sample",
-                "total_unmapped_in_star_bam",
-                "total_mapped_to_contamination",
-            ]
-
-            # Two-pass: scan all files to (a) parse counts and (b) detect
-            # whether any sample has an "unknown" bucket, so we only emit
-            # that column when relevant.
             parsed = {}
             saw_unknown = False
             for path in input.counts:
                 data = {}
                 with open(path) as fh:
-                    next(fh)  # header (metric<TAB>value)
+                    next(fh)  # header
                     for line in fh:
                         parts = line.rstrip("\n").split("\t", 1)
                         if len(parts) == 2:
                             data[parts[0]] = parts[1]
                 sample = data.get("sample", "")
                 if not sample:
-                    print(f"[contam summary] WARN: no sample id in {path}, skipping",
-                          file=sys.stderr)
+                    print(f"[contam fractions] WARN: no sample id in {path}, skipping",
+                            file=sys.stderr)
                     continue
                 parsed[sample] = data
                 try:
@@ -1522,38 +1892,56 @@ rule r05e_contamination_summary:
                     pass
 
             with open(output.tsv, "w") as fout:
-                header = base_cols + species_order + (["unknown"] if saw_unknown else [])
-                fout.write("\t".join(header) + "\n")
-
+                header_cols = (
+                    ["sample", "total_reads_aligned"]
+                    + species_order
+                    + (["unknown"] if saw_unknown else [])
+                )
+                fout.write("\t".join(header_cols) + "\n")
                 n_rows_written = 0
-                # Emit rows in cohort sample-list order (consistent with
-                # other summary tables) rather than file-discovery order.
                 for sample in samples:
                     if sample not in parsed:
-                        print(f"[contam summary] WARN: no contamination counts "
-                              f"for sample {sample}; row will be blank",
-                              file=sys.stderr)
-                        row = [sample] + ["" for _ in header[1:]]
+                        print(f"[contam fractions] WARN: no contamination counts "
+                                f"for sample {sample}; row will be blank",
+                                file=sys.stderr)
+                        row = [sample] + ["" for _ in header_cols[1:]]
                         fout.write("\t".join(row) + "\n")
                         continue
                     data = parsed[sample]
-                    row = [
-                        sample,
-                        data.get("total_unmapped_in_star_bam", "0"),
-                        data.get("total_mapped_to_contamination", "0"),
-                    ]
+                    try:
+                        denom = int(data.get("total_reads_aligned", "0") or 0)
+                    except ValueError:
+                        denom = 0
+                    if denom <= 0:
+                        # Avoid division by zero; emit blank fractions.
+                        print(f"[contam fractions] WARN: sample {sample} has "
+                                f"total_reads_aligned={denom}; fractions emitted as blank",
+                                file=sys.stderr)
+                        row = [sample, str(denom)] + ["" for _ in species_order]
+                        if saw_unknown:
+                            row.append("")
+                        fout.write("\t".join(row) + "\n")
+                        continue
+                    row = [sample, str(denom)]
                     for sp in species_order:
-                        row.append(data.get(f"species:{sp}", "0"))
+                        try:
+                            cnt = int(data.get(f"species:{sp}", "0") or 0)
+                        except ValueError:
+                            cnt = 0
+                        row.append(f"{cnt / denom:.6f}")
                     if saw_unknown:
-                        row.append(data.get("species:unknown", "0"))
+                        try:
+                            cnt = int(data.get("species:unknown", "0") or 0)
+                        except ValueError:
+                            cnt = 0
+                        row.append(f"{cnt / denom:.6f}")
                     fout.write("\t".join(row) + "\n")
                     n_rows_written += 1
 
-            print(f"[contam summary] wrote {output.tsv} -- "
-                  f"{n_rows_written} samples x {len(species_order)} species"
-                  f"{' (+ unknown bucket)' if saw_unknown else ''}",
-                  flush=True)
-
+            print(f"[contam fractions] wrote {output.tsv} -- "
+                    f"{n_rows_written} samples x {len(species_order)} species"
+                    f"{' (+ unknown bucket)' if saw_unknown else ''}",
+                    flush=True)
 
 rule r04d_qc_summary:
     """
