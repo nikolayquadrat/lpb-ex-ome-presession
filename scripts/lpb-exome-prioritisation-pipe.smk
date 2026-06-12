@@ -129,10 +129,7 @@ rule all:
         # "/tmp/qc/internal_artifact_sites.tsv",
         # "/tmp/qc/internal_artifact_count.txt",
         # (4) HLA class I typing with OptiType (best class I accuracy from
-        #     exome/DNA data, FASTQ input via razer3 prefilter). arcasHLA was
-        #     previously run here as a cross-check but is an RNA-seq tool and
-        #     produced systematically discordant calls on exome input; it has
-        #     been moved to the RNA-seq pipeline where it is used correctly.
+        #     exome/DNA data, FASTQ input via razer3 prefilter).
         expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv", sample=samples)
 
         # "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
@@ -307,13 +304,6 @@ rule r03_markduplicates_spark:
 #                 an integer-linear-program for the best allele combination
 #                 explaining the read evidence.
 #
-# NOTE: arcasHLA was previously run here as a second tool for concordance
-# checking, but arcasHLA is designed and validated for RNA-seq (its cDNA-based
-# pseudo-alignment reference is unsuitable for genomic capture reads). On exome
-# input it produced systematically discordant calls (recurrent implausible rare
-# alleles), so it has been removed from this pipeline and moved to the RNA-seq
-# pipeline, where it is used on its intended data type. OptiType (DNA mode) is
-# the definitive class I caller here.
 #
 # The trimmed FASTQs from r01 are temp(). Snakemake retains temp files while any
 # downstream rule still needs them, so this HLA rule consuming them keeps them
