@@ -128,6 +128,7 @@ rule all:
         # "/tmp/qc/representatives.log",
         # "/tmp/qc/internal_artifact_sites.tsv",
         # "/tmp/qc/internal_artifact_count.txt",
+        "/tmp/qc/inferred_sex.tsv",
         # (4) HLA class I typing with OptiType (best class I accuracy from
         #     exome/DNA data, FASTQ input via razer3 prefilter).
         expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv", sample=samples)
@@ -777,6 +778,55 @@ rule r09e_artifact_blacklist:
         rm -f /tmp/qc/_recurrent.vcf.gz /tmp/qc/_recurrent.vcf.gz.tbi \
               /tmp/qc/_recurrent_with_gnomad.vcf.gz /tmp/qc/_recurrent_with_gnomad.vcf.gz.tbi
         """
+
+rule r09f_sex_coverage_per_sample:
+    """Per-sample chrX/chrY/autosome mean depth over capture targets."""
+    input:
+        bam = "/tmp/fastq/04_bqsr/{sample}.recal.bam",
+        bai = "/tmp/fastq/04_bqsr/{sample}.recal.bai",
+        bed = capture_bed,
+    output:
+        tsv = "/tmp/qc/sex/{sample}.sex_depth.tsv",
+    threads: 2
+    singularity: "docker://quay.io/biocontainers/samtools:1.19.2--h50ea8bc_1"
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output.tsv})"
+        WORK=$(mktemp -d); trap 'rm -rf "${{WORK:-}}"' EXIT INT TERM
+
+        awk 'BEGIN{{OFS="\t"}} $1 ~ /^chr([1-9]|1[0-9]|2[0-2])$/ {{print $1,$2,$3}}' {input.bed} > "$WORK/auto.bed"
+        awk 'BEGIN{{OFS="\t"}} $1 == "chrX" {{print $1,$2,$3}}' {input.bed} > "$WORK/chrX.bed"
+        awk 'BEGIN{{OFS="\t"}} $1 == "chrY" {{print $1,$2,$3}}' {input.bed} > "$WORK/chrY.bed"
+
+        md() {{
+            [ -s "$2" ] || {{ echo 0; return; }}
+            samtools bedcov -Q 20 "$2" "$1" \
+                | awk '{{cov+=$NF; len+=($3-$2)}} END{{if(len>0) printf "%.6f",cov/len; else print 0}}'
+        }}
+        printf '%s\t%s\t%s\t%s\n' "{wildcards.sample}" "$(md {input.bam} $WORK/auto.bed)" \
+            "$(md {input.bam} $WORK/chrX.bed)" "$(md {input.bam} $WORK/chrY.bed)" > {output.tsv}
+        """
+
+rule r09g_infer_sex:
+    """Aggregate per-sample depths into the cohort sex-inference table."""
+    input:
+        depths = expand("/tmp/qc/sex/{sample}.sex_depth.tsv", sample=samples),
+    output:
+        tsv = "/tmp/qc/inferred_sex.tsv",
+    run:
+        with open(output.tsv, "w") as out:
+            out.write("sample\tmean_depth_auto\tmean_depth_chrX\tmean_depth_chrY\t"
+                      "x_ratio\ty_ratio\tinferred_sex\n")
+            for path in input.depths:
+                s, da, dx, dy = open(path).read().split()
+                da, dx, dy = float(da), float(dx), float(dy)
+                if da <= 0:
+                    out.write(f"{s}\t{da}\t{dx}\t{dy}\tNA\tNA\tambiguous\n"); continue
+                xr, yr = dx/da, dy/da
+                sex = "XX" if (xr >= 0.80 and yr < 0.15) else \
+                      "XY" if (xr < 0.65 and yr >= 0.15) else "ambiguous"
+                out.write(f"{s}\t{da}\t{dx}\t{dy}\t{xr:.4f}\t{yr:.4f}\t{sex}\n")
 
 # =============================================================================
 # Per-sample VCFs for DROP MAE

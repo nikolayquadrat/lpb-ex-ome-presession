@@ -105,13 +105,13 @@ flowchart LR
 	id24[r09d_pick_representatives]
 	id25[r09c_kinship_table]
 	id26[r09b_make_plink_bed]
-	id27[r03e_hla_summary]
-	id28[r03b_optitype]
-	id29[r03d_arcashla_genotype]
-	id30[r03c_arcashla_extract]
-	id1 --> id0
-	id21 --> id0
+	id27[r09g_infer_sex]
+	id28[r09f_sex_coverage_per_sample]
+	id29[r03b_optitype]
 	id27 --> id0
+	id21 --> id0
+	id1 --> id0
+	id29 --> id0
 	id2 --> id1
 	id3 --> id2
 	id19 --> id3
@@ -119,38 +119,36 @@ flowchart LR
 	id5 --> id4
 	id6 --> id5
 	id7 --> id6
-	id8 --> id7
 	id18 --> id7
+	id8 --> id7
 	id9 --> id8
 	id18 --> id8
-	id10 --> id9
 	id15 --> id9
+	id10 --> id9
 	id11 --> id10
 	id12 --> id11
 	id13 --> id12
 	id14 --> id12
-	id10 --> id15
+	id17 --> id15
 	id18 --> id15
 	id16 --> id15
-	id17 --> id15
+	id10 --> id15
 	id17 --> id18
 	id20 --> id19
 	id6 --> id20
-	id1 --> id21
-	id22 --> id21
 	id23 --> id21
+	id22 --> id21
+	id1 --> id21
 	id2 --> id22
-	id24 --> id23
 	id2 --> id23
-	id26 --> id24
+	id24 --> id23
 	id25 --> id24
+	id26 --> id24
 	id26 --> id25
 	id2 --> id26
 	id28 --> id27
-	id29 --> id27
-	id13 --> id28
-	id30 --> id29
-	id10 --> id30
+	id9 --> id28
+	id13 --> id29
 ```
 
 #### 1. Read processing and alignment
