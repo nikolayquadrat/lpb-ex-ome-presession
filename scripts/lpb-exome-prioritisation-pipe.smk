@@ -225,7 +225,8 @@ rule r01_fastp_trim:
         html    = "/tmp/fastq/01_fastp/{sample}.fastp.html",
         json    = "/tmp/fastq/01_fastp/{sample}.fastp.json",
     threads: 2
-    resources: disk_mb=10000+55000+10000+10000 # supposedly forces consecutive execution of these disk volume heavy rules
+    resources: disk_mb=10000+55000+10000+10000 
+    priority: 10
     singularity: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_2"
     shell:
         """
@@ -249,6 +250,7 @@ rule r02a_bwamem2_align:
         bam = temp("/tmp/fastq/02_bam/{sample}.unsorted.bam"),
     threads: 6
     resources: disk_mb=10000+55000+10000+10000
+    priority: 80
     singularity: "docker://quay.io/biocontainers/bwa-mem2:2.2.1--he513fc3_0"
     shell:
         """
@@ -267,6 +269,7 @@ rule r02b_sort_index:
         bai = temp("/tmp/fastq/02_bam/{sample}.sorted.bam.bai"),
     threads: 2
     resources: disk_mb=10000+55000+10000+10000
+    priority: 90
     singularity: "docker://quay.io/biocontainers/samtools:1.19.2--h50ea8bc_1"
     shell:
         """
@@ -286,6 +289,7 @@ rule r03_markduplicates_spark:
         metrics = "/tmp/fastq/03_markdup/{sample}.markdup.metrics.txt",
     threads: 6
     resources: disk_mb=10000+55000+10000+10000
+    priority: 100
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
@@ -330,6 +334,7 @@ rule r03b_optitype:
         # Discovered path inside the bioconda biocontainer (1.3.5--hdfd78af_3):
         hla_ref = "/usr/local/bin/data/hla_reference_dna.fasta",
     threads: 4
+    priority: 80
     singularity: "docker://quay.io/biocontainers/optitype:1.3.5--hdfd78af_3"
     shell:
         r"""
