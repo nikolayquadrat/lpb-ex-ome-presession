@@ -225,7 +225,7 @@ rule r01_fastp_trim:
         html    = "/tmp/fastq/01_fastp/{sample}.fastp.html",
         json    = "/tmp/fastq/01_fastp/{sample}.fastp.json",
     threads: 2
-    resources: disk_mb=10000+35000+10000+10000 # supposedly forces consecutive execution of these disk volume heavy rules
+    resources: disk_mb=10000+55000+10000+10000 # supposedly forces consecutive execution of these disk volume heavy rules
     singularity: "docker://quay.io/biocontainers/fastp:0.23.4--hadf994f_2"
     shell:
         """
@@ -248,7 +248,7 @@ rule r02a_bwamem2_align:
     output:
         bam = temp("/tmp/fastq/02_bam/{sample}.unsorted.bam"),
     threads: 6
-    resources: disk_mb=10000+35000+10000+10000
+    resources: disk_mb=10000+55000+10000+10000
     singularity: "docker://quay.io/biocontainers/bwa-mem2:2.2.1--he513fc3_0"
     shell:
         """
@@ -266,7 +266,7 @@ rule r02b_sort_index:
         bam = temp("/tmp/fastq/02_bam/{sample}.sorted.bam"),
         bai = temp("/tmp/fastq/02_bam/{sample}.sorted.bam.bai"),
     threads: 2
-    resources: disk_mb=10000+35000+10000+10000
+    resources: disk_mb=10000+55000+10000+10000
     singularity: "docker://quay.io/biocontainers/samtools:1.19.2--h50ea8bc_1"
     shell:
         """
@@ -285,7 +285,7 @@ rule r03_markduplicates_spark:
         bai     = temp("/tmp/fastq/03_markdup/{sample}.markdup.bam.bai"),
         metrics = "/tmp/fastq/03_markdup/{sample}.markdup.metrics.txt",
     threads: 6
-    resources: disk_mb=10000+35000+10000+10000
+    resources: disk_mb=10000+55000+10000+10000
     singularity: "docker://broadinstitute/gatk:4.5.0.0"
     shell:
         """
