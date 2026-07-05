@@ -403,6 +403,34 @@ def get_fastq_path(wildcards):
     rev = f"/tmp/data/{row['path']}/{row['dataset2']}.{row['extension']}"
     return [fwd, rev]
 
+# -----------------------------------------------------------------------------
+# Sex inference (RNA-seq, expression-based)
+# -----------------------------------------------------------------------------
+# RNA-seq sex inference uses MARKER-GENE EXPRESSION:
+#   - XIST: long non-coding RNA that coats and silences the inactive X. It is
+#     highly expressed only in cells with >=2 X chromosomes (i.e. XX, and also
+#     XXY), and near-silent in XY. -> female / 2nd-X marker.
+#   - Y-linked genes: expressed only when a Y chromosome is present. -> male
+#     marker. We use a panel (sum) rather than one gene for robustness; several
+#     of these are expressed in brain specifically (NLGN4Y, especially).
+# The two signals together also distinguish sex-chromosome aneuploidy:
+#   XX  -> XIST high, Y low ;  XY -> XIST low, Y high ;
+#   XXY -> XIST high AND Y high ; X0 -> both low.
+SEX_MARKER_GENES = [
+    "XIST",                                   # female / inactive-X marker
+    "RPS4Y1", "DDX3Y", "UTY", "USP9Y",        # Y panel (X-degenerate, broadly expressed)
+    "KDM5D", "EIF1AY", "ZFY", "TXLNGY",
+    "NLGN4Y",                                 # Y, notably expressed in brain
+]
+SEX_FEMALE_GENES = {"XIST"}                   # the rest are treated as the Y panel
+
+# CPM thresholds for the binary call, with an explicit ambiguous band.
+# These are deliberately permissive; the XIST-vs-Y separation in real data is
+# usually orders of magnitude, so exact values rarely matter. Inspect the
+# emitted CPM columns and tune if your library/tissue runs unusually low.
+SEX_XIST_CPM_MIN = 1.0
+SEX_Y_CPM_MIN    = 1.0
+
 
 # -----------------------------------------------------------------------------
 # Targets
@@ -444,6 +472,7 @@ rule all:
         # mainly on microglia), so this table will have empty cells for
         # low-expression samples.
         *(["/tmp/data/06_hla/00_hla_summary_classII.tsv"] if ARCASHLA_ENABLED else []),
+        "/tmp/data/04_qc/00_inferred_sex.tsv",
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
@@ -2544,6 +2573,165 @@ if ARCASHLA_ENABLED:
             print(f"[HLA summary II] wrote {output.tsv} -- {n} samples", flush=True)
 
 
+rule r07a_sex_marker_regions:
+    """
+    Extract genomic spans (chr, start, end) for the sex-marker genes from the
+    GENCODE v47 GTF, by gene_name. Written once and reused by every per-sample
+    job. POSIX-awk parsing (no gawk-only match(,,arr)) for container safety.
+    """
+    input:
+        gtf = GTF,
+    output:
+        regions = "/tmp/data/04_qc/sex/sex_marker_regions.tsv",
+    run:
+        wanted = set(SEX_MARKER_GENES)
+        os.makedirs(os.path.dirname(output.regions), exist_ok=True)
+        found = {}
+        with open(input.gtf) as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                f = line.rstrip("\n").split("\t")
+                if len(f) < 9 or f[2] != "gene":
+                    continue
+                attr = f[8]
+                # Portable gene_name extraction
+                key = 'gene_name "'
+                i = attr.find(key)
+                if i < 0:
+                    continue
+                gname = attr[i + len(key):].split('"', 1)[0]
+                if gname in wanted and gname not in found:
+                    # GTF is 1-based inclusive; samtools regions are 1-based too.
+                    found[gname] = (f[0], f[3], f[4])
+        missing = wanted - set(found)
+        if missing:
+            print(f"[sex markers] WARN: {len(missing)} marker genes not found "
+                  f"in GTF (skipped): {sorted(missing)}", file=sys.stderr)
+        with open(output.regions, "w") as out:
+            # one row per gene: gene<TAB>chr<TAB>start<TAB>end
+            for g in SEX_MARKER_GENES:
+                if g in found:
+                    chrom, start, end = found[g]
+                    out.write(f"{g}\t{chrom}\t{start}\t{end}\n")
+        print(f"[sex markers] wrote {len(found)} gene regions to {output.regions}",
+              flush=True)
+
+rule r07b_sex_counts_per_sample:
+    """
+    Per-sample read counts over the sex-marker gene spans, plus library size
+    and chrX/chrY read fractions, from the markduplicates STAR BAM.
+
+    Efficiency: uses only index-based access (samtools idxstats reads the .bai;
+    samtools view -c <region> seeks to the gene span). No full-BAM scan, no
+    per-base depth text. Each per-sample job is independent so they run in
+    parallel across cores.
+
+    Counting flags:
+      -q 30  : STAR assigns MAPQ 255 to uniquely-mapped reads and 0-3 to
+               multi-mappers, so -q 30 keeps ONLY unique reads. This is
+               important for the Y panel: several Y genes (DDX3Y/USP9Y/UTY)
+               have closely homologous X paralogs (DDX3X/USP9X/KDM6A), and
+               unique-read filtering prevents X-derived reads from being
+               miscounted as Y signal (and vice versa).
+      -F 3332: exclude unmapped(4) + secondary(256) + duplicate(1024) +
+               supplementary(2048) records, so each fragment is counted once.
+
+    Library size (for CPM) is the total mapped read records from idxstats.
+    It includes duplicates (idxstats can't filter), but that is a uniform
+    per-sample scaling that does not affect the XIST-vs-Y comparison or the
+    bimodal call.
+    """
+    input:
+        bam     = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam",
+        bai     = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam.bai",
+        regions = "/tmp/data/04_qc/sex/sex_marker_regions.tsv",
+    output:
+        tsv = "/tmp/data/04_qc/sex/{sample}.sex_counts.tsv",
+    threads: 2
+    singularity: SAMTOOLS_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output.tsv})"
+
+        IDX=$(mktemp)
+        trap 'rm -f "${{IDX:-}}"' EXIT INT TERM
+
+        # One idxstats pass (index only) -> library size + chrX/chrY records.
+        samtools idxstats {input.bam} > "$IDX"
+        LIB=$(awk '{{m += $3}} END {{print m + 0}}' "$IDX")
+        CHRX=$(awk '$1 == "chrX" {{print $3 + 0}}' "$IDX"); [ -n "$CHRX" ] || CHRX=0
+        CHRY=$(awk '$1 == "chrY" {{print $3 + 0}}' "$IDX"); [ -n "$CHRY" ] || CHRY=0
+
+        XIST=0
+        YSUM=0
+        # Per-gene unique-read counts via indexed region seeks.
+        while IFS=$'\t' read -r gene chr start end; do
+            [ -z "$gene" ] && continue
+            cnt=$(samtools view -c -q 30 -F 3332 {input.bam} "${{chr}}:${{start}}-${{end}}")
+            if [ "$gene" = "XIST" ]; then
+                XIST=$cnt
+            else
+                YSUM=$(( YSUM + cnt ))
+            fi
+        done < {input.regions}
+
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "{wildcards.sample}" "$LIB" "$CHRX" "$CHRY" "$XIST" "$YSUM" \
+            > {output.tsv}
+        """
+
+rule r07c_infer_sex:
+    """
+    Aggregate per-sample marker counts into the cohort sex-inference table.
+    Computes CPM-normalised XIST and Y-panel expression and calls genetic sex.
+
+    Calling logic (XIST present? / Y panel present?):
+      XIST hi, Y lo  -> "XX"
+      XIST lo, Y hi  -> "XY"
+      XIST hi, Y hi  -> "ambiguous_possible_XXY"  (Klinefelter: inactive X
+                        gives XIST, Y gives Y-gene expression)
+      both low       -> "ambiguous_low_signal"    (low coverage / X0 / problem)
+
+    This is GENETIC sex from expression, not gender or phenotypic sex. A
+    mismatch with the clinical record is a QC flag (sample swap, aneuploidy,
+    or annotation error) -- the same class of signal as an HLA/identity
+    discrepancy -- not a conclusion.
+    """
+    input:
+        counts = expand("/tmp/data/04_qc/sex/{sample}.sex_counts.tsv", sample=samples),
+    output:
+        tsv = "/tmp/data/04_qc/00_inferred_sex.tsv",
+    run:
+        with open(output.tsv, "w") as out:
+            out.write("sample\tlib_size\txist_cpm\ty_panel_cpm\t"
+                      "chrX_frac\tchrY_frac\tinferred_sex\n")
+            for path in input.counts:
+                sample, lib, chrx, chry, xist, ysum = open(path).read().split()
+                lib = float(lib); chrx = float(chrx); chry = float(chry)
+                xist = float(xist); ysum = float(ysum)
+                if lib <= 0:
+                    out.write(f"{sample}\t0\tNA\tNA\tNA\tNA\tambiguous_low_signal\n")
+                    continue
+                xist_cpm = xist / lib * 1e6
+                y_cpm    = ysum / lib * 1e6
+                chrx_frac = chrx / lib
+                chry_frac = chry / lib
+                xist_present = xist_cpm >= SEX_XIST_CPM_MIN
+                y_present    = y_cpm    >= SEX_Y_CPM_MIN
+                if xist_present and not y_present:
+                    sex = "XX"
+                elif y_present and not xist_present:
+                    sex = "XY"
+                elif xist_present and y_present:
+                    sex = "ambiguous_possible_XXY"
+                else:
+                    sex = "ambiguous_low_signal"
+                out.write(f"{sample}\t{int(lib)}\t{xist_cpm:.4f}\t{y_cpm:.4f}\t"
+                          f"{chrx_frac:.6f}\t{chry_frac:.6f}\t{sex}\n")
+        print(f"[infer_sex] wrote {output.tsv} for {len(input.counts)} samples",
+              flush=True)
 
 # =============================================================================
 # Reference download instructions (run ONCE before the pipeline)
