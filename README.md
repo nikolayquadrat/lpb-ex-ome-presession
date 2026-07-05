@@ -175,11 +175,13 @@ Four rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) w
 The cohort VCF was demultiplexed into per-sample VCFs by bcftools 1.19 with private-variant retention (r10_per_sample_vcf).
 Functional annotation. The cohort VCF was annotated by Ensembl VEP 112 (rule r11_vep_annotate_cohort) using the offline cache, MANE-Select / canonical / biotype transcript prioritization (--pick_allele_gene --pick_order mane_select,canonical,biotype), and HGVS notation. Plugins were loaded from a flattened directory and included AlphaMissense, REVEL, LOFTEE (high-confidence loss-of-function flag), CADD v1.7, SpliceAI (max delta scores across acceptor/donor gain/loss), and dbNSFP v5.3.1a fields (MutationTaster_pred, PROVEAN_pred, MetaLR_pred, MetaRNN_pred, M-CAP_pred, PrimateAI_pred, ClinPred_pred, BayesDel_addAF_pred). VEP --custom annotations attached gnomAD v4.1 exome population-stratified allele frequencies and ClinVar clinical-significance fields.
 
+#### 8. Sex inference
+Genetic sex was inferred from sequencing coverage over the capture targets of the analysis-ready (post-BQSR) BAMs. For each sample, mean read depth was computed across capture-target intervals on the autosomes (chr1–chr22), chromosome X, and chromosome Y using samtools bedcov (MAPQ ≥ 20), and two normalised ratios were formed: an X-ratio (mean chrX depth / mean autosomal depth) and a Y-ratio (mean chrY depth / mean autosomal depth). Samples were called XX (X-ratio ≥ 0.80, Y-ratio < 0.15) or XY (X-ratio < 0.65, Y-ratio ≥ 0.15); samples falling outside these bands were flagged as ambiguous, capturing sex-chromosome aneuploidies, sample swaps or contamination, and low-coverage samples for manual review. Inferred genetic sex was cross-checked against clinical records, the summary table is stored in `../qc/inferred_sex.tsv`.
 
-#### 8. HLA class I typing in the exome pipeline
+#### 9. HLA class I typing in the exome pipeline
 **OptiType 1.3.5** ([Szolek et al. 2014](doi.org/10.1093/bioinformatics/btu548)); container: quay.io/biocontainers/optitype:1.3.5--hdfd78af_3. OptiType takes the paired-end trimmed FASTQs from r01_fastp_trim as input. The rule first pre-filters reads with razers3 against OptiType's bundled HLA reference (/usr/local/bin/data/hla_reference_dna.fasta) to drastically reduce input size, then converts the filtered BAMs back to FASTQ with samtools and runs OptiTypePipeline.py which solves an integer-linear-program (ILP) for the allele combination that best explains the read evidence. The biocontainer omits the standard config.ini, so the rule generates one at run-time pointing to the GLPK ILP solver. Output is a single TSV at 13_hla/optitype/{sample}/{sample}_result.tsv with one row containing the two-allele calls for HLA-A, HLA-B, and HLA-C at two-field resolution.
 
-#### 9. Tier classification
+#### 10. Tier classification
 *scripts\lpb-exome-prioritisation-tier-candidates.py*<br>
 A Python script classifies per-sample variants into three tiers (rule r12_tier_candidates). Common variants (gnomAD popmax AF ≥ 0.001) and internal artifact sites are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
 - **Tier A** captures DROP-testable predicted loss-of-function and splice-disrupting variants (LOFTEE high-confidence LoF, or SpliceAI max delta ≥ 0.20).
@@ -246,33 +248,37 @@ flowchart LR
 	id22[r06a_arcashla_extract]
 	id23[r06e_hla_summary_classII]
 	id24[r06d_arcashla_genotype_classII]
-	id1 --> id0
+	id25[r07c_infer_sex]
+	id26[r07b_sex_counts_per_sample]
+	id27[r07a_sex_marker_regions]
 	id19 --> id0
-	id2 --> id0
-	id20 --> id0
 	id17 --> id0
+	id20 --> id0
+	id2 --> id0
+	id18 --> id0
 	id23 --> id0
 	id7 --> id0
-	id18 --> id0
+	id25 --> id0
+	id1 --> id0
 	id6 --> id0
 	id5 --> id1
 	id2 --> id1
-	id3 --> id2
 	id4 --> id2
+	id3 --> id2
 	id2 --> id5
 	id2 --> id6
 	id8 --> id7
-	id12 --> id7
 	id6 --> id7
+	id12 --> id7
 	id11 --> id8
+	id10 --> id8
 	id9 --> id8
 	id1 --> id8
-	id10 --> id8
 	id1 --> id9
 	id2 --> id11
 	id15 --> id12
-	id1 --> id12
 	id13 --> id12
+	id1 --> id12
 	id14 --> id13
 	id1 --> id14
 	id16 --> id15
@@ -285,6 +291,10 @@ flowchart LR
 	id1 --> id22
 	id24 --> id23
 	id22 --> id24
+	id26 --> id25
+	id27 --> id26
+	id9 --> id26
+	id1 --> id26
 ```
 
 #### 1. Reference assembly and annotation
@@ -329,7 +339,10 @@ Multi-mapped reads with the same score are counted for every species separately 
 These measures vastly reduce false positives but not eliminate them entirely.
 Note that for bacteria and many viruses (Flaviviruses, Arenaviruses etc) poor recovery is expected with the poly(A)-selected RNA method.
 
-#### 7. arcasHLA reference (optional)
+#### 7. Sex inference
+Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) were counted over the gene spans of XIST (a female / inactive-X marker) and a panel of Y-linked genes (RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter was applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts were normalised to library size (counts per million) using total mapped reads, and samples were called XX (XIST ≥ 10 CPM, Y-panel < 20 CPM) or XY (XIST < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers were flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories were reserved for manual review. As in the exome workflow, inferred genetic sex was compared against clinical annotation as a sample-identity check. The summary data is stored in `../04_qc/00_inferred_sex.tsv`.
+
+#### 8. arcasHLA reference (optional)
 Build the arcasHLA reference data on the host filesystem with the script *lpb-rnaseq-install-arcashla-ref.sh*.
 ```sh
 sudo chmod +x lpb-rnaseq-set-up-arcashla.sh
@@ -337,9 +350,9 @@ sudo bash lpb-rnaseq-set-up-arcashla.sh
 ```
 The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it tries to. the script performs the four-step setup once on the host: (a) git clone --depth 1 of the ANHIG/IMGTHLA repository (IPD-IMGT/HLA database release 3.64.0, ~1.2 GB at depth 1), (b) unzip of hla.dat.zip and other compressed archives inside the IMGTHLA repo (the uncompressed hla.dat is too large for git so the repo ships it compressed), (c) seeding the host dat/info and dat/ref directories with the small JSON tables bundled inside the biocontainer (copied out via apptainer exec with a bind mount), and (d) running arcasHLA reference --rebuild once inside the container with the host dat/ directory bind-mounted over the container's read-only /usr/local/share/arcas-hla-0.6.0-2/dat, which generates hla.fasta, hla.idx, hla.p.json, hla.convert.json, hla_partial.fasta, hla_partial.idx, and hla_partial.p.json via Kallisto (v0.50.1 inside the biocontainer). Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices).
 
-**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `.../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `.../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule r06b_arcashla_genotype then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule r06d_arcashla_genotype_classII runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `.../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
+**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule r06b_arcashla_genotype then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule r06d_arcashla_genotype_classII runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
 
-#### 8. RNA-seq quality control
+#### 9. RNA-seq quality control
  Picard CollectRnaSeqMetrics 2.27.5 (rule r04c_picard_rnaseq_metrics) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using ucsc-gtfToGenePred -genePredExt -geneNameAsName2 followed by column-reordering to refFlat format (rule r04a_make_refflat). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule r04b_make_rrna_intervals). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and VALIDATION_STRINGENCY=LENIENT to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule r04d_qc_summary, 04_qc/00_qc_summary.tsv) reporting:
  - PF_BASES. Total number of bases in reads passing Illumina's chastity filter (PF = Passed Filter), including non-aligned reads. The denominator for most fraction metrics below.
  - PF_ALIGNED_BASES. Bases from PF reads that aligned to the reference. Bases in soft-clips, insertions, and secondary/supplementary alignments are excluded. Roughly equal to PF_BASES × overall alignment rate.
@@ -364,8 +377,17 @@ The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--h
  - flag_low_complexity. Boolean absolute-threshold flag: True if Uniquely_mapped < 10,000,000. Catches samples that look clean by RNA-quality metrics but lack enough reads for reliable outlier detection. Samples with this flag True should be excluded from the OUTRIDER reference panel; including them as the test sample is fine but will yield lower-power results.
  These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
 
-#### 8. Pipeline outputs
- Per sample: {sample}.Aligned.sortedByCoord.out.patched.md.bam plus index (canonical DROP input), {sample}.SJ.out.tab (FRASER input), {sample}.ReadsPerGene.out.tab (OUTRIDER input, mergeable with GTEx V11 counts), {sample}.Aligned.toTranscriptome.out.bam (RSEM input if needed), {sample}.Chimeric.out.junction, {sample}.Log.final.out, {sample}.markdup_metrics.txt, and {sample}.rnaseq_metrics.txt. Cohort-level: 00_mapping_stat/mapping_stat.txt (alignment summary) and 04_qc/00_qc_summary.tsv (RNA-seq QC summary with outlier flags).
+#### 10. Pipeline outputs
+ Per sample:
+ - `../03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam` plus index (canonical DROP input),
+ - `../03_bam_star/{sample}/{sample}.SJ.out.tab` (FRASER input),
+ - `../03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab` (OUTRIDER input, mergeable with GTEx V11 counts),
+ - `../03_bam_star/{sample}/{sample}.Aligned.toTranscriptome.out.bam` (RSEM input if needed),
+ Cohort-level:
+ - `../03_bam_star/00_mapping_stat/mapping_stat.txt` (alignment summary),
+ - `../04_qc/00_qc_summary.tsv` (RNA-seq QC summary with outlier flags),
+ - `../04_qc/00_inferred_sex.tsv` (sex inference).
+ - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files)
 
 ## DROP pipeline
 Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andrade, Leonhard Wachutka, Laure Frésard, Mirjana Gusic, et al. 2021.
