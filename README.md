@@ -378,12 +378,13 @@ The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--h
  These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
 
 #### 10. Pipeline outputs
- Per sample:
+Per sample:
  - `../03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam` plus index (canonical DROP input),
  - `../03_bam_star/{sample}/{sample}.SJ.out.tab` (FRASER input),
  - `../03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab` (OUTRIDER input, mergeable with GTEx V11 counts),
- - `../03_bam_star/{sample}/{sample}.Aligned.toTranscriptome.out.bam` (RSEM input if needed),
- Cohort-level:
+ - `../03_bam_star/{sample}/{sample}.Aligned.toTranscriptome.out.bam` (RSEM input if needed)
+ 
+Cohort-level:
  - `../03_bam_star/00_mapping_stat/mapping_stat.txt` (alignment summary),
  - `../04_qc/00_qc_summary.tsv` (RNA-seq QC summary with outlier flags),
  - `../04_qc/00_inferred_sex.tsv` (sex inference).
