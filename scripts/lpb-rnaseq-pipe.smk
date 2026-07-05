@@ -424,12 +424,15 @@ SEX_MARKER_GENES = [
 ]
 SEX_FEMALE_GENES = {"XIST"}                   # the rest are treated as the Y panel
 
-# CPM thresholds for the binary call, with an explicit ambiguous band.
-# These are deliberately permissive; the XIST-vs-Y separation in real data is
-# usually orders of magnitude, so exact values rarely matter. Inspect the
-# emitted CPM columns and tune if your library/tissue runs unusually low.
-SEX_XIST_CPM_MIN = 1.0
-SEX_Y_CPM_MIN    = 1.0
+# CPM thresholds for the sex call. Chosen to sit in the empirical gap between
+# each marker's real signal and its opposite-sex cross-mapping baseline:
+#   - true males carry XIST up to ~3 CPM (X/Y-adjacent noise); true females
+#     start at ~17 CPM -> XIST cutoff 10 sits cleanly between.
+#   - true females carry Y-panel up to ~7 CPM (X paralog cross-mapping);
+#     true males start at ~64 CPM -> Y cutoff 20 sits cleanly between.
+# A genuine XXY shows BOTH markers above threshold simultaneously.
+SEX_XIST_CPM_MIN = 10.0
+SEX_Y_CPM_MIN    = 20.0
 
 
 # -----------------------------------------------------------------------------
@@ -2685,41 +2688,77 @@ rule r07b_sex_counts_per_sample:
 rule r07c_infer_sex:
     """
     Aggregate per-sample marker counts into the cohort sex-inference table.
-    Computes CPM-normalised XIST and Y-panel expression and calls genetic sex.
+    Computes CPM-normalised XIST and Y-panel expression, calls genetic sex,
+    and compares against the clinical 'gender' field from sample_data.txt.
 
-    Calling logic (XIST present? / Y panel present?):
+    Calling logic (XIST >= SEX_XIST_CPM_MIN? / Y >= SEX_Y_CPM_MIN?):
       XIST hi, Y lo  -> "XX"
       XIST lo, Y hi  -> "XY"
-      XIST hi, Y hi  -> "ambiguous_possible_XXY"  (Klinefelter: inactive X
-                        gives XIST, Y gives Y-gene expression)
-      both low       -> "ambiguous_low_signal"    (low coverage / X0 / problem)
+      XIST hi, Y hi  -> "ambiguous_possible_XXY"  (inactive X + Y present)
+      both low       -> "ambiguous_low_signal"
 
-    This is GENETIC sex from expression, not gender or phenotypic sex. A
-    mismatch with the clinical record is a QC flag (sample swap, aneuploidy,
-    or annotation error) -- the same class of signal as an HLA/identity
-    discrepancy -- not a conclusion.
+    Concordance vs. reported gender (male/female/other):
+      - reported gender is normalised (lower-cased, trimmed); anything that
+        is not exactly 'male' or 'female' (incl. 'unknown', 'NA', '' ) is
+        treated as UNKNOWN and never counts as a mismatch.
+      - concordance is one of:
+          "concordant"      genetic XX==female or XY==male
+          "DISCORDANT"      genetic XX==male or XY==female  <- identity flag
+          "check_aneuploidy" genetic call is an ambiguous_* class
+          "no_reported_sex" reported gender is unknown/blank
+      A DISCORDANT row is a sample-swap / mislabel flag (e.g. KH36), NOT a
+      biological conclusion.
     """
     input:
         counts = expand("/tmp/data/04_qc/sex/{sample}.sex_counts.tsv", sample=samples),
     output:
         tsv = "/tmp/data/04_qc/00_inferred_sex.tsv",
     run:
+        # Build sample -> reported gender map from sample_data (already loaded
+        # as `sample_data` with a 'name' column). Normalise defensively.
+        def norm_gender(v):
+            if v is None:
+                return "unknown"
+            s = str(v).strip().lower()
+            if s in ("male", "m"):
+                return "male"
+            if s in ("female", "f"):
+                return "female"
+            return "unknown"   # 'unknown', 'na', 'nan', '', anything else
+
+        gender_map = {}
+        if "gender" in sample_data.columns:
+            for _, row in sample_data.iterrows():
+                gender_map[row["name"]] = norm_gender(row["gender"])
+        else:
+            print("[infer_sex] WARN: no 'gender' column in sample_data; "
+                  "concordance will be 'no_reported_sex' for all samples",
+                  file=sys.stderr)
+
+        n_discordant = 0
         with open(output.tsv, "w") as out:
             out.write("sample\tlib_size\txist_cpm\ty_panel_cpm\t"
-                      "chrX_frac\tchrY_frac\tinferred_sex\n")
+                      "chrX_frac\tchrY_frac\tinferred_sex\t"
+                      "reported_gender\tconcordance\n")
             for path in input.counts:
                 sample, lib, chrx, chry, xist, ysum = open(path).read().split()
                 lib = float(lib); chrx = float(chrx); chry = float(chry)
                 xist = float(xist); ysum = float(ysum)
+                reported = gender_map.get(sample, "unknown")
+
                 if lib <= 0:
-                    out.write(f"{sample}\t0\tNA\tNA\tNA\tNA\tambiguous_low_signal\n")
+                    out.write(f"{sample}\t0\tNA\tNA\tNA\tNA\t"
+                              f"ambiguous_low_signal\t{reported}\t"
+                              f"{'no_reported_sex' if reported=='unknown' else 'check_aneuploidy'}\n")
                     continue
+
                 xist_cpm = xist / lib * 1e6
                 y_cpm    = ysum / lib * 1e6
                 chrx_frac = chrx / lib
                 chry_frac = chry / lib
                 xist_present = xist_cpm >= SEX_XIST_CPM_MIN
                 y_present    = y_cpm    >= SEX_Y_CPM_MIN
+
                 if xist_present and not y_present:
                     sex = "XX"
                 elif y_present and not xist_present:
@@ -2728,10 +2767,27 @@ rule r07c_infer_sex:
                     sex = "ambiguous_possible_XXY"
                 else:
                     sex = "ambiguous_low_signal"
+
+                # Concordance vs. reported gender
+                if reported == "unknown":
+                    conc = "no_reported_sex"
+                elif sex == "XX":
+                    conc = "concordant" if reported == "female" else "DISCORDANT"
+                elif sex == "XY":
+                    conc = "concordant" if reported == "male" else "DISCORDANT"
+                else:
+                    conc = "check_aneuploidy"
+                if conc == "DISCORDANT":
+                    n_discordant += 1
+
                 out.write(f"{sample}\t{int(lib)}\t{xist_cpm:.4f}\t{y_cpm:.4f}\t"
-                          f"{chrx_frac:.6f}\t{chry_frac:.6f}\t{sex}\n")
-        print(f"[infer_sex] wrote {output.tsv} for {len(input.counts)} samples",
-              flush=True)
+                          f"{chrx_frac:.6f}\t{chry_frac:.6f}\t{sex}\t"
+                          f"{reported}\t{conc}\n")
+
+        msg = f"[infer_sex] wrote {output.tsv} for {len(input.counts)} samples"
+        if n_discordant:
+            msg += f" -- {n_discordant} DISCORDANT sample(s) flagged for identity review"
+        print(msg, flush=True)
 
 # =============================================================================
 # Reference download instructions (run ONCE before the pipeline)
@@ -2777,5 +2833,6 @@ rule r07c_infer_sex:
 #   dataset2            = R2 file basename (or "NaN" for SE)
 #   extension           = "fq.gz" or "fastq.gz"
 #   include_in_analysis = 1 (process) or 0 (skip)
+#   gender              = "male"/"female"/"unknown" (for sex inference)
 #
 # =============================================================================
