@@ -108,6 +108,36 @@ samples ,= glob_wildcards("/tmp/fastq/{sample}_R1_001.fastq.gz") # or whatever f
 # samples = ['e1-19-combined', 'e1-1-combined', 'e1-3-combined'] # testing
 print("Samples:", samples)
 
+# =============================================================================
+# Callable-gene inference: per-sample list of genes with adequate coverage to
+# reliably call a variant (i.e. genes that were "testable" for VUS discovery).
+# Feeds the exome-testable null-pool universe for the VUS matched-sampling.
+#
+# "Sufficient for mutation inference" is defined operationally as:
+#   >= CALLABLE_MIN_FRAC of a gene's CODING bases covered at >= CALLABLE_MIN_DP.
+# Both are configurable below. A gene failing this in a given sample could not
+# have yielded a VUS in that sample, so it is not a fair null-pool member there.
+#
+# IMPORTANT -- this pipe has NO gene model (only the VEP cache + capture BED),
+# so mapping coverage to gene SYMBOLS requires a gene-level BED that you supply:
+#   gene_coding_bed = a 4-column BED of MERGED CODING exons per gene, where
+#   column 4 is the gene symbol. One row per coding-exon interval; mosdepth
+#   aggregates all rows sharing the same name into one region group.
+# Build it once from GENCODE/RefSeq to match the pipe's hg38 (chr-prefixed)
+# reference, e.g. from a GENCODE basic GTF:
+#   zcat gencode.v47.basic.annotation.gtf.gz \
+#     | awk '$3=="CDS"' \
+#     | ... extract chr,start-1,end,gene_name ... \
+#     | sort -k1,1 -k2,2n | bedtools merge -i - -c 4 -o distinct > gene_cds.hg38.bed
+# Restrict to (or intersect with) the capture BED if you want callability judged
+# only over captured coding bases (recommended, since off-capture bases are
+# never callable anyway):  bedtools intersect -a gene_cds.hg38.bed -b capture.bed
+# =============================================================================
+
+gene_coding_bed   = "/tmp/annotation/gene_models/gene_cds_capture.hg38.bed" 
+CALLABLE_MIN_DP   = 30    # depth threshold for a base to count as callable
+CALLABLE_MIN_FRAC = 0.90  # fraction of a gene's coding bases that must reach it
+
 # -----------------------------------------------------------------------------
 # Targets -- only what DROP needs
 # -----------------------------------------------------------------------------
@@ -131,10 +161,11 @@ rule all:
         "/tmp/qc/inferred_sex.tsv",
         # (4) HLA class I typing with OptiType (best class I accuracy from
         #     exome/DNA data, FASTQ input via razer3 prefilter).
-        expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv", sample=samples)
+        expand("/tmp/fastq/13_hla/optitype/{sample}/{sample}_result.tsv", sample=samples),
 
         # "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
         # "/tmp/fastq/11_vep/test_loftee.vep.tsv", # for the testing
+        expand("/tmp/fastq/14_callable/{sample}.gene_callability.tsv", sample=samples),
     shell: "echo 'DROP-ready outputs produced.'"
 
 
@@ -1065,3 +1096,102 @@ rule r12_tier_candidates:
 
         chmod a+wx /tmp/fastq/12_tiered
         """
+
+rule r14a_callable_depth_per_sample:
+    """
+    Per-sample per-gene coverage over coding exons via mosdepth --thresholds.
+    mosdepth emits, for each gene region group, the number of bases at >= each
+    threshold; we take the CALLABLE_MIN_DP column. Region mode reads only the
+    BED intervals (fast, no genome-wide pileup).
+    """
+    input:
+        bam  = "/tmp/fastq/04_bqsr/{sample}.recal.bam",
+        bai  = "/tmp/fastq/04_bqsr/{sample}.recal.bai",
+        bed  = gene_coding_bed,
+    output:
+        # mosdepth writes several files with this prefix; the thresholds file is
+        # the one we consume. Keep the summary too (useful QC).
+        thresholds = "/tmp/fastq/14_callable/{sample}.thresholds.bed.gz",
+        summary    = "/tmp/fastq/14_callable/{sample}.mosdepth.summary.txt",
+    params:
+        prefix = "/tmp/fastq/14_callable/{sample}",
+        mindp  = CALLABLE_MIN_DP,
+    threads: 4
+    singularity: "docker://quay.io/biocontainers/mosdepth:0.3.8--hd299d5a_0"
+    shell:
+        """
+        set -euo pipefail
+        mkdir -p "$(dirname {output.thresholds})"
+        # --by <bed> : per-region coverage; --thresholds : bases at >= each depth
+        # -n : no per-base output (faster, smaller); -x : skip mate-pair fixups
+        mosdepth \
+            --threads {threads} \
+            --by {input.bed} \
+            --thresholds {params.mindp} \
+            --no-per-base \
+            --mapq 20 \
+            "{params.prefix}" \
+            {input.bam}
+        # sanity: thresholds file exists and is non-empty
+        test -s {output.thresholds}
+        """
+
+
+rule r14b_callable_genes_per_sample:
+    """
+    Reduce the per-region thresholds to a per-sample list of CALLABLE genes:
+    a gene is callable if >= CALLABLE_MIN_FRAC of its coding bases are covered
+    at >= CALLABLE_MIN_DP. mosdepth's thresholds.bed.gz has columns:
+        chrom  start  end  region_name  <bases_at_thresh1> [<thresh2> ...]
+    Region groups sharing a name (a gene's exons) are summed, then the covered
+    fraction = sum(bases_at_MIN_DP) / sum(region_length).
+    """
+    input:
+        thresholds = "/tmp/fastq/14_callable/{sample}.thresholds.bed.gz",
+    output:
+        callable = "/tmp/fastq/14_callable/{sample}.callable_genes.txt",
+        table    = "/tmp/fastq/14_callable/{sample}.gene_callability.tsv",
+    params:
+        minfrac = CALLABLE_MIN_FRAC,
+    run:
+        import gzip, csv, os
+        from collections import defaultdict
+
+        covered = defaultdict(int)   # gene -> bases at >= MIN_DP
+        total   = defaultdict(int)   # gene -> total coding bases (region length)
+
+        with gzip.open(input.thresholds, "rt") as fh:
+            reader = csv.reader(fh, delimiter="\t")
+            header = next(reader)
+            # header: #chrom start end region <threshold_col...>; the threshold
+            # column is the last one (we passed a single threshold).
+            thr_idx = len(header) - 1
+            for row in reader:
+                if not row or row[0].startswith("#"):
+                    continue
+                start, end = int(row[1]), int(row[2])
+                gene = row[3]
+                covered[gene] += int(row[thr_idx])
+                total[gene]   += (end - start)
+
+        os.makedirs(os.path.dirname(output.callable), exist_ok=True)
+        callable_genes = []
+        with open(output.table, "w") as out:
+            out.write("gene\tcoding_bases\tbases_ge_mindp\tfrac_callable\tcallable\n")
+            for gene in sorted(total):
+                tot = total[gene]
+                cov = covered[gene]
+                frac = cov / tot if tot > 0 else 0.0
+                is_callable = frac >= params.minfrac
+                out.write(f"{gene}\t{tot}\t{cov}\t{frac:.4f}\t"
+                          f"{'yes' if is_callable else 'no'}\n")
+                if is_callable:
+                    callable_genes.append(gene)
+
+        with open(output.callable, "w") as out:
+            out.write("\n".join(callable_genes) + ("\n" if callable_genes else ""))
+
+        print(f"[callable] {wildcards.sample}: "
+              f"{len(callable_genes)}/{len(total)} genes callable "
+              f"(>= {params.minfrac:.0%} of coding bases at depth threshold)",
+              flush=True)
