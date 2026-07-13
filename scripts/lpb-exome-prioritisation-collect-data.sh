@@ -122,8 +122,9 @@ VEP_PLUGINS=/mnt/data/exome/annotation/vep/plugins
 VEP_PLUGIN_DATA=/mnt/data/exome/annotation/vep/plugin_data
 VEP_CUSTOM=/mnt/data/exome/annotation/vep/custom
 DATA_DIR=/mnt/data/exome/data
-CAPTURE_DIR=/mnt/data/exome/annotation/capture
-CAPTURE_BED="$CAPTURE_DIR/capture.bed"
+CAPTURE_DIR=/mnt/data/exome/annotation/agilent # or whatever
+CAPTURE_INTERVAL_LIST="$CAPTURE_DIR/S33266436_Regions.padded100.interval_list" # Agilent SureSelect: register at https://earray.chem.agilent.com/suredesign/
+CAPTURE_BED="$CAPTURE_DIR/S33266436_Regions.padded100.bed"   # derived below
 GENE_MODEL_DIR=/mnt/data/exome/annotation/gene_models
 GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
 
@@ -1603,6 +1604,22 @@ expect_file "$DATA_DIR/ASC_gene_results_with_hgnc.tsv"
 section "7b. GENCODE gene model & per-gene coding BED"
 cd "$GENE_MODEL_DIR"
 
+# Derive the calling-footprint BED from the Picard interval_list the caller
+# uses (interval_list is 1-based inclusive with an @SQ header; BED is 0-based
+# half-open). This is the footprint callability must be judged over.
+if [[ -s "$CAPTURE_INTERVAL_LIST" && ! -s "$CAPTURE_BED" ]]; then
+    post_process_step "convert Regions.padded100.interval_list -> BED" \
+        bash -c '
+            grep -v "^@" "$1" \
+              | awk "BEGIN{OFS=\"\t\"} {print \$1, \$2-1, \$3}" \
+              | sort -k1,1 -k2,2n \
+              | bedtools merge -i - > "$2"
+        ' _ "$CAPTURE_INTERVAL_LIST" "$CAPTURE_BED"
+    [[ -s "$CAPTURE_BED" ]] && \
+        manifest_record "$(realpath "$CAPTURE_BED")" "post-processed" "interval_list->bed"
+fi
+
+expect_file "$CAPTURE_BED"
 GENCODE_GTF="gencode.v${GENCODE_VERSION}.basic.annotation.gtf.gz"
 GENCODE_URL="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_${GENCODE_VERSION}/${GENCODE_GTF}"
 GENE_CDS_BED="$GENE_MODEL_DIR/gene_cds.hg38.bed"
@@ -1654,15 +1671,7 @@ else
 fi
 
 # =============================================================================
-# 8. CAPTURE BED -- cannot be automated
-# =============================================================================
-section "8. Capture-kit BED"
-manual_needed "$CAPTURE_BED" \
-    "Get GRCh38 target-region BED from wet-lab supplier or kit vendor (Agilent SureSelect: register at https://earray.chem.agilent.com/suredesign/). Place at $CAPTURE_BED"
-expect_file "$CAPTURE_BED"
-
-# =============================================================================
-# 9. VEP + samtools Singularity image (required by VEP rule for LOFTEE)
+# 8. VEP + samtools Singularity image (required by VEP rule for LOFTEE)
 # =============================================================================
 # The upstream Ensembl VEP container does NOT ship samtools. LOFTEE silently
 # fails to register if samtools is missing at runtime - and silent failure
