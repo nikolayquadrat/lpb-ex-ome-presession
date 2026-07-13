@@ -265,7 +265,7 @@ log INFO "manifest:     $MANIFEST_FILE"
 NO_INSTALL="${NO_INSTALL:-0}"
 
 # List of tools the script actually needs
-REQUIRED_TOOLS="wget curl aria2c git unzip tabix bcftools python3 sha256sum"
+REQUIRED_TOOLS="wget curl aria2c git unzip tabix bcftools bedtools python3 sha256sum"
 MISSING_TOOLS=()
 for t in $REQUIRED_TOOLS; do
     command -v "$t" >/dev/null 2>&1 || MISSING_TOOLS+=("$t")
