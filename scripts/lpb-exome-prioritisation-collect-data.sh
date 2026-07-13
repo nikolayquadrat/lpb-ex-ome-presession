@@ -26,7 +26,7 @@
 #  7. Version coherence is enforced explicitly: VEP_CACHE_RELEASE,
 #     VEP_PLUGINS_RELEASE, DBNSFP_VERSION are the single source of truth,
 #     printed in a banner at the start, and a sanity-check function
-#     warns if you've manually broken alignment (e.g., changed the
+#     warns in case of manually broken alignment (e.g., changed the
 #     plugin branch but left the dbNSFP version on v4.x).
 #  8. Final completeness validation walks the full expected-files list
 #     and exits non-zero if anything is missing or malformed.
@@ -64,8 +64,8 @@
 #     per-chromosome downloads complete. The helper deletes per-chromosome
 #     ~184 GB of source files as it processes them, leaving only the
 #     ~30 GB merged stripped VCF that VEP --custom uses. Set
-#     SKIP_GNOMAD_PROCESSING=1 in the env to opt out (e.g. when you want
-#     to do the heavy processing on a different machine). Failures count
+#     SKIP_GNOMAD_PROCESSING=1 in the env to opt out (e.g. in case of
+#     the heavy processing on a different machine). Failures count
 #     as real failures.
 # 12. gnomAD per-chromosome downloads are now gated on the absence of the
 #     merged stripped file. A re-run with the merged file already present
@@ -107,6 +107,10 @@ DBNSFP_VERSION="5.3.1a"           # current academic dbNSFP release
 GNOMAD_RELEASE="4.1"              # gnomAD VCF release line
 CADD_VERSION="v1.7"               # CADD score version
 CLINVAR_DATE="20260420"           # dated ClinVar archive snapshot (see notes)
+GENCODE_VERSION="47"              # GENCODE gene model (GRCh38, chr-prefixed);
+                                  # basic annotation. Used to build the per-gene
+                                  # coding BED for exome callability / the
+                                  # gene-testable universe (matched-sampling null)
 
 # -----------------------------------------------------------------------------
 # Layout - keep in sync with paths in the Snakefile
@@ -120,6 +124,7 @@ VEP_CUSTOM=/mnt/data/exome/annotation/vep/custom
 DATA_DIR=/mnt/data/exome/data
 CAPTURE_DIR=/mnt/data/exome/annotation/capture
 CAPTURE_BED="$CAPTURE_DIR/capture.bed"
+GENE_MODEL_DIR=/mnt/data/exome/annotation/gene_models
 GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
 
 # Singularity image directory (the .simg files referenced from the Snakefile
@@ -134,7 +139,8 @@ VEP_LOFTEE_DOCKER_TAG="${VEP_LOFTEE_DOCKER_TAG:-local/ensembl-vep-loftee:release
 
 mkdir -p "$GENOME_DIR" "$VARIATION_DIR" \
          "$VEP_CACHE" "$VEP_PLUGINS" "$VEP_PLUGIN_DATA" "$VEP_CUSTOM" \
-         "$DATA_DIR" "$CAPTURE_DIR" "$(dirname "$GNOMAD_HELPER")" \
+         "$DATA_DIR" "$CAPTURE_DIR" "$GENE_MODEL_DIR" \
+         "$(dirname "$GNOMAD_HELPER")" \
          "$SIMG_DIR"
 
 # Manifest file: TSV with one row per managed file
@@ -612,6 +618,61 @@ clone_if_missing() {
         N_FAIL+=1
         return 1
     fi
+}
+
+# Build a per-gene CODING-exon BED from a GENCODE GTF.
+#   in:  $1 = gencode .gtf.gz          out: $2 = merged per-gene CDS BED
+# Output is 4-column BED (chrom, start0, end, gene_symbol), one row per merged
+# CDS interval, coordinates on the GTF's chr-prefixed GRCh38 (matches the pipe
+# reference). Requires bedtools (for the per-gene merge) and sort. Merging is
+# done PER GENE (grouped by name in col 4) so overlapping CDS from different
+# transcripts of the same gene collapse, but distinct genes never merge
+# together even if their exons touch.
+gencode_gtf_to_cds_bed() {
+    local gtf_gz="$1" out_bed="$2"
+    if ! command -v bedtools >/dev/null 2>&1; then
+        log ERROR "  bedtools not installed - cannot build gene CDS BED"
+        return 1
+    fi
+    # 1) pull CDS lines, emit BED4 (0-based start), gene_name in col4
+    # 2) sort by gene then position so per-gene merge is contiguous
+    # 3) bedtools merge grouped by name (col4): -c 4 -o distinct keeps the
+    #    symbol; -d -1 requires a real overlap (touching intervals do NOT merge),
+    #    though within one gene adjacent CDS should merge, so use default -d 0.
+    # NOTE: bedtools merge groups only ADJACENT rows, so we must sort by
+    # chrom,start with the name carried, then merge with -c 4 -o distinct and
+    # afterwards drop any row whose merged name is multi-gene (rare touching
+    # genes) by splitting them back out.
+    local tmp="${out_bed}.build.$$"
+    zcat "$gtf_gz" \
+      | awk -F'\t' 'BEGIN{OFS="\t"}
+            $3=="CDS" {
+                # extract gene_name "SYMBOL"
+                name="";
+                if (match($9, /gene_name "[^"]+"/)) {
+                    name=substr($9, RSTART, RLENGTH);
+                    sub(/gene_name "/, "", name); sub(/"$/, "", name);
+                }
+                if (name!="") print $1, $4-1, $5, name;
+            }' \
+      | sort -k1,1 -k2,2n -k3,3n > "$tmp" || { rm -f "$tmp"; return 1; }
+    # Per-gene merge: bedtools merge collapses adjacent intervals; because
+    # different genes can have adjacent/overlapping CDS on opposite strands,
+    # we merge WITHIN gene by using -c 4 -o distinct and then keeping only
+    # rows whose name is a single gene (no comma). Multi-gene merges are split
+    # by re-emitting the original intervals for those regions.
+    bedtools merge -i "$tmp" -c 4 -o distinct 2>>"$LOG_FILE" \
+      | awk -F'\t' 'BEGIN{OFS="\t"}
+            {
+                if (index($4, ",")==0) { print $0 }        # clean single-gene interval
+                else {                                      # overlapping genes: split
+                    n=split($4, g, ",");
+                    for (i=1;i<=n;i++) print $1, $2, $3, g[i];
+                }
+            }' \
+      | sort -k1,1 -k2,2n -k3,3n > "$out_bed" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+    test -s "$out_bed"
 }
 
 # Track expected-files for the final completeness check
@@ -1519,6 +1580,80 @@ fi
 expect_file "$DATA_DIR/ASC_gene_results_with_hgnc.tsv"
 
 # =============================================================================
+# 7b. GENCODE gene model + per-gene coding BED
+# -----------------------------------------------------------------------------
+# GENCODE basic annotation (GRCh38, chr-prefixed) -> the pipe reference is the
+# Broad hg38 chr-prefixed assembly, so coordinates match directly.
+#
+# Two derived products are built for the exome callability / matched-sampling
+# work:
+#   1. gene_cds.hg38.bed          -- per-gene MERGED coding-exon intervals
+#                                    (4-col BED, col4 = gene symbol). The
+#                                    denominator "all coding bases of a gene".
+#   2. gene_cds_capture.hg38.bed  -- (1) INTERSECTED with the capture kit BED,
+#                                    so callability is judged only over CAPTURED
+#                                    coding bases (the honest denominator: a
+#                                    sample can only call variants where the kit
+#                                    targets). This is the BED the mosdepth
+#                                    callable-genes rule should consume as
+#                                    `gene_coding_bed`. Built only if the
+#                                    capture BED is present (it is a manual
+#                                    item, section 8), else skipped with a note.
+# =============================================================================
+section "7b. GENCODE gene model & per-gene coding BED"
+cd "$GENE_MODEL_DIR"
+
+GENCODE_GTF="gencode.v${GENCODE_VERSION}.basic.annotation.gtf.gz"
+GENCODE_URL="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_${GENCODE_VERSION}/${GENCODE_GTF}"
+GENE_CDS_BED="$GENE_MODEL_DIR/gene_cds.hg38.bed"
+GENE_CDS_CAPTURE_BED="$GENE_MODEL_DIR/gene_cds_capture.hg38.bed"
+
+get "$GENCODE_URL" -- "$GENCODE_GTF"
+expect_file "$GENE_MODEL_DIR/$GENCODE_GTF"
+
+# Build the per-gene coding BED (idempotent: only if missing/empty).
+if [[ -s "$GENE_MODEL_DIR/$GENCODE_GTF" ]]; then
+    if [[ ! -s "$GENE_CDS_BED" ]]; then
+        post_process_step "build per-gene CDS BED from GENCODE" \
+            gencode_gtf_to_cds_bed "$GENE_MODEL_DIR/$GENCODE_GTF" "$GENE_CDS_BED"
+    else
+        log SKIP "$(printf '%-68s (%s)' "$GENE_CDS_BED" "$(du -h "$GENE_CDS_BED" | cut -f1)")"
+    fi
+    [[ -s "$GENE_CDS_BED" ]] && manifest_record "$(realpath "$GENE_CDS_BED")" "post-processed" "$GENCODE_URL"
+fi
+expect_file "$GENE_CDS_BED"
+
+# Intersect with the capture kit footprint, if the (manual) capture BED exists.
+# This is the BED the callable-genes rule consumes. If the capture BED is not
+# yet in place, we note it and rely on a re-run (idempotent) to build it once
+# the kit BED is supplied - same pattern as the other manual-dependent steps.
+if [[ -s "$CAPTURE_BED" ]]; then
+    if [[ -s "$GENE_CDS_BED" && ! -s "$GENE_CDS_CAPTURE_BED" ]]; then
+        if command -v bedtools >/dev/null 2>&1; then
+            # -sorted needs matching sort order; both are chrom,start sorted.
+            # Keep col4 (gene symbol) from -a; report only the -a portion.
+            post_process_step "intersect gene CDS BED with capture kit" \
+                bash -c 'bedtools intersect -a "$1" -b "$2" \
+                           | sort -k1,1 -k2,2n -k3,3n > "$3"' _ \
+                "$GENE_CDS_BED" "$CAPTURE_BED" "$GENE_CDS_CAPTURE_BED"
+            [[ -s "$GENE_CDS_CAPTURE_BED" ]] && \
+                manifest_record "$(realpath "$GENE_CDS_CAPTURE_BED")" "post-processed" "capture-intersect"
+        else
+            log ERROR "bedtools not installed - cannot build capture-intersected gene BED"
+            FAILED_ITEMS+=("post:gene-cds-capture-intersect (no bedtools)")
+            N_FAIL+=1
+        fi
+    elif [[ -s "$GENE_CDS_CAPTURE_BED" ]]; then
+        log SKIP "$(printf '%-68s (%s)' "$GENE_CDS_CAPTURE_BED" "$(du -h "$GENE_CDS_CAPTURE_BED" | cut -f1)")"
+    fi
+    expect_file "$GENE_CDS_CAPTURE_BED"
+else
+    log WARN "capture BED not present ($CAPTURE_BED); skipping capture-intersected"
+    log WARN "gene BED. Supply the kit BED (section 8) and re-run to build"
+    log WARN "$GENE_CDS_CAPTURE_BED (consumed by the exome callable-genes rule)."
+fi
+
+# =============================================================================
 # 8. CAPTURE BED -- cannot be automated
 # =============================================================================
 section "8. Capture-kit BED"
@@ -1876,7 +2011,7 @@ ALSO AUTOMATED
   - LOFTEE supporting data: aria2 from Broad
   - DDG2P: TSV with JSON->TSV fallback
   - SCHEMA HGNC join: auto-runs once SCHEMA TSV is in place
-  - REVEL conversion: auto-runs once you place the ZIP
+  - REVEL conversion: auto-runs once the ZIP is in place
   - dbNSFP md5 verification: auto-runs once .md5 is in place
   - gnomAD strip+concat: auto-runs after per-chromosome downloads complete;
       deletes ~184 GB of per-chromosome originals as it processes them and
@@ -1913,8 +2048,8 @@ Logs and manifest
 
   Re-running this script is idempotent - it retries only failures and
   picks up post-processing for any newly-supplied manual files. The
-  manifest gives you a per-file audit trail (size, sha256, source URL,
-  validation status) so you can confirm content stability across runs.
+  manifest gives a per-file audit trail (size, sha256, source URL,
+  validation status).
 
 EOF
 
