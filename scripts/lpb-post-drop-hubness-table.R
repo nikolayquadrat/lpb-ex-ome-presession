@@ -34,10 +34,24 @@
 #'                    similarity can blow up in memory for very large unions.
 #'                    Default 8000. Raise at your own risk, or run collapse on a
 #'                    reduced collection / the enriched subset.
-#' @param add_bins    Add `hub_percentile` and `hub_bin` columns (quantile bins
-#'                    of the hubness used for matching). Default TRUE.
-#' @param n_bins      Number of quantile bins (default 10). Uses n_clusters when
-#'                    available, else n_signatures.
+#' @param add_bins    Add `hub_percentile` and `hub_bin` columns (equal-
+#'                    frequency bins of the hubness used for matching). Default
+#'                    TRUE.
+#' @param n_bins      Number of equal-frequency bins (default 10). Produces
+#'                    EXACTLY n_bins bins of near-equal size (counts differ by
+#'                    at most 1), even when hubness is heavily tied (e.g. the
+#'                    many hubness-0 genes): ties are broken at RANDOM and spread
+#'                    across bins rather than piling into one, so the bin count
+#'                    never collapses below n_bins. This is ntile()-style binning
+#'                    with random (not positional) tie-breaking. Uses n_clusters
+#'                    when available, else n_signatures. If there are fewer genes
+#'                    than n_bins, n_bins is reduced to the number of genes (with
+#'                    a warning).
+#' @param seed        Optional integer seed for the random tie-breaking, so the
+#'                    bin assignment is reproducible. Applied locally: the global
+#'                    RNG stream is saved and restored, so calling this function
+#'                    does not perturb downstream randomness. NULL (default) uses
+#'                    the current RNG state.
 #' @param list_signatures Add a `signatures` column listing each gene's
 #'                    signatures ("; "-joined). Off by default (can be huge).
 #'
@@ -49,6 +63,7 @@ build_hubness_table <- function(pathway_list,
                                 max_signatures_for_collapse = 8000,
                                 add_bins = TRUE,
                                 n_bins = 10,
+                                seed = NULL,
                                 list_signatures = FALSE) {
 
     stopifnot(is.list(pathway_list), length(pathway_list) > 0,
@@ -131,19 +146,43 @@ build_hubness_table <- function(pathway_list,
     key <- if ("n_clusters" %in% names(hub)) hub$n_clusters else hub$n_signatures
     hub <- hub[order(-key), , drop = FALSE]
 
-    # ---- bins for matched sampling ----
+    # ---- equal-frequency bins for matched sampling ----
     if (add_bins) {
         bkey <- if ("n_clusters" %in% names(hub)) hub$n_clusters else hub$n_signatures
-        hub$hub_percentile <- rank(bkey, ties.method = "average") / length(bkey)
-        br <- unique(stats::quantile(bkey, probs = seq(0, 1, length.out = n_bins + 1),
-                                     na.rm = TRUE))
-        # If hubness is highly tied (many zeros), quantile breaks collapse; guard.
-        if (length(br) < 2) {
-            hub$hub_bin <- 1L
-        } else {
-            hub$hub_bin <- as.integer(cut(bkey, breaks = br,
-                                          include.lowest = TRUE, labels = FALSE))
+        N <- length(bkey)
+
+        # smooth percentile: tied hubness values share a percentile (a descriptor,
+        # independent of the discrete bin below).
+        hub$hub_percentile <- rank(bkey, ties.method = "average") / N
+
+        # EXACTLY n_bins equal-frequency bins. Ties are broken at RANDOM via
+        # rank(ties.method="random"), giving distinct ranks 1..N; those are then
+        # split into n_bins contiguous, near-equal groups by integer arithmetic
+        # (no quantile-break collapsing, no floating-point boundary issues).
+        # Tied values (e.g. the hubness-0 genes) are therefore spread across
+        # bins rather than forced into a single one, so the bin count is exactly
+        # n_bins instead of shrinking.
+        nb <- as.integer(n_bins)
+        if (N < nb) {
+            warning(sprintf(paste0("n_bins=%d exceeds the number of genes (%d); ",
+                    "reducing to %d bins (one gene per bin)."), nb, N, N))
+            nb <- as.integer(N)
         }
+
+        # Reproducible tie-breaking without disturbing the caller's RNG stream.
+        if (!is.null(seed)) {
+            if (exists(".Random.seed", envir = .GlobalEnv)) {
+                .old_seed <- get(".Random.seed", envir = .GlobalEnv)
+                on.exit(assign(".Random.seed", .old_seed, envir = .GlobalEnv),
+                        add = TRUE)
+            }
+            set.seed(seed)
+        }
+
+        rr <- as.integer(rank(bkey, ties.method = "random"))   # distinct 1..N
+        # bin = which of nb equal-frequency slices rank rr falls into; pure
+        # integer division guarantees bins 1..nb with sizes differing by <= 1.
+        hub$hub_bin <- as.integer(((rr - 1L) * nb) %/% N + 1L)
     }
 
     rownames(hub) <- NULL
