@@ -135,7 +135,7 @@ print("Samples:", samples)
 # =============================================================================
 
 gene_coding_bed   = "/tmp/annotation/gene_models/gene_cds_capture.hg38.bed" 
-CALLABLE_MIN_DP   = 30    # depth threshold for a base to count as callable
+CALLABLE_MIN_DP   = 20    # depth threshold for a base to count as callable
 CALLABLE_MIN_FRAC = 0.90  # fraction of a gene's coding bases that must reach it
 
 # -----------------------------------------------------------------------------
