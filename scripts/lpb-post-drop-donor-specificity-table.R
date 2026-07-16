@@ -408,7 +408,7 @@ plot_donor_specificity_table <- function(
             axis.line.x  = ggplot2::element_line(colour = "grey40"),
             axis.ticks.x = ggplot2::element_line(colour = "grey40"),
             axis.title.x = ggplot2::element_text(size = 8),
-            plot.margin  = grid::unit(c(0, 2, 0, 2), "pt"))
+            plot.margin  = grid::unit(c(8, 2, 0, 2), "pt"))
     axis_row <- list(grid::nullGrob(), grid::nullGrob(), grid::nullGrob(),
                      grid::nullGrob(), ggplot2::ggplotGrob(axis_p))
 
@@ -434,7 +434,7 @@ plot_donor_specificity_table <- function(
         ncol    = 5,
         nrow    = length(row_h) + 3L,
         widths  = grid::unit(colwidths, "null"),
-        heights = grid::unit(c(1.1, row_h, 0.9, 0.7), "null"))
+        heights = grid::unit(c(1.1, row_h, 1.1, 0.7), "null"))
 
     if (render) { grid::grid.newpage(); grid::grid.draw(g) }
 
