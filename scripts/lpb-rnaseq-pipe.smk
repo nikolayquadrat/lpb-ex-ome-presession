@@ -159,6 +159,7 @@ DATASETS_CONTAINER = "docker://biocontainers/ncbi-datasets-cli:16.22.1_cv1"
 #            re-seeding; fewer marginal alignments
 # Combined with the MAPQ>=20 post-filter, the result is much closer to
 # "reads that genuinely come from this organism" than the defaults.
+
 CONTAM_DIR          = "/tmp/data/00_additional_files/contamination"
 CONTAM_FA           = f"{CONTAM_DIR}/contamination.fa"
 CONTAM_GTF          = f"{CONTAM_DIR}/contamination.gtf"
@@ -328,9 +329,11 @@ CONTAM_READ_LENGTH = 150
 # a fresh machine), ARCASHLA_ENABLED is False and the HLA rules + the HLA
 # summary are simply omitted from the DAG. The rest of the pipeline is
 # unaffected.
+
 ARCASHLA_REF_DIR = "/tmp/data/00_additional_files/arcashla_ref"
 ARCASHLA_DAT     = f"{ARCASHLA_REF_DIR}/dat"
 ARCASHLA_CONTAINER = "docker://quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2"
+
 # Container-internal mount point for the dat/ directory. The host
 # arcashla_ref/dat must be bound over this path at run time (see above).
 ARCASHLA_CONTAINER_DAT_PATH = "/usr/local/share/arcas-hla-0.6.0-2/dat"
@@ -416,6 +419,7 @@ def get_fastq_path(wildcards):
 # The two signals together also distinguish sex-chromosome aneuploidy:
 #   XX  -> XIST high, Y low ;  XY -> XIST low, Y high ;
 #   XXY -> XIST high AND Y high ; X0 -> both low.
+
 SEX_MARKER_GENES = [
     "XIST",                                   # female / inactive-X marker
     "RPS4Y1", "DDX3Y", "UTY", "USP9Y",        # Y panel (X-degenerate, broadly expressed)
@@ -434,6 +438,45 @@ SEX_FEMALE_GENES = {"XIST"}                   # the rest are treated as the Y pa
 SEX_XIST_CPM_MIN = 10.0
 SEX_Y_CPM_MIN    = 20.0
 
+# -----------------------------------------------------------------------------
+# Cell-composition marker scoring (RNA-seq)
+# -----------------------------------------------------------------------------
+# Purpose: a cheap, reference-free check on whether a sample's neuron:glia
+# balance is an outlier. This is the first-pass answer to "is an apparent
+# synaptic/neuronal signature actually cell composition (grey-matter content,
+# dissection) rather than biology?". It is NOT deconvolution: the output is a
+# relative score across samples, not a cell-type proportion. Reference-based
+# proportions (hspe / Bisque) are a future (?) separate, optional block.
+#
+# METHOD. Per gene: CPM from unique reads over the gene span -> log2(CPM+1) ->
+# z-score ACROSS SAMPLES WITHIN A REGION. Per cell type: mean of its markers' z.
+#
+# CIRCULARITY -- the key design point. The canonical neuronal markers
+# (SNAP25, SYT1, SYN1, STMN2) are MEMBERS of the synaptic GO terms under test.
+# Scoring neurons with them would re-measure the enriched signal and could not
+# distinguish composition from biology. So:
+#   - the neuron panel below is deliberately NON-SYNAPTIC (nuclear,
+#     cytoskeletal, metabolic);
+#   - the GLIAL panels are the clean evidence: none of these genes appear in
+#     the enriched synaptic sets, so a low glial score is independent support
+#     for the composition explanation.
+# NB: SOX10 is a canonical OPC/oligodendrocyte marker but is ALSO a VUS
+# candidate gene in this study. It is deliberately omitted so the
+# composition check stays independent of candidate evaluation.
+
+CELL_MARKER_GENES = {
+    # non-synaptic neuronal markers:
+    "neuron":          ["RBFOX3", "MAP2", "NEFL", "NEFM", "NEFH", "TUBB3", "ENO2", "INA"],
+    # glial markers: 
+    "astrocyte":       ["GFAP", "AQP4", "SLC1A2", "SLC1A3", "ALDH1L1", "SOX9", "S100B"],
+    "oligodendrocyte": ["MBP", "PLP1", "MOG", "MAG", "CNP", "MOBP", "CLDN11"],
+    "opc":             ["PDGFRA", "CSPG4", "OLIG1", "OLIG2"],
+    "microglia":       ["CSF1R", "AIF1", "P2RY12", "CX3CR1", "C1QA", "C1QB", "TMEM119"],
+    "endothelial":     ["CLDN5", "FLT1", "PECAM1", "VWF"],
+    # additional markers:
+    "synaptic_readout": ["SNAP25", "SYT1", "SYN1", "DLG4", "STMN2"],
+    "sz_canonical_readout": ["GAD1", "GAD2", "PVALB", "SST", "VIP", "CALB1", "CALB2"],
+}
 
 # -----------------------------------------------------------------------------
 # Targets
@@ -476,6 +519,7 @@ rule all:
         # low-expression samples.
         *(["/tmp/data/06_hla/00_hla_summary_classII.tsv"] if ARCASHLA_ENABLED else []),
         "/tmp/data/04_qc/00_inferred_sex.tsv",
+        "/tmp/data/04_qc/00_cell_marker_expression.tsv",
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
@@ -2789,6 +2833,166 @@ rule r07c_infer_sex:
             msg += f" -- {n_discordant} DISCORDANT sample(s) flagged for identity review"
         print(msg, flush=True)
 
+rule r08a_cell_marker_regions:
+    """
+    Extract genomic spans for the cell-type marker genes from the GENCODE v47
+    GTF, by gene_name. Mirrors r07a_sex_marker_regions. Written once, reused by
+    every per-sample job. POSIX-safe attribute parsing (no gawk-only features).
+
+    Emits cell_type as a column so the aggregation rule never has to re-derive
+    the panel mapping, and so the panel actually used is auditable on disk.
+    """
+    input:
+        gtf = GTF,
+    output:
+        regions = "/tmp/data/04_qc/cellcomp/cell_marker_regions.tsv",
+    run:
+        gene2type = {}
+        for ct, genes in CELL_MARKER_GENES.items():
+            for g in genes:
+                gene2type.setdefault(g, ct)
+        wanted = set(gene2type)
+        os.makedirs(os.path.dirname(output.regions), exist_ok=True)
+
+        found = {}
+        with open(input.gtf) as fh:
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                f = line.rstrip("\n").split("\t")
+                if len(f) < 9 or f[2] != "gene":
+                    continue
+                attr = f[8]
+                key = 'gene_name "'
+                i = attr.find(key)
+                if i < 0:
+                    continue
+                gname = attr[i + len(key):].split('"', 1)[0]
+                if gname in wanted and gname not in found:
+                    # GTF is 1-based inclusive; samtools regions are 1-based too.
+                    found[gname] = (f[0], f[3], f[4])
+
+        missing = wanted - set(found)
+        if missing:
+            print(f"[cell markers] WARN: {len(missing)} marker genes not in GTF "
+                  f"(skipped): {sorted(missing)}", file=sys.stderr)
+
+        with open(output.regions, "w") as out:
+            for ct, genes in CELL_MARKER_GENES.items():
+                for g in genes:
+                    if g in found:
+                        chrom, start, end = found[g]
+                        out.write(f"{g}\t{ct}\t{chrom}\t{start}\t{end}\n")
+        print(f"[cell markers] wrote {len(found)} gene regions to "
+              f"{output.regions}", flush=True)
+
+rule r08b_cell_marker_counts_per_sample:
+    """
+    Per-sample unique-read counts over each marker gene span, plus library size.
+    Mirrors r07b: index-based only (idxstats reads the .bai; view -c seeks to
+    each span), so no full-BAM scan. ~35 indexed region counts per sample.
+
+    -q 30  : STAR gives MAPQ 255 to uniquely-mapped reads, so this keeps only
+             unique reads. Matters here for the paralogous marker families
+             (NEFL/NEFM/NEFH; C1QA/C1QB; OLIG1/OLIG2).
+    -F 3332: exclude unmapped + secondary + duplicate + supplementary.
+
+    lib_size comes from idxstats and includes duplicates, which view -c excludes.
+    That is a uniform per-sample scale factor and cancels in the per-gene z, so
+    it does not affect the score -- same reasoning as r07b.
+    """
+    input:
+        bam     = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam",
+        bai     = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam.bai",
+        regions = "/tmp/data/04_qc/cellcomp/cell_marker_regions.tsv",
+    output:
+        tsv = "/tmp/data/04_qc/cellcomp/{sample}.marker_counts.tsv",
+    threads: 2
+    singularity: SAMTOOLS_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output.tsv})"
+
+        IDX=$(mktemp)
+        trap 'rm -f "${{IDX:-}}"' EXIT INT TERM
+
+        samtools idxstats {input.bam} > "$IDX"
+        LIB=$(awk '{{m += $3}} END {{print m + 0}}' "$IDX")
+
+        printf 'sample\tlib_size\tgene\tcell_type\tcount\n' > {output.tsv}
+        while IFS=$'\t' read -r gene ctype chr start end; do
+            [ -z "$gene" ] && continue
+            cnt=$(samtools view -c -q 30 -F 3332 {input.bam} "${{chr}}:${{start}}-${{end}}")
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+                "{wildcards.sample}" "$LIB" "$gene" "$ctype" "$cnt" >> {output.tsv}
+        done < {input.regions}
+        """
+
+rule r08c_cell_marker_expression:
+    """
+    Aggregate per-sample marker counts into one cohort table.
+
+    SCOPE: this rule emits per-sample MEASUREMENTS only -- counts, library size,
+    CPM, log2(CPM+1). Every value depends solely on its own sample, so adding or
+    removing a sample never changes another sample's numbers, and the table is a
+    general-purpose marker-expression artifact rather than an answer to one
+    question.
+
+    Deliberately NOT done here (all cohort-dependent or study-specific, so they
+    belong in downstream analysis):
+      - z-scoring across samples          (changes when the cohort changes)
+      - stratifying by brain region       (parses study-specific sample names)
+      - cell-type composite scores        (an analysis choice, e.g. which types
+                                           count as glia)
+      - outlier / donor comparisons
+    Scoring recipe for the composition check is in the analysis scripts; see the
+    note on r08a for why the neuron panel is non-synaptic and the glial panels
+    are the independent evidence.
+
+    Long format (one row per sample x marker) keeps it lossless and easy to
+    extend with new panels; pivot downstream as needed.
+    """
+    input:
+        counts = expand("/tmp/data/04_qc/cellcomp/{sample}.marker_counts.tsv",
+                        sample=samples),
+    output:
+        tsv = "/tmp/data/04_qc/00_cell_marker_expression.tsv",
+    run:
+        import math
+
+        order = {g: i for i, g in enumerate(
+            g for ct in CELL_MARKER_GENES for g in CELL_MARKER_GENES[ct])}
+
+        rows = []
+        for path in input.counts:
+            with open(path) as fh:
+                next(fh)                                  # header
+                for line in fh:
+                    s, L, gene, ctype, c = line.rstrip("\n").split("\t")
+                    lib, cnt = float(L), float(c)
+                    if lib > 0:
+                        cpm = cnt / lib * 1e6
+                        rows.append((s, gene, ctype, int(cnt), int(lib),
+                                     f"{cpm:.6f}", f"{math.log2(cpm + 1):.6f}"))
+                    else:
+                        # no mapped reads: emit the row, flag the metric
+                        rows.append((s, gene, ctype, int(cnt), int(lib),
+                                     "NA", "NA"))
+
+        rows.sort(key=lambda r: (r[0], order.get(r[1], 10**6)))
+
+        os.makedirs(os.path.dirname(output.tsv), exist_ok=True)
+        with open(output.tsv, "w") as out:
+            out.write("sample\tgene\tcell_type\tcount\tlib_size\tcpm\tlog2cpm\n")
+            for r in rows:
+                out.write("\t".join(str(x) for x in r) + "\n")
+
+        n_s = len({r[0] for r in rows})
+        n_g = len({r[1] for r in rows})
+        print(f"[cell markers] wrote {output.tsv}: {len(rows)} rows "
+              f"({n_s} samples x {n_g} markers)", flush=True)
+
 # =============================================================================
 # Reference download instructions (run ONCE before the pipeline)
 # =============================================================================
@@ -2834,5 +3038,4 @@ rule r07c_infer_sex:
 #   extension           = "fq.gz" or "fastq.gz"
 #   include_in_analysis = 1 (process) or 0 (skip)
 #   gender              = "male"/"female"/"unknown" (for sex inference)
-#
 # =============================================================================
