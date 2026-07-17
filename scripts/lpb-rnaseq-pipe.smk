@@ -474,8 +474,18 @@ CELL_MARKER_GENES = {
     "microglia":       ["CSF1R", "AIF1", "P2RY12", "CX3CR1", "C1QA", "C1QB", "TMEM119"],
     "endothelial":     ["CLDN5", "FLT1", "PECAM1", "VWF"],
     # additional markers:
+    "ruzicka24_down": ["BSN", "SHANK2", "RASGRF1", "NEURL1", "PSEN1", "BCR"],
+    "fromer16_up":    ["TACR3", "HGF", "C3orf52", "MC4R", "ADCYAP1", "MST1L", "BEND4", "SCN9A", "TMEM26", "BIRC3"],
+    "fromer16_down":  ["IGF2", "RERGL", "HPSE2", "SLCO2A1", "CLEC3B", "RAMP2", "ITIH2", "COL5A3", "SELPLG", "ALDH1A1"],
     "synaptic_readout": ["SNAP25", "SYT1", "SYN1", "DLG4", "STMN2"],
-    "sz_canonical_readout": ["GAD1", "GAD2", "PVALB", "SST", "VIP", "CALB1", "CALB2"],
+    "bowen19_type2_up": ["BAG3", "MT1X", "ANGPTL4", "F3", "PDK4", "EMP1", "ADM", "CSDA",
+        "IFITM3", "EFEMP1", "CEBPD", "APOLD1", "IFITM2", "DDIT4", "CD44", "FGF2", "SOX9",
+        "PPAP2B", "SLC16A9", "MT2A", "BMPR1B", "NTRK2", "PLSCR4", "PPAP2B", "RANBP3L" ],
+    "bowen19_type2_down": [ "NPY", "RERGL", "RTN1", "NEUROD6", "ATP6V1G2", "NSF",
+        "ENSA", "AP1S1", "DCLK1", "G3BP2", "MAL2",  "BEND6", "CRYM", "TAC1", "ARMCX3",
+        "MAP1B", "AP1S1", "VGF", "TRIM23", "ACAT2", "PGAM1", "OPN3"],
+    "lanz19_dlpfc_neuronal_down": ["GAD1","PVALB","SST","CXCL12","ATP6V1A","RGS4","CNTNAP2"],
+    "cytokine_response_genes": ["IL6", "STAT3", "SOCS3", "IL1RL1","SHC1", "AKT2"],
 }
 
 # -----------------------------------------------------------------------------
