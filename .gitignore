@@ -7,4 +7,6 @@ data/rnaseq-pipe/00_additional_files/*
 data/rnaseq-pipe/00_additional_files/contamination/*
 !data/rnaseq-pipe/00_additional_files/contamination/species.txt
 scripts/lpb-drop-expand_gtex.py
-scripts/lpb-drop-post-outrider-local.R
+scripts/scripts_to_make_deconv_reference/*
+!scripts/scripts_to_make_deconv_reference/_deconv_common.py
+!scripts/scripts_to_make_deconv_reference/siletti_cortex.py

@@ -128,6 +128,30 @@ CAPTURE_BED="$CAPTURE_DIR/S33266436_Regions.padded100.bed"   # derived below
 GENE_MODEL_DIR=/mnt/data/exome/annotation/gene_models
 GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
 
+# --- OPTIONAL: snRNA-seq deconvolution references (feed the RNA-seq hspe
+#     deconvolution, not the exome pipeline). Off by default; enable with
+#     BUILD_DECONV_REFERENCE=1. See section 10.
+#
+#     Each reference is produced by a self-contained script in
+#     scripts_to_make_deconv_reference/ (next to this script), named for the
+#     reference it builds. The driver in section 10 discovers and runs them;
+#     each script manages its own download + idempotency. A new reference is a
+#     new script in that folder -- the driver never changes.
+#
+#     Large shared source download (~37 GB for the two Siletti h5ad, + HNOCA);
+#     see the section 10 header and the summary disk note before enabling.
+DECONV_DIR=/mnt/data/exome/RNASEQ/rnaseq-drop/00_additional_files/deconv # change this ugliness later
+DECONV_SOURCE_DIR="$DECONV_DIR/source"                # shared big vendor h5ad
+DECONV_OUT_ROOT="$DECONV_DIR/reference_canonical"     # one subdir per reference
+DECONV_SCRIPTS_DIR=/mnt/data/exome/scripts/scripts_to_make_deconv_reference
+# Optional subset: space-separated script basenames (no .py) to build; empty =
+# all scripts in the folder. e.g. DECONV_REFERENCES="siletti_cortex"
+DECONV_REFERENCES="${DECONV_REFERENCES:-}"
+# If source h5ad files are abcent source URLs are read by the scripts from the environment (no stable
+# programmatic URL for the CELLxGENE Siletti files); export before running:
+#     export SILETTI_NEURONS_URL=...  SILETTI_NONNEURONS_URL=...
+#     (HNOCA defaults to its Zenodo URL; override with HNOCA_H5AD_URL.)
+
 # Singularity image directory (the .simg files referenced from the Snakefile
 # live here). The VEP+samtools image is built locally so it ships with the
 # samtools binary that LOFTEE needs at runtime - the upstream ensembl-vep
@@ -143,6 +167,10 @@ mkdir -p "$GENOME_DIR" "$VARIATION_DIR" \
          "$DATA_DIR" "$CAPTURE_DIR" "$GENE_MODEL_DIR" \
          "$(dirname "$GNOMAD_HELPER")" \
          "$SIMG_DIR"
+# deconv dirs only when the optional step is enabled (keeps the tree clean)
+if [[ "${BUILD_DECONV_REFERENCE:-0}" == "1" ]]; then
+    mkdir -p "$DECONV_SOURCE_DIR" "$DECONV_OUT_ROOT"
+fi
 
 # Manifest file: TSV with one row per managed file
 MANIFEST_FILE="${MANIFEST_FILE:-/mnt/data/exome/MANIFEST.tsv}"
@@ -325,6 +353,38 @@ if (( HAVE_PYTHON == 0 )); then
 fi
 if (( HAVE_SHA256 == 0 )); then
     log WARN "sha256sum unavailable - manifest will lack hash entries"
+fi
+
+# --- Python libs for the deconvolution builders: isolated venv, never system ---
+# System pip collides with apt-managed packages (e.g. typing_extensions has no
+# RECORD file and cannot be uninstalled by pip). A venv sidesteps this entirely.
+DECONV_VENV="$DECONV_DIR/venv"
+DECONV_PYTHON="$DECONV_VENV/bin/python3"
+DECONV_PYLIBS="anndata h5py scipy pandas numpy"
+
+if [[ ! -x "$DECONV_PYTHON" ]]; then
+    log INFO "creating deconvolution venv at $DECONV_VENV"
+    if ! python3 -m venv "$DECONV_VENV" 2>/dev/null; then
+        log ERROR "could not create venv (need: sudo apt-get install -y python3-venv)"
+        FAILED_ITEMS+=("deconv:venv-create"); N_FAIL+=1
+    else
+        "$DECONV_PYTHON" -m pip install --quiet --upgrade pip
+    fi
+fi
+
+if [[ -x "$DECONV_PYTHON" ]]; then
+    # check against the VENV interpreter, not system python3
+    MISSING_PYLIBS=()
+    for lib in $DECONV_PYLIBS; do
+        "$DECONV_PYTHON" -c "import $lib" 2>/dev/null || MISSING_PYLIBS+=("$lib")
+    done
+    if [[ ${#MISSING_PYLIBS[@]} -gt 0 ]]; then
+        log INFO "installing into venv: ${MISSING_PYLIBS[*]}"
+        if ! "$DECONV_PYTHON" -m pip install --quiet "${MISSING_PYLIBS[@]}"; then
+            log ERROR "pip install into venv failed (check network/proxy)"
+            FAILED_ITEMS+=("deconv:pip"); N_FAIL+=1
+        fi
+    fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -1850,6 +1910,111 @@ else
 fi
 
 expect_file "$VEP_LOFTEE_SIMG"
+
+# 10. OPTIONAL: snRNA-seq deconvolution references (-> RNA-seq hspe)
+# -----------------------------------------------------------------------------
+# Driver for the reference builders in scripts_to_make_deconv_reference/. Each
+# script is self-contained (manages its own download + idempotency) and emits
+# the canonical hspe contract (matrix.mtx.gz / features.tsv.gz / cells.tsv.gz /
+# provenance.json) under $DECONV_OUT_ROOT/<script-name>/. This is NOT an exome
+# resource; it lives here only because this is the project's data-provisioning
+# script. Opt IN with BUILD_DECONV_REFERENCE=1 (default off): the sources are
+# large.
+#
+#   DISK (peak, during the run) -- the two Siletti scripts SHARE one source
+#   download (~37 GB), so it is not additive per reference:
+#     shared Siletti source (kept)  ~37 GB   (Neurons ~27 + Nonneurons ~10)
+#     HNOCA source (kept)           ~size of the chosen Zenodo object
+#     each canonical reference out  < 50 MB  (subsampled; hundreds of cells/class)
+#     -> plan ~40 GB free for Siletti alone; more if building HNOCA too.
+#   Builders read h5ad BACKED, never densifying (a densified atlas ~= 750 GB).
+#   Steady state keeps the sources for idempotent re-runs; delete
+#   "$DECONV_SOURCE_DIR" by hand to reclaim (a re-run re-downloads).
+#
+#   INPUTS (scripts read URLs from the environment; export before running):
+#     export SILETTI_NEURONS_URL=...  SILETTI_NONNEURONS_URL=...
+#         permanent CELLxGENE links from the collection at
+#         github.com/linnarsson-lab/adult-human-brain (no stable prog. URL).
+#     HNOCA defaults to its Zenodo URL; override with HNOCA_H5AD_URL. HNOCA is
+#     two-phase: first run ENUMERATES its annotation columns (writes nothing);
+#     set HNOCA_L1_COL / HNOCA_L2_COL / HNOCA_NEURON_L1 from that output and
+#     re-run to build.
+#
+#   Build only some references with e.g. DECONV_REFERENCES="siletti_cortex".
+# =============================================================================
+section "10. snRNA-seq deconvolution references (optional)"
+
+if [[ "${BUILD_DECONV_REFERENCE:-0}" != "1" ]]; then
+    log SKIP "deconvolution references (set BUILD_DECONV_REFERENCE=1 to build)"
+elif [[ ! -d "$DECONV_SCRIPTS_DIR" ]]; then
+    log ERROR "scripts dir not found: $DECONV_SCRIPTS_DIR"
+    FAILED_ITEMS+=("deconv:scripts-dir-missing"); N_FAIL+=1
+else
+    # ---- ensure an isolated venv with the builder's python deps ----
+    # (venv, never system pip: avoids the apt-vs-pip RECORD collision on
+    # externally-managed Ubuntu).
+    deconv_ready=1
+    if [[ ! -x "$DECONV_PYTHON" ]]; then
+        log INFO "creating deconvolution venv at $DECONV_VENV"
+        if python3 -m venv "$DECONV_VENV" 2>/dev/null; then
+            "$DECONV_PYTHON" -m pip install --quiet --upgrade pip 2>/dev/null || true
+        else
+            log ERROR "could not create venv (need: apt-get install -y python3-venv)"
+            FAILED_ITEMS+=("deconv:venv-create"); N_FAIL+=1
+            deconv_ready=0
+        fi
+    fi
+    if [[ "$deconv_ready" == "1" && -x "$DECONV_PYTHON" ]]; then
+        missing_pylibs=()
+        for lib in $DECONV_PYLIBS; do
+            "$DECONV_PYTHON" -c "import $lib" 2>/dev/null || missing_pylibs+=("$lib")
+        done
+        if [[ ${#missing_pylibs[@]} -gt 0 ]]; then
+            log INFO "installing into venv: ${missing_pylibs[*]}"
+            if ! "$DECONV_PYTHON" -m pip install --quiet "${missing_pylibs[@]}"; then
+                log ERROR "pip install into venv failed (check network/proxy)"
+                FAILED_ITEMS+=("deconv:pip"); N_FAIL+=1
+                deconv_ready=0
+            fi
+        fi
+    fi
+
+    if [[ "$deconv_ready" != "1" ]]; then
+        log ERROR "deconvolution python env not ready; skipping reference builds"
+    else
+    # discover builder scripts (skip the shared _*.py library modules)
+    shopt -s nullglob
+    for script in "$DECONV_SCRIPTS_DIR"/*.py; do
+        base="$(basename "$script" .py)"
+        [[ "$base" == _* ]] && continue                 # _deconv_common etc.
+        # optional subset selection
+        if [[ -n "$DECONV_REFERENCES" ]]; then
+            case " $DECONV_REFERENCES " in
+                *" $base "*) : ;;
+                *) log SKIP "deconv reference '$base' (not in DECONV_REFERENCES)"
+                   continue ;;
+            esac
+        fi
+        out="$DECONV_OUT_ROOT/$base"
+        # The script is idempotent internally (skips download/build if done), so
+        # we always invoke it; it no-ops cheaply when already built.
+        if post_process_step "build deconv reference '$base'" \
+                "$DECONV_PYTHON" "$script" \
+                    --source-dir "$DECONV_SOURCE_DIR" \
+                    --outdir "$out" \
+                    --seed 42; then
+            # record any canonical outputs that now exist (multi-level scripts
+            # write subdirs, so search under $out)
+            while IFS= read -r prov; do
+                manifest_record "$(realpath "$(dirname "$prov")/matrix.mtx.gz")" \
+                    "post-processed" "deconv:$base" 2>/dev/null || true
+            done < <(find "$DECONV_OUT_ROOT" -maxdepth 2 -path "*/${base}*" \
+                          -name provenance.json 2>/dev/null)
+        fi
+    done
+    shopt -u nullglob
+    fi
+fi
 
 # =============================================================================
 # Final completeness check + manifest update
