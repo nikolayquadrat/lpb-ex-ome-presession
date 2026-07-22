@@ -1,0 +1,475 @@
+rm(list = ls())
+
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr)
+library(purrr)
+library(readxl)
+library(writexl)
+library(OUTRIDER)   # v1.22.0
+library(fgsea)      # v1.30.0
+library(msigdbr)    # v7.5.1
+library(enrichplot) # v1.24.4
+
+# Arguments ============
+experiments <- list(
+    "ba9_gtex" = list(
+        "outrider_tag" = "ba9_gtex",
+        "averaging_mode" = "simple",
+        "samples" = list(
+            "SZ07" = c("KH16_SZ07_BA9_S68", "SZ07_BA9_14"),
+            "HC91" = c("KH3_HC91_BA9_S57",  "HC91_BA9_29"),
+            "SZ06" = c("KH15_SZ06_BA9_S67", "SZ06_BA9_5")
+        )
+    ),
+    "ba22p_ba4_cortex_gtex" = list(
+        "outrider_tag" = "cortex_gtex",
+        "averaging_mode" = "groups",
+        "samples" = list(
+            "SZ07" = c("SZ07_BA22p_16","SZ07_BA22p_17","SZ07_BA22p_18",
+                       "SZ07_BA4_7","SZ07_BA4_8","SZ07_BA4_9"),
+            "HC91" = c("HC91_BA22p_30","KH23_HC91_BA22p_S75",
+                       "HC91_BA4_28"),
+            "SZ06" = c("SZ06_BA22p_6","KH35_SZ06_BA22p_S85",
+                       "SZ06_BA4_4")
+        )
+    ),
+    "ba22p_cortex_gtex" = list(
+        "outrider_tag" = "cortex_gtex",
+        "averaging_mode" = "simple",
+        "samples" = list(
+            "SZ07" = c("SZ07_BA22p_16","SZ07_BA22p_17","SZ07_BA22p_18"),
+            "HC91" = c("HC91_BA22p_30","KH23_HC91_BA22p_S75"),
+            "SZ06" = c("SZ06_BA22p_6","KH35_SZ06_BA22p_S85")
+        )
+    ),
+    "ba4_cortex_gtex" = list(
+        "outrider_tag" = "cortex_gtex",
+        "averaging_mode" = "simple",
+        "samples" = list(
+            "SZ07" = c("SZ07_BA4_7","SZ07_BA4_8","SZ07_BA4_9"),
+            "HC91" = c("HC91_BA4_28"),
+            "SZ06" = c("SZ06_BA4_4")
+        )
+    ),
+    "all_inhouse" = list(
+        "outrider_tag" = "inhouse_all_regions",
+        "averaging_mode" = "groups",
+        "samples" = list(
+            "SZ07" = c("KH16_SZ07_BA9_S68", "SZ07_BA9_14",
+                       "SZ07_BA22p_16","SZ07_BA22p_17","SZ07_BA22p_18",
+                       "SZ07_BA4_7","SZ07_BA4_8","SZ07_BA4_9"),
+            "HC91" = c("HC91_BA22p_30","KH23_HC91_BA22p_S75","HC91_BA4_28",
+                       "HC91_BA9_29","KH3_HC91_BA9_S57"),
+            "SZ06" = c("KH15_SZ06_BA9_S67", "SZ06_BA9_5","SZ06_BA22p_6",
+                       "KH35_SZ06_BA22p_S85","SZ06_BA4_4")
+        )
+    )
+)
+git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession"
+exome_name <- "e1-19"
+
+# Functions ========
+# **** ranking function -----------
+signed_min_abs <- function(x, shrink_discordant = TRUE) {
+    x <- x[!is.na(x)]
+    if (length(x) == 0) return(NA_real_)
+    val <- x[which.min(abs(x))]
+    if (shrink_discordant && length(unique(sign(x[x != 0]))) > 1) {
+        # strong symmetric discordance -> damp toward zero by the disagreement
+        val <- val * (1 - min(abs(x)) / max(abs(x)))
+    }
+    val
+}
+# % notation
+# k=\operatorname*{arg\,min}_{j}\,|z_j|, \qquad S_0 = z_k .
+# 
+# % shrinkage factor
+# \phi=
+#     \begin{cases}
+# \displaystyle 1-\frac{\min_j|z_j|}{\max_j|z_j|},
+# & \text{nonzero } z_j \text{ differ in sign (discordant),}\\[2.2ex]
+# 1, & \text{otherwise (concordant).}
+# \end{cases}
+# 
+# % combined statistic
+# S = z_k\,\phi .
+# 
+# % m = 2 specialization
+# S=
+#     \begin{cases}
+# z_k, & \operatorname{sign}(z_1)\,\operatorname{sign}(z_2)\ge 0,\\[1.6ex]
+# z_k\!\left(1-\dfrac{\min(|z_1|,|z_2|)}{\max(|z_1|,|z_2|)}\right),
+# & \operatorname{sign}(z_1)\,\operatorname{sign}(z_2)<0,
+# \end{cases}
+# \qquad k=\operatorname*{arg\,min}_{i\in\{1,2\}}|z_i| .
+
+# **** custom GSEA plotting functions -------
+source(sprintf("%s/scripts/lpb-post-drop-fgsea-emap.R", git_folder))
+source(sprintf("%s/scripts/lpb-post-drop-outrider-plot-gsea-highlighted.R", git_folder))
+
+# ENSG --> HGNC dictionary ==========
+constraint <- fread(sprintf("%s/data/exome-pipe/data/gnomad_v4.1_constraint_metrics.tsv", git_folder))
+constraint <- constraint[mane_select == TRUE]  # one row per gene
+ensg_to_hgnc <- setNames(constraint$gene, sub("\\..*$", "", constraint$gene_id))
+
+# Candidate mutations ======
+tier_mutations <- read.delim(sprintf("%s/data/exome-pipe/fastq/12_tiered/%s-combined_master.tsv", git_folder, exome_name)) %>% 
+    filter(tier %in% c("A","B","C"))
+tier_genes <- names(table(tier_mutations$SYMBOL))
+
+# GSEA signatures ===========
+hallmark <- msigdbr(species="Homo sapiens", category="H")
+reactome <- msigdbr(species="Homo sapiens", category="C2", subcategory="CP:REACTOME")
+biocarta <- msigdbr(species="Homo sapiens", category="C2", subcategory="CP:BIOCARTA")
+kegg     <- msigdbr(species="Homo sapiens", category="C2", subcategory="CP:KEGG")
+go_bp    <- msigdbr(species="Homo sapiens", category="C5", subcategory="GO:BP")
+go_cc    <- msigdbr(species="Homo sapiens", category="C5", subcategory="GO:CC")
+go_mf    <- msigdbr(species="Homo sapiens", category="C5", subcategory="GO:MF")
+wiki     <- msigdbr(species="Homo sapiens", category="C2", subcategory="CP:WIKIPATHWAYS")
+hpo      <- msigdbr(species="Homo sapiens", category="C5", subcategory="HPO")
+
+pathway_list <- c(
+    lapply(split(hallmark$gene_symbol, hallmark$gs_name), unique),
+    lapply(split(reactome$gene_symbol, reactome$gs_name), unique),
+    lapply(split(kegg$gene_symbol, kegg$gs_name), unique),
+    lapply(split(biocarta$gene_symbol, biocarta$gs_name), unique),
+    lapply(split(wiki$gene_symbol, wiki$gs_name), unique),
+    lapply(split(go_bp$gene_symbol, go_bp$gs_name), unique),
+    lapply(split(go_cc$gene_symbol, go_cc$gs_name), unique),
+    lapply(split(go_mf$gene_symbol, go_mf$gs_name), unique),
+    lapply(split(hpo$gene_symbol, hpo$gs_name), unique)
+)
+
+# Main loop =========
+dir.create(sprintf("%s/data/post-drop/fst-pass", git_folder), showWarnings = FALSE)
+for(exp in names(experiments)) {
+    # exp <- "ba9_gtex"
+    cat("Experiment", exp, "\n")
+    
+    # **** Data =========
+    outrider_tag <- experiments[[exp]][["outrider_tag"]]
+    ods <- readRDS(sprintf("%s/data/drop-pipe/%s/Output/processed_results/aberrant_expression/v47/outrider/outrider/ods.Rds",
+                           git_folder, outrider_tag))
+    z <- zScore(ods) # z-scores; Genes x Samples matrix
+    
+    list_of_samples <- experiments[[exp]][["samples"]]
+    list_of_ranks <- list()
+    averaging_mode <- experiments[[exp]][["averaging_mode"]]
+
+    for (donor in names(list_of_samples)) {
+        # donor <- "SZ07"
+        donor_z <- zScore(ods)[, list_of_samples[[donor]], drop = FALSE]
+        if (averaging_mode == "groups") {
+            groups <- case_when(
+                grepl("BA9", list_of_samples[[donor]])   ~ "BA9",
+                grepl("BA22p", list_of_samples[[donor]]) ~ "BA22p",
+                grepl("BA4", list_of_samples[[donor]])   ~ "BA4",
+                TRUE ~ "other"
+            )
+            names(groups) <- list_of_samples[[donor]]
+            donor_z <- vapply(
+                split(seq_len(ncol(donor_z)), groups),
+                function(j) rowMedians(donor_z, cols = j, na.rm = TRUE),
+                numeric(nrow(donor_z))
+            )
+        }
+        donor_combined <- apply(donor_z, 1, signed_min_abs)
+        gene_ranks <- data.frame(
+            ensembl_id = rownames(donor_z),
+            hgnc       = ensg_to_hgnc[sub("\\..*$", "", rownames(donor_z))],
+            combined_z = donor_combined
+        ) %>% 
+            drop_na() %>% 
+            group_by(hgnc) %>%
+            slice_max(abs(combined_z), n = 1, with_ties = FALSE) %>%
+            ungroup()
+        
+        gene_ranks <- gene_ranks[order(-gene_ranks$combined_z, na.last=TRUE), ]
+        gene_ranks_vector <- gene_ranks$combined_z
+        names(gene_ranks_vector) <- gene_ranks$hgnc
+        list_of_ranks[[donor]] <- gene_ranks_vector
+    }
+    
+    # **** GSEA test with the OURIDER results ========
+    if (!file.exists(sprintf("%s/data/post-drop/fst-pass/%s_list_of_fgsea_results.rds", git_folder, exp))) {
+        list_of_fgsea_results <- list()
+        for (donor in names(list_of_samples)) {
+            # Run fgsea
+            cat(donor, "\n")
+            fgsea_res <- fgsea(
+                pathways = pathway_list,
+                stats = list_of_ranks[[donor]],
+                minSize = 20,  # exclude too narrow categories
+                maxSize = 200, # exclude too broad categories
+                nPermSimple = 10000
+            )
+            list_of_fgsea_results[[donor]] <- fgsea_res[order(padj), ]
+        }
+        
+        # save the fgsea run results
+        saveRDS(list_of_fgsea_results, file = sprintf("%s/data/post-drop/fst-pass/%s_list_of_fgsea_results.rds",
+                                                 git_folder, exp))
+    }
+    
+    # **** Aggregate and collapse the results ============
+    list_of_fgsea_results <- readRDS(sprintf("%s/data/post-drop/fst-pass/%s_list_of_fgsea_results.rds",
+                                             git_folder, exp))
+    
+    for (donor in names(list_of_fgsea_results)) {
+        # donor <- "SZ07"
+        fgsea_res <- list_of_fgsea_results[[donor]]
+        fgsea_res_sig_uncorrected <- fgsea_res[padj < 0.05][order(pval)] # collapsePathways walks the pathways in the order given and greedily keeps the first (most significant) representative of each redundant group.
+        
+        stopifnot(is.numeric(list_of_ranks[[donor]]), !is.null(names(list_of_ranks[[donor]])))
+        stopifnot(all(fgsea_res_sig_uncorrected$pathway %in% names(pathway_list)))
+        
+        # **** **** collapse pathways accross signatures collections ----------
+        collapsed_pathways <- collapsePathways( # could be long
+            fgseaRes = fgsea_res_sig_uncorrected,
+            pathways = pathway_list,
+            stats    = list_of_ranks[[donor]],
+            pval.threshold = 0.01
+        )
+        fgsea_res_sig <- fgsea_res_sig_uncorrected[fgsea_res_sig_uncorrected$pathway %in% collapsed_pathways$mainPathways, ]
+        
+        cat(donor, "\t",
+            "before:", dim(fgsea_res_sig_uncorrected)[1], "\t",
+            "after:",  dim(fgsea_res_sig)[1], "\n")
+        if(dim(fgsea_res_sig)[1] == 0) {
+            next
+        }
+        
+        # **** **** emapplots ------------
+        emapplot_uncorrected <- fgsea_emap(fgsea_res_sig_uncorrected, pathway_list = pathway_list,
+                        edge_source = "gene_sets", color_by = "NES", edge_cutoff = 0.05)
+        ggsave(sprintf("%s/data/post-drop/fst-pass/%s_%s_emapplot_all.png",
+                       git_folder, exp, donor),
+               emapplot_uncorrected, width = 12, height = 9, dpi = 150, bg = "white")
+        
+        emapplot_collapsed   <- fgsea_emap(fgsea_res_sig, pathway_list = pathway_list,
+                        edge_source = "gene_sets", color_by = "NES", edge_cutoff = 0.05)
+        ggsave(sprintf("%s/data/post-drop/fst-pass/%s_%s_emapplot_collapsed.png",
+                       git_folder, exp, donor),
+               emapplot_collapsed, width = 12, height = 9, dpi = 150, bg = "white")
+        
+        
+        # **** **** tiered genes ----------
+        fgsea_res_sig_uncorrected$pathway_genes <- lapply(fgsea_res_sig_uncorrected$pathway, function(x) {
+            pathway_list[[x]]
+        })
+        
+        tiered_genes_in_pathways <- list()
+        for (tiered_gene in tier_genes) {
+            # tiered_gene <- "SLC11A1"
+            fgsea_res_with_tiered_genes_in_leading_edge <- fgsea_res_sig_uncorrected[sapply(1:dim(fgsea_res_sig_uncorrected)[1], function(x) { tiered_gene %in% fgsea_res_sig_uncorrected$leadingEdge[[x]]}), ] %>% 
+                mutate(tiered_gene = tiered_gene, evidence = "leading_edge")
+            fgsea_res_with_tiered_genes_in_pathway <- fgsea_res_sig_uncorrected[sapply(1:dim(fgsea_res_sig_uncorrected)[1], function(x) { tiered_gene %in% fgsea_res_sig_uncorrected$pathway_genes[[x]]}), ] %>% 
+                mutate(tiered_gene = tiered_gene, evidence = "pathway") %>% 
+                filter(!(pathway %in% fgsea_res_with_tiered_genes_in_leading_edge$pathway))
+            
+            cat(tiered_gene, "\t",
+                dim(fgsea_res_with_tiered_genes_in_leading_edge)[1], "\t",
+                min(fgsea_res_with_tiered_genes_in_leading_edge$padj), "\t",
+                dim(fgsea_res_with_tiered_genes_in_pathway)[1], "\t",
+                min(fgsea_res_with_tiered_genes_in_pathway$padj),
+                "\n")
+            
+            tiered_genes_in_pathways[[tiered_gene]] <- bind_rows(fgsea_res_with_tiered_genes_in_leading_edge,
+                                                                 fgsea_res_with_tiered_genes_in_pathway)
+            
+        }
+        tiered_genes_in_pathways_df <- bind_rows(tiered_genes_in_pathways) %>% 
+            dplyr::select(tiered_gene, evidence, everything())
+        
+        # **** **** save results -----------
+        writexl::write_xlsx(
+            list(
+                "fgsea_res_sig_uncorrected" = fgsea_res_sig_uncorrected %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", ")))),
+                "fgsea_res_sig" = fgsea_res_sig %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", ")))),
+                "tiered_genes_in_pathways" = tiered_genes_in_pathways_df %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", "))))
+            ),
+            sprintf("%s/data/post-drop/fst-pass/%s_%s_fgsea_results.xlsx",
+              git_folder, exp, donor))
+    }
+    
+    # **** GSEA visualisation ========
+    list_of_fgsea_results <- readRDS(sprintf("%s/data/post-drop/fst-pass/%s_list_of_fgsea_results.rds",
+                                             git_folder, exp))
+    top_gsea_plots <- list() # main top GSEA plots
+    top_gsea_plots_tier <- list() # top GSEA plots for signatures with the affected genes in the leading edge list
+    for (donor in names(list_of_samples)) {
+        fgsea_res <- list_of_fgsea_results[[donor]]
+        fgsea_res$signature <- case_when(
+            grepl("^WP_", fgsea_res$pathway) ~ "WP",
+            grepl("^REACTOME_", fgsea_res$pathway) ~ "REACTOME",
+            grepl("^KEGG_", fgsea_res$pathway) ~ "KEGG",
+            fgsea_res$pathway %in% hpo$gs_name ~ "HPO",
+            grepl("^HALLMARK_", fgsea_res$pathway) ~ "HALLMARK",
+            grepl("^GOCC_", fgsea_res$pathway) ~ "GOCC",
+            grepl("^GOMF_", fgsea_res$pathway) ~ "GOMF",
+            grepl("^GOBP_", fgsea_res$pathway) ~ "GOBP",
+            TRUE ~ "OTHER"
+        )
+        for(sig in names(table(fgsea_res$signature))) {
+            cat(donor, "\t", sig, "\n")
+            
+            # top pathways
+            fgsea_res_sig <- fgsea_res[fgsea_res$signature == sig,]
+            top_pathways_up   <- fgsea_res_sig[ES > 0][order(padj)][1:8, pathway]
+            top_pathways_down <- fgsea_res_sig[ES < 0][order(padj)][1:8, pathway]
+            top_pathways <- c(top_pathways_up, rev(top_pathways_down))
+            top_pathways <- top_pathways[!is.na(top_pathways)]
+            
+            if (length(top_pathways) > 0) {
+                top_gsea_plots[[donor]][[sig]] <- plotGseaTableHighlighted(
+                    pathways = pathway_list[top_pathways],
+                    stats = list_of_ranks[[donor]],
+                    fgseaRes = fgsea_res,
+                    highlight_genes = tier_genes,
+                    highlight_color = "#e66c2c",
+                    highlight_lwd = 0.8,
+                    leading_edge_color = "#2ca6e6",
+                    leading_edge_lwd = 0.5,
+                    colwidths = c(5, 4, 0.8, 1.2, 2),
+                    gseaParam = 0.5,
+                    render = FALSE
+                )
+            }
+            
+            # top pathways with tier genes
+            fgsea_res_tier <- fgsea_res[fgsea_res$signature == sig,]
+            fgsea_res_tier <- fgsea_res_tier[sapply(1:dim(fgsea_res_tier)[1], function(x) { any(tier_genes %in% fgsea_res_tier$leadingEdge[[x]])}),]
+            top_pathways_up   <- fgsea_res_tier[ES > 0 & padj < 0.05][order(padj)][1:12, pathway]
+            top_pathways_down <- fgsea_res_tier[ES < 0 & padj < 0.05][order(padj)][1:12, pathway]
+            top_pathways <- c(top_pathways_up, rev(top_pathways_down))
+            top_pathways <- top_pathways[!is.na(top_pathways)]
+            
+            if (length(top_pathways) > 0) {
+                top_gsea_plots_tier[[donor]][[sig]] <- plotGseaTableHighlighted(
+                    pathways = pathway_list[top_pathways],
+                    stats = list_of_ranks[[donor]],
+                    fgseaRes = fgsea_res,
+                    highlight_genes = tier_genes,
+                    highlight_color = "#e66c2c",
+                    highlight_lwd = 0.8,
+                    leading_edge_color = "#2ca6e6",
+                    leading_edge_lwd = 0.5,
+                    colwidths = c(5, 4, 0.8, 1.2, 2),
+                    gseaParam = 0.5,
+                    render = FALSE
+                )
+            }
+        }
+        if(purrr::pluck_exists(top_gsea_plots, donor, "HALLMARK")) {
+            hallmark_plot <- top_gsea_plots[[donor]][["HALLMARK"]]
+            ggsave(
+                sprintf("%s/data/post-drop/fst-pass/%s_%s_gsea_hallmark_plot.png",
+                        git_folder, exp, donor),
+                plot=hallmark_plot,
+                width = 2000, height = 800, units = "px", bg = "white", dpi = 165)
+        }
+        if(purrr::pluck_exists(top_gsea_plots, donor, "GOBP")) {
+            gobp_plot <- top_gsea_plots[[donor]][["GOBP"]]
+            ggsave(
+                sprintf("%s/data/post-drop/fst-pass/%s_%s_gsea_gobp_plot.png",
+                        git_folder, exp, donor),
+                plot=gobp_plot,
+                width = 2000, height = 800, units = "px", bg = "white", dpi = 165)
+        }
+        if(purrr::pluck_exists(top_gsea_plots, donor, "KEGG")) {
+            kegg_plot <- top_gsea_plots[[donor]][["KEGG"]]
+            ggsave(
+                sprintf("%s/data/post-drop/fst-pass/%s_%s_gsea_kegg_plot.png",
+                        git_folder, exp, donor),
+                plot=kegg_plot,
+                width = 2000, height = 800, units = "px", bg = "white", dpi = 165)
+        }
+    }
+    
+    saveRDS(top_gsea_plots,
+            sprintf("%s/data/post-drop/fst-pass/%s_list_of_gsea_plots.rds",
+                    git_folder, exp))
+    saveRDS(top_gsea_plots_tier,
+            sprintf("%s/data/post-drop/fst-pass/%s_list_of_gsea_tiered_plots.rds",
+                    git_folder, exp))
+    
+}
+
+# Do they replicate? =========
+fgsea_uncorrected <- list()
+fgsea_collapsed   <- list()
+fgsea_pathways   <- list()
+fgsea_leadingedge   <- list()
+for(exp in names(experiments)[!(names(experiments) %in% c("all_inhouse", "ba22p_ba4_cortex_gtex"))]) {
+    if(file.exists(sprintf("%s/data/post-drop/fst-pass/%s_%s_fgsea_results.xlsx",
+                            git_folder, exp, "SZ07") )) {
+        fgsea_uncorrected[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
+                git_folder, exp, "SZ07"), sheet = "fgsea_res_sig_uncorrected")$pathway
+        fgsea_collapsed[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
+                git_folder, exp, "SZ07"), sheet = "fgsea_res_sig")$pathway
+        fgsea_pathways[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
+                git_folder, exp, "SZ07"), sheet = "tiered_genes_in_pathways")$pathway
+        fgsea_leadingedge[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
+                git_folder, exp, "SZ07"), sheet = "tiered_genes_in_pathways")$pathway[readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
+                                                                                                                git_folder, exp, "SZ07"), sheet = "tiered_genes_in_pathways")$evidence == "leading_edge"]
+    }
+}
+gg_color_hue <- function(n) {
+    hues = seq(15, 375, length = n + 1)
+    hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+venn::venn(
+     fgsea_uncorrected,
+     zcolor=gg_color_hue(3),
+     borders = F,
+     ellipse=F,
+     lty=0,
+     bty="n",
+     lwd=0,
+     box=F,
+     ilabels = "counts"
+)
+venn::venn(
+     fgsea_collapsed,
+     zcolor=gg_color_hue(4),
+     borders = F,
+     ellipse=F,
+     lty=0,
+     bty="n",
+     lwd=0,
+     box=F,
+     ilabels = "counts"
+)
+venn::venn(
+    fgsea_pathways,
+     zcolor=gg_color_hue(4),
+     borders = F,
+     ellipse=F,
+     lty=0,
+     bty="n",
+     lwd=0,
+     box=F,
+     ilabels = "counts"
+)
+venn::venn(
+    fgsea_leadingedge,
+     zcolor=gg_color_hue(4),
+     borders = F,
+     ellipse=F,
+     lty=0,
+     bty="n",
+     lwd=0,
+     box=F,
+     ilabels = "counts"
+)
+
+fgsea_uncorrected$ba9_gtex[fgsea_uncorrected$ba9_gtex %in% fgsea_uncorrected$ba22p_cortex_gtex & 
+                               fgsea_uncorrected$ba9_gtex %in% fgsea_uncorrected$ba4_cortex_gtex]
+fgsea_collapsed$ba9_gtex[fgsea_collapsed$ba9_gtex %in% fgsea_collapsed$ba22p_cortex_gtex & 
+                         fgsea_collapsed$ba9_gtex %in% fgsea_collapsed$ba4_cortex_gtex]
+fgsea_pathways$ba9_gtex[fgsea_pathways$ba9_gtex %in% fgsea_pathways$ba22p_cortex_gtex & 
+                            fgsea_pathways$ba9_gtex %in% fgsea_pathways$ba4_cortex_gtex]
