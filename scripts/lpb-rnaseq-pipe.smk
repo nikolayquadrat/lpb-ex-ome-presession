@@ -122,6 +122,11 @@ BEDTOOLS_CONTAINER = "docker://quay.io/biocontainers/bedtools:2.31.1--hf5e1c6e_2
 # DATASETS_CONTAINER = "docker://quay.io/biocontainers/ncbi-datasets-cli:14.26.0"
 DATASETS_CONTAINER = "docker://biocontainers/ncbi-datasets-cli:16.22.1_cv1"
 
+# Env-driven, ON by default. Disable per run with -e USE_TRIMMING=0 at container
+# start (same convention as ARCASHLA_ENABLED / CONTAMINATION_ENABLED / DECONV_ENABLED).
+USE_TRIMMING = os.environ.get("USE_TRIMMING", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+
 # -----------------------------------------------------------------------------
 # Optional contamination screen
 # -----------------------------------------------------------------------------
@@ -478,15 +483,102 @@ CELL_MARKER_GENES = {
     "fromer16_up":    ["TACR3", "HGF", "C3orf52", "MC4R", "ADCYAP1", "MST1L", "BEND4", "SCN9A", "TMEM26", "BIRC3"],
     "fromer16_down":  ["IGF2", "RERGL", "HPSE2", "SLCO2A1", "CLEC3B", "RAMP2", "ITIH2", "COL5A3", "SELPLG", "ALDH1A1"],
     "synaptic_readout": ["SNAP25", "SYT1", "SYN1", "DLG4", "STMN2"],
-    "bowen19_type2_up": ["BAG3", "MT1X", "ANGPTL4", "F3", "PDK4", "EMP1", "ADM", "CSDA",
+    "bowen19_type2_up": ["BAG3", "MT1X", "ANGPTL4", "F3", "PDK4", "EMP1", "ADM", "YBX3",
         "IFITM3", "EFEMP1", "CEBPD", "APOLD1", "IFITM2", "DDIT4", "CD44", "FGF2", "SOX9",
-        "PPAP2B", "SLC16A9", "MT2A", "BMPR1B", "NTRK2", "PLSCR4", "PPAP2B", "RANBP3L" ],
+        "PLPP3", "SLC16A9", "MT2A", "BMPR1B", "NTRK2", "PLSCR4", "RANBP3L" ],
     "bowen19_type2_down": [ "NPY", "RERGL", "RTN1", "NEUROD6", "ATP6V1G2", "NSF",
         "ENSA", "AP1S1", "DCLK1", "G3BP2", "MAL2",  "BEND6", "CRYM", "TAC1", "ARMCX3",
         "MAP1B", "AP1S1", "VGF", "TRIM23", "ACAT2", "PGAM1", "OPN3"],
     "lanz19_dlpfc_neuronal_down": ["GAD1","PVALB","SST","CXCL12","ATP6V1A","RGS4","CNTNAP2"],
     "cytokine_response_genes": ["IL6", "STAT3", "SOCS3", "IL1RL1","SHC1", "AKT2"],
 }
+
+# =============================================================================
+# r09* -- hspe cell-type deconvolution of the bulk RNA-seq against the canonical
+#         single-cell references built by scripts_to_make_deconv_reference/.
+#
+# Consumes, per reference <ref> at DECONV_REF_DIR/<ref>/:
+#     matrix.mtx.gz  features.tsv.gz  cells.tsv.gz  provenance.json
+# Produces:
+#     09_deconv/{ref}/{sample}/proportions.tsv     per sample x reference
+#     09_deconv/{ref}.tsv                          summary (samples x classes)
+#
+# Flow:
+#   r09a_mixture     bulk STAR gene counts -> symbol-space CPM (once, shared)
+#   r09b_reference   canonical sc ref -> pseudobulk profiles + markers (per ref)
+#   r09c_run_hspe    deconvolve one sample vs one reference (per ref x sample)
+#   r09d_summary     collate all samples for a reference (per ref)
+#
+# Assumes the including Snakefile defines: `samples` (list) and the STAR output
+# "/tmp/data/03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab", GTF, and a
+# scripts dir. Paths below mirror the main pipeline's /tmp/data layout.
+# =============================================================================
+import os
+
+# ---- config / paths ----------------------------------------------------------
+DECONV_REF_DIR = "/tmp/data/00_additional_files/deconv/reference_canonical" 
+DECONV_OUT     = "/tmp/data/09_deconv"
+R09_SCRIPTS    = "/tmp/data/00_additional_files/deconv/scripts"
+# GTF for gene_id -> symbol (same annotation as alignment; see main pipe)
+GTF = REF_DIR + "/gencode.v47.GRCh38.annotation.gtf" if "REF_DIR" in globals() \
+      else "/tmp/data/00_additional_files/gtex_v11_refs/gencode.v47.GRCh38.annotation.gtf"
+
+# STAR ReadsPerGene strand column, as a DATA index (0=unstranded,1=fwd,2=reverse)
+# GTEx / Illumina TruSeq stranded mRNA is reverse-stranded -> 2. Override with
+# -e DECONV_STRAND=... at container start.
+DECONV_STRAND    = int(os.environ.get("DECONV_STRAND", "2"))
+DECONV_N_MARKERS = int(os.environ.get("DECONV_N_MARKERS", "25"))
+
+# an R image carrying hspe + Matrix + data.table (override -e DECONV_R_CONTAINER=...)
+# R_HSPE_CONTAINER = os.environ.get("DECONV_R_CONTAINER",
+    # "docker://bioconductor/bioconductor_docker:RELEASE_3_19")
+# R_HSPE_CONTAINER = "docker://nikolayquadrat/toolbox:hspe" # R container with hspe
+R_HSPE_CONTAINER = "/tmp/data/00_additional_files/deconv/hspe_container/hspe.sif" 
+
+# ---- enable switch --------------------------------------------------------
+# Deconvolution is OPTIONAL and OFF by default. It is toggled by the
+# DECONV_ENABLED environment variable, set with -e at container start, exactly
+# like ARCASHLA_ENABLED / CONTAMINATION_ENABLED:
+#     docker ... -e DECONV_ENABLED=1 ... snakemake/snakemake:v9.16.3
+# Accepts 1/true/yes/on (any case). Even when enabled, the stage stays inert
+# unless DECONV_REF_DIR exists and holds at least one canonical reference
+# (a subfolder with matrix.mtx.gz).
+DECONV_ENABLED = os.environ.get("DECONV_ENABLED", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+
+# ---- discover references (folders that contain a canonical matrix) -----------
+def _discover_references():
+    if not DECONV_ENABLED:
+        return []
+    if not os.path.isdir(DECONV_REF_DIR):
+        return []
+    return sorted(d for d in os.listdir(DECONV_REF_DIR)
+                  if os.path.isfile(os.path.join(DECONV_REF_DIR, d, "matrix.mtx.gz")))
+
+DECONV_REFERENCES = _discover_references()
+DECONV_ACTIVE = DECONV_ENABLED and len(DECONV_REFERENCES) > 0
+
+# constrain wildcards so {ref}/{sample} never eat slashes or cross each other
+wildcard_constraints:
+    ref    = "|".join(re.escape(r) for r in DECONV_REFERENCES) or "NO_REFERENCE",
+    sample = "|".join(re.escape(s) for s in samples) or "NO_SAMPLE",
+
+# ---- convenience target: everything deconvolution ----------------------------
+# When the stage is inactive (disabled, or no references found) this target has
+# NO inputs, so `snakemake r09_deconv_all` is a clean no-op rather than an error.
+if not DECONV_ACTIVE:
+    if DECONV_ENABLED:
+        _reason = (f"no canonical references under {DECONV_REF_DIR} "
+                   "(expected subfolders each with matrix.mtx.gz)")
+    else:
+        _reason = "disabled (set -e DECONV_ENABLED=1 at container start to turn on)"
+    print(f"[r09] deconvolution stage inactive: {_reason}")
+
+
+
+
+
+
 
 # -----------------------------------------------------------------------------
 # Targets
@@ -530,6 +622,9 @@ rule all:
         *(["/tmp/data/06_hla/00_hla_summary_classII.tsv"] if ARCASHLA_ENABLED else []),
         "/tmp/data/04_qc/00_inferred_sex.tsv",
         "/tmp/data/04_qc/00_cell_marker_expression.tsv",
+        (expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
+         + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
+                  ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [],
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
@@ -541,8 +636,6 @@ rule all:
 # rule r03d_STAR_mapping_GTEx to read directly from the un-trimmed FASTQ.
 # For DROP use, trimmed-vs-untrimmed does not significantly affect outlier
 # detection, so trimming is left enabled by default.
-
-USE_TRIMMING = True
 
 rule r02a_trim_galore:
     input:
@@ -3002,6 +3095,94 @@ rule r08c_cell_marker_expression:
         n_g = len({r[1] for r in rows})
         print(f"[cell markers] wrote {output.tsv}: {len(rows)} rows "
               f"({n_s} samples x {n_g} markers)", flush=True)
+
+
+# ---- r09a: bulk mixture in symbol space (once; shared by all references) ------
+rule r09a_mixture:
+    input:
+        star = expand("/tmp/data/03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab",
+                      sample=samples),
+        gtf  = GTF,
+    output:
+        matrix = f"{DECONV_OUT}/_mixture/mixture_symbol_cpm.tsv.gz",
+        genes  = f"{DECONV_OUT}/_mixture/mixture_genes.txt",
+    params:
+        strand = DECONV_STRAND,
+        script = os.path.join(R09_SCRIPTS, "lpb-rnaseq-deconv-r09a_mixture.R"),
+        pairs  = lambda wc: " ".join(
+            f"{s} /tmp/data/03_bam_star/{s}/{s}.ReadsPerGene.out.tab"
+            for s in samples),
+    singularity: R_HSPE_CONTAINER
+    shell:
+        r"""
+        Rscript {params.script} {input.gtf} {params.strand} \
+            {output.matrix} {output.genes} {params.pairs}
+        """
+
+
+# ---- r09b: canonical sc reference -> hspe reference object (per ref; cache) ---
+rule r09b_reference:
+    input:
+        mtx   = f"{DECONV_REF_DIR}/{{ref}}/matrix.mtx.gz",
+        feat  = f"{DECONV_REF_DIR}/{{ref}}/features.tsv.gz",
+        cells = f"{DECONV_REF_DIR}/{{ref}}/cells.tsv.gz",
+        genes = rules.r09a_mixture.output.genes,
+    output:
+        rds = f"{DECONV_OUT}/{{ref}}/_reference/reference.rds",
+        qc  = f"{DECONV_OUT}/{{ref}}/_reference/qc_markers.tsv",
+    params:
+        n_markers = DECONV_N_MARKERS,
+        script    = os.path.join(R09_SCRIPTS, "lpb-rnaseq-deconv-r09b_reference.R"),
+    singularity: R_HSPE_CONTAINER
+    shell:
+        r"""
+        Rscript {params.script} {input.mtx} {input.feat} {input.cells} \
+            {input.genes} {params.n_markers} {output.rds} {output.qc}
+        """
+
+
+# ---- r09c: deconvolve one sample vs one reference (per ref x sample) ----------
+rule r09c_run_hspe:
+    input:
+        ref = rules.r09b_reference.output.rds,
+        mix = rules.r09a_mixture.output.matrix,
+    output:
+        props = f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
+        rds   = f"{DECONV_OUT}/{{ref}}/{{sample}}/hspe.rds",
+    params:
+        script = os.path.join(R09_SCRIPTS, "lpb-rnaseq-deconv-r09c_run_hspe.R"),
+    singularity: R_HSPE_CONTAINER
+    shell:
+        r"""
+        Rscript {params.script} {input.ref} {input.mix} {wildcards.sample} \
+            {output.props} {output.rds}
+        """
+
+
+# ---- r09d: summary TSV per reference (samples x classes) ---------------------
+rule r09d_summary:
+    input:
+        props = lambda wc: expand(
+            f"{DECONV_OUT}/{wc.ref}/{{sample}}/proportions.tsv", sample=samples),
+    output:
+        tsv = f"{DECONV_OUT}/{{ref}}.tsv",
+    run:
+        import csv, os
+        rows, classes = {}, []
+        for p in input.props:
+            with open(p) as fh:
+                for r in csv.DictReader(fh, delimiter="\t"):
+                    rows.setdefault(r["sample"], {})[r["class"]] = r["proportion"]
+                    if r["class"] not in classes:
+                        classes.append(r["class"])
+        classes = sorted(classes)
+        os.makedirs(os.path.dirname(output.tsv) or ".", exist_ok=True)
+        with open(output.tsv, "w", newline="") as fh:
+            w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+            w.writerow(["sample"] + classes)
+            for s in sorted(rows):
+                w.writerow([s] + [rows[s].get(c, "0") for c in classes])
+        print(f"[r09d] {len(rows)} samples x {len(classes)} classes -> {output.tsv}")
 
 # =============================================================================
 # Reference download instructions (run ONCE before the pipeline)
