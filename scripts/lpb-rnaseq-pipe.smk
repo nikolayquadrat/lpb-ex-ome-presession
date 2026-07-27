@@ -563,6 +563,12 @@ wildcard_constraints:
     ref    = "|".join(re.escape(r) for r in DECONV_REFERENCES) or "NO_REFERENCE",
     sample = "|".join(re.escape(s) for s in samples) or "NO_SAMPLE",
 
+# Optionally also emit CIBERSORTx-ready input files (does NOT run CIBERSORTx --
+# run it yourself manually from the emitted folder). Off by default.
+DECONV_CIBERSORTX = os.environ.get("DECONV_CIBERSORTX", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+DECONV_CSX_MAXCELLS = int(os.environ.get("DECONV_CSX_MAXCELLS", "500"))
+
 # ---- convenience target: everything deconvolution ----------------------------
 # When the stage is inactive (disabled, or no references found) this target has
 # NO inputs, so `snakemake r09_deconv_all` is a clean no-op rather than an error.
@@ -622,9 +628,14 @@ rule all:
         *(["/tmp/data/06_hla/00_hla_summary_classII.tsv"] if ARCASHLA_ENABLED else []),
         "/tmp/data/04_qc/00_inferred_sex.tsv",
         "/tmp/data/04_qc/00_cell_marker_expression.tsv",
-        (expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
-         + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
-                  ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [],
+        ((expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
+          + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
+                   ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [])
+        + ((expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/refsample.txt",
+                   ref=DECONV_REFERENCES)
+            + expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/mixture.txt",
+                     ref=DECONV_REFERENCES))
+           if (DECONV_ACTIVE and DECONV_CIBERSORTX) else []),
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
@@ -3183,6 +3194,30 @@ rule r09d_summary:
             for s in sorted(rows):
                 w.writerow([s] + [rows[s].get(c, "0") for c in classes])
         print(f"[r09d] {len(rows)} samples x {len(classes)} classes -> {output.tsv}")
+
+# ---- r09e: emit CIBERSORTx input files (per ref) -- prepare only, don't run ---
+# Writes 09_deconv/_cibersortx/{ref}/{refsample.txt, mixture.txt}. Run
+# CIBERSORTx yourself from that folder (see r09e_cibersortx_prep.R header). Gated
+# by DECONV_CIBERSORTX=1; independent of whether hspe (r09c/d) runs.
+rule r09e_cibersortx_prep:
+    input:
+        mtx   = f"{DECONV_REF_DIR}/{{ref}}/matrix.mtx.gz",
+        feat  = f"{DECONV_REF_DIR}/{{ref}}/features.tsv.gz",
+        cells = f"{DECONV_REF_DIR}/{{ref}}/cells.tsv.gz",
+        mix   = rules.r09a_mixture.output.matrix,
+    output:
+        ref = f"{DECONV_OUT}/_cibersortx/{{ref}}/refsample.txt",
+        mix = f"{DECONV_OUT}/_cibersortx/{{ref}}/mixture.txt",
+    params:
+        script   = os.path.join(R09_SCRIPTS, "lpb-rnaseq-deconv-r09e_cibersortx_prep.R"),
+        maxcells = DECONV_CSX_MAXCELLS,
+    singularity: R_HSPE_CONTAINER
+    shell:
+        """
+        Rscript {params.script} {input.mtx} {input.feat} {input.cells} \
+            {input.mix} {output.ref} {output.mix} {params.maxcells}
+        """
+
 
 # =============================================================================
 # Reference download instructions (run ONCE before the pipeline)
