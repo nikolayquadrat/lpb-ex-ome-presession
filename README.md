@@ -9,10 +9,10 @@ A bash pipeline designed to assemble all reference and annotation resources requ
 
 Usage:
 ```sh
-sudo chmod +x lpb-exome-priritisation-collect-data.sh
-sudo bash lpb-exome-priritisation-collect-data.sh
+sudo chmod +x lpb-exome-pririotisation-collect-data.sh
+sudo bash lpb-exome-prioritisation-collect-data.sh
 ```
-The disk space requirement: ~350Gb for the reference data + ~12Gb per exome. Root priveledges require only to run apptainer for building the arcasHLA reference.
+The disk space requirement: ~350Gb for the reference data (without scRNAseq for deconvolution, expect ~40Gb per dataset) + ~12Gb per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
 
 ### Under the hood
 #### 1. Reference genome and known-sites VCFs
@@ -45,7 +45,21 @@ ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/202
 - **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results were obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results were joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering (tier C).
 - **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel was retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion.
 
-#### 7. Validation
+#### 7. (optional) scRNA-seq reference for deconvolution
+run the script with the set BUILD_DECONV_REFERENCE flag:
+```sh
+sudo env BUILD_DECONV_REFERENCE=1 bash ./lpb-exome-prioritisation-collect-data.sh
+```
+Section 10 is an optional stage (off by default; enabled with `BUILD_DECONV_REFERENCE=1`) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. It is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
+
+**Architecture**. The 10 section is a thin *driver*. The actual recipes live in a sibling folder, `scripts_to_make_deconv_reference/`, one self-contained Python script per reference. The driver discovers every `*.py` there (skipping `_`-prefixed library modules), optionally restricts to a subset via `DECONV_REFERENCES`, and runs each one. Adding a new reference means dropping in a new script; the driver never changes. Before running any builder, the driver ensures an isolated Python venv at `$DECONV_DIR/venv` and installs `anndata h5py scipy pandas numpy` into it. The venv is created and populated once and reused on subsequent runs; every builder is invoked with the venv's interpreter so the dependencies propagate to all of them.
+
+**What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
+
+The section produces reference data in in its own folder under `$DECONV_OUT_ROOT`:
+- `siletti_cortex` — adult human neocortex, neuronal vs non-neuronal, for the SZ07 composition analysis ([Siletti et al 2023](https://doi.org/10.1126/science.add7046)).
+
+#### 8. Validation
 Final completeness validation iterates over expected files, confirming non-zero size and presence of required indices (.tbi for VCF/TSV.gz, .fai/.dict for FASTA). Version coherence between VEP cache, plugin branch, and dbNSFP release is enforced at startup. Post-processing failures (REVEL conversion, SCHEMA HGNC join, gnomAD strip+concat, plugin flattening) propagate to the script's exit code.
 
 ## Ib. Variant-calling and annotation: pipeline
@@ -73,7 +87,7 @@ snakemake --snakefile /tmp/repo/lpb-exome-prioritisation-pipe.smk \
 	--resources disk_mb="${DISK_MB_BUDGET}" \
     --set-resource-scopes disk_mb=global
 ```
-The disk space requirement: ~350Gb for the reference data and ~12Gb per exome, however could be much larger with intermediatory files. $DISK_MB_BUDGET is usefull to set as actual available space for the workflow to run.
+The disk space requirement: ~400Gb for the reference data and ~12Gb per exome, however could be much larger with intermediatory files. $DISK_MB_BUDGET is usefull to set as the actual available space for the workflow to run.
 
 ### Under the hood
 ```mermaid
@@ -201,15 +215,17 @@ sudo docker container run --rm --privileged -it \
     -v "${SMK_DIR}:/tmp/repo" \
     -v "${PWD}/sing_tmp:/tmp/sing_tmp" \
     -v "${PWD}/00_additional_files/arcashla_ref/dat:/usr/local/share/arcas-hla-0.6.0-2/dat" \
-    -e ARCASHLA_ENABLED=1 \
+	-e USE_TRIMMING=1 \
     -e CONTAMINATION_ENABLED=1 \
+    -e ARCASHLA_ENABLED=1 \
+	-e DECONV_ENABLED=1 \
     -e APPTAINER_TMPDIR=/tmp/sing_tmp \
     -e APPTAINER_CACHEDIR=/tmp/sing_tmp/cache \
     -e TMPDIR=/tmp/sing_tmp \
 snakemake/snakemake:v9.16.3
 # run inside the container
-export SINGULARITYENV_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt #  for NCBI datasets in contamination check
-export SINGULARITYENV_SSL_CERT_DIR=/etc/ssl/certs  # for NCBI datasets in contamination check
+export SINGULARITYENV_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt #  for NCBI datasets in the contamination check
+export SINGULARITYENV_SSL_CERT_DIR=/etc/ssl/certs  # for NCBI datasets in the contamination check
 time snakemake --snakefile /tmp/repo/lpb-rnaseq-pipe.smk \
     --cores 6 \
 	--use-singularity --singularity-prefix sing \
@@ -218,7 +234,7 @@ time snakemake --snakefile /tmp/repo/lpb-rnaseq-pipe.smk \
 		-B /usr/local/share/arcas-hla-0.6.0-2/dat:/usr/local/share/arcas-hla-0.6.0-2/dat"
 ```
 
-The disk space requirement: ~35Gb for genome, annotation, and STAR index + ~??Gb per transcriptome. ARCASHLA_ENABLED and CONTAMINATION_ENABLED could be swithced off. You may need to run the *lpb-rnaseq-set-up-arcashla.sh* script beforehand if you want HLA typing from Arcas.
+The disk space requirement: ~35Gb for genome, annotation, and STAR index + ~9Gb per typical transcriptome. USE_TRIMMING, ARCASHLA_ENABLED, CONTAMINATION_ENABLED, and DECONV_ENABLED could be swithced off. You may need to run the *lpb-rnaseq-set-up-arcashla.sh* script beforehand if you want HLA typing from Arcas.
 
 ### Under the hood
 ```mermaid
@@ -251,33 +267,43 @@ flowchart LR
 	id25[r07c_infer_sex]
 	id26[r07b_sex_counts_per_sample]
 	id27[r07a_sex_marker_regions]
+	id28[r08c_cell_marker_expression]
+	id29[r08b_cell_marker_counts_per_sample]
+	id30[r08a_cell_marker_regions]
+	id31[r09d_summary]
+	id32[r09c_run_hspe]
+	id33[r09b_reference]
+	id34[r09a_mixture]
+	id7 --> id0
+	id32 --> id0
+	id6 --> id0
+	id31 --> id0
+	id25 --> id0
 	id19 --> id0
 	id17 --> id0
-	id20 --> id0
 	id2 --> id0
-	id18 --> id0
-	id23 --> id0
-	id7 --> id0
-	id25 --> id0
+	id28 --> id0
 	id1 --> id0
-	id6 --> id0
-	id5 --> id1
+	id23 --> id0
+	id18 --> id0
+	id20 --> id0
 	id2 --> id1
+	id5 --> id1
 	id4 --> id2
 	id3 --> id2
 	id2 --> id5
 	id2 --> id6
-	id8 --> id7
 	id6 --> id7
+	id8 --> id7
 	id12 --> id7
-	id11 --> id8
+	id1 --> id8
 	id10 --> id8
 	id9 --> id8
-	id1 --> id8
+	id11 --> id8
 	id1 --> id9
 	id2 --> id11
-	id15 --> id12
 	id13 --> id12
+	id15 --> id12
 	id1 --> id12
 	id14 --> id13
 	id1 --> id14
@@ -287,14 +313,23 @@ flowchart LR
 	id12 --> id19
 	id21 --> id20
 	id22 --> id21
-	id9 --> id22
 	id1 --> id22
+	id9 --> id22
 	id24 --> id23
 	id22 --> id24
 	id26 --> id25
 	id27 --> id26
-	id9 --> id26
 	id1 --> id26
+	id9 --> id26
+	id29 --> id28
+	id1 --> id29
+	id30 --> id29
+	id9 --> id29
+	id32 --> id31
+	id34 --> id32
+	id33 --> id32
+	id34 --> id33
+	id2 --> id34
 ```
 
 #### 1. Reference assembly and annotation
@@ -318,41 +353,11 @@ Adapter and quality trimming is performed with Trim Galore (default Illumina-ada
 #### 3. STAR alignment
 STAR 2.7.11b (rule r03d_STAR_mapping_GTEx) aligns the trimmed reads to the indexed genome using the exact parameter set from the Broad GTEx pipeline's run_STAR.py: --twopassMode Basic, --outFilterMultimapNmax 20, --outFilterType BySJout, --outFilterMismatchNoverLmax 0.1, --alignIntronMin 20, --alignIntronMax 1000000, --limitSjdbInsertNsj 1200000, --outFilterScoreMinOverLread 0.33, --outFilterMatchNminOverLread 0.33, --alignSoftClipAtReferenceEnds Yes, --quantMode TranscriptomeSAM GeneCounts, --outSAMtype BAM SortedByCoordinate, --outSAMunmapped Within, with chimeric-detection flags (--chimSegmentMin 15, --chimJunctionOverhangMin 15, --chimOutType Junctions WithinBAM SoftClip, --chimMainSegmentMultNmax 1) per the TOPMed/GTEx convention. Per-sample read-group tags (ID:{sample} SM:{sample} PL:ILLUMINA LB:lib1) are injected via --outSAMattrRGline for downstream-tool compatibility. The two-pass mode and BySJout filter together substantially improve novel-junction detection, which is important for FRASER's splice-outlier analysis. STAR produces three outputs per sample: a coordinate-sorted genome-aligned BAM, a transcriptome-coordinate BAM (for downstream RSEM if needed), the gene-level read-count table (ReadsPerGene.out.tab, mergeable with the GTEx V11 count matrix), the splice-junction table (SJ.out.tab, used by FRASER), and a chimeric-junction file. Aligned BAMs are indexed by samtools 1.9 (rule r03e_index_bam).
 
-#### 4. Duplicate marking
-Picard MarkDuplicates 2.27.5 (rule r03f_markduplicates) marks PCR/optical duplicates on the coordinate-sorted BAM, producing the canonical GTEx-style filename {sample}.Aligned.sortedByCoord.out.patched.md.bam. The "patched" suffix is retained for naming consistency with the GTEx convention even though bamsync (which would carry QC flags from a pre-existing CRAM in GTEx's own pipeline) is not applied here, since alignment starts from raw FASTQ. The MD'd BAM is the canonical input for the DROP MAE, OUTRIDER, and FRASER modules and is indexed by samtools (rule r03g_index_md_bam).
-
-#### 5. Mapping statistics aggregation
 Per-sample STAR Log.final.out files are parsed into a single TSV (rule r03h_mapping_stat, 00_mapping_stat/mapping_stat.txt) reporting input read counts, uniquely mapped read counts and percentages, multi-mapped percentages, "too many loci" rates, and unmapped fractions per sample.
 
-#### 6. Neurotropic pathogens / contamination check (optional)
-Probably a little bit extensive list of the species (*00_additional_files/contamination/species.txt*) is designed for screening human RNA-sequencing data for microbial signals, including viruses, bacteria, fungi, protozoa, free-living amoebae, and helminths. The list is organised by biological and analytical priority, beginning with neurotropic and neuroinvasive pathogens, followed by brain post-mortem and autopsy-background signatures, laboratory and environmental contamination sentinels, and computational decoy controls. Each organism is represented by a selected genome or reference assembly to facilitate reproducible alignment-based screening.
+Picard MarkDuplicates 2.27.5 (rule r03f_markduplicates) marks PCR/optical duplicates on the coordinate-sorted BAM, producing the canonical GTEx-style filename {sample}.Aligned.sortedByCoord.out.patched.md.bam. The "patched" suffix is retained for naming consistency with the GTEx convention even though bamsync (which would carry QC flags from a pre-existing CRAM in GTEx's own pipeline) is not applied here, since alignment starts from raw FASTQ. The MD'd BAM is the canonical input for the DROP MAE, OUTRIDER, and FRASER modules and is indexed by samtools (rule r03g_index_md_bam).
 
-Contamination check is done with the provided species list on entropy-filtered (bbduk) unmapped reads. The bwa-mem2 alignment parameters is set to be stricter than default to supress false positives:
-- -T 95: minimum alignment score 95 (default is 30).
-- -k 35: minimum seed 35bp (default 19).
-- -B 6: mismatch penalty 6 (default 4).
-- -O 8: gap open penalty 8 (default 6).
-- -L 10: clipping penalty 10 (default 5).<br>
-
-The rRNA regions in the genomes of the pathogenes were hardmasked due to high expecteded homology with human rRNA.
-Multi-mapped reads with the same score are counted for every species separately to not downweight reads for related species in the list.
-These measures vastly reduce false positives but not eliminate them entirely.
-Note that for bacteria and many viruses (Flaviviruses, Arenaviruses etc) poor recovery is expected with the poly(A)-selected RNA method.
-
-#### 7. Sex inference
-Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) were counted over the gene spans of XIST (a female / inactive-X marker) and a panel of Y-linked genes (RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter was applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts were normalised to library size (counts per million) using total mapped reads, and samples were called XX (XIST ≥ 10 CPM, Y-panel < 20 CPM) or XY (XIST < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers were flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories were reserved for manual review. As in the exome workflow, inferred genetic sex was compared against clinical annotation as a sample-identity check. The summary data is stored in `../04_qc/00_inferred_sex.tsv`.
-
-#### 8. arcasHLA reference (optional)
-Build the arcasHLA reference data on the host filesystem with the script *lpb-rnaseq-install-arcashla-ref.sh*.
-```sh
-sudo chmod +x lpb-rnaseq-set-up-arcashla.sh
-sudo bash lpb-rnaseq-set-up-arcashla.sh
-```
-The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it tries to. the script performs the four-step setup once on the host: (a) git clone --depth 1 of the ANHIG/IMGTHLA repository (IPD-IMGT/HLA database release 3.64.0, ~1.2 GB at depth 1), (b) unzip of hla.dat.zip and other compressed archives inside the IMGTHLA repo (the uncompressed hla.dat is too large for git so the repo ships it compressed), (c) seeding the host dat/info and dat/ref directories with the small JSON tables bundled inside the biocontainer (copied out via apptainer exec with a bind mount), and (d) running arcasHLA reference --rebuild once inside the container with the host dat/ directory bind-mounted over the container's read-only /usr/local/share/arcas-hla-0.6.0-2/dat, which generates hla.fasta, hla.idx, hla.p.json, hla.convert.json, hla_partial.fasta, hla_partial.idx, and hla_partial.p.json via Kallisto (v0.50.1 inside the biocontainer). Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices).
-
-**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule r06b_arcashla_genotype then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule r06d_arcashla_genotype_classII runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
-
-#### 9. RNA-seq quality control
+#### 4. RNA-seq quality control
  Picard CollectRnaSeqMetrics 2.27.5 (rule r04c_picard_rnaseq_metrics) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using ucsc-gtfToGenePred -genePredExt -geneNameAsName2 followed by column-reordering to refFlat format (rule r04a_make_refflat). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule r04b_make_rrna_intervals). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and VALIDATION_STRINGENCY=LENIENT to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule r04d_qc_summary, 04_qc/00_qc_summary.tsv) reporting:
  - PF_BASES. Total number of bases in reads passing Illumina's chastity filter (PF = Passed Filter), including non-aligned reads. The denominator for most fraction metrics below.
  - PF_ALIGNED_BASES. Bases from PF reads that aligned to the reference. Bases in soft-clips, insertions, and secondary/supplementary alignments are excluded. Roughly equal to PF_BASES × overall alignment rate.
@@ -377,9 +382,61 @@ The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--h
  - flag_low_complexity. Boolean absolute-threshold flag: True if Uniquely_mapped < 10,000,000. Catches samples that look clean by RNA-quality metrics but lack enough reads for reliable outlier detection. Samples with this flag True should be excluded from the OUTRIDER reference panel; including them as the test sample is fine but will yield lower-power results.
  These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
 
+#### 5. Neurotropic pathogens / contamination check (optional)
+Probably a little bit extensive list of the species (*00_additional_files/contamination/species.txt*) is designed for screening human RNA-sequencing data for microbial signals, including viruses, bacteria, fungi, protozoa, free-living amoebae, and helminths. The list is organised by biological and analytical priority, beginning with neurotropic and neuroinvasive pathogens, followed by brain post-mortem and autopsy-background signatures, laboratory and environmental contamination sentinels, and computational decoy controls. Each organism is represented by a selected genome or reference assembly to facilitate reproducible alignment-based screening.
+
+Contamination check is done with the provided species list on entropy-filtered (bbduk) unmapped reads. The bwa-mem2 alignment parameters is set to be stricter than default to supress false positives:
+- -T 95: minimum alignment score 95 (default is 30).
+- -k 35: minimum seed 35bp (default 19).
+- -B 6: mismatch penalty 6 (default 4).
+- -O 8: gap open penalty 8 (default 6).
+- -L 10: clipping penalty 10 (default 5).<br>
+
+The rRNA regions in the genomes of the pathogenes were hardmasked due to high expecteded homology with human rRNA.
+Multi-mapped reads with the same score are counted for every species separately to not downweight reads for related species in the list.
+These measures vastly reduce false positives but not eliminate them entirely.
+Note that for bacteria and many viruses (Flaviviruses, Arenaviruses etc) poor recovery is expected with the poly(A)-selected RNA method.
+
+#### 6. arcasHLA reference (optional)
+Build the arcasHLA reference data on the host filesystem with the script *lpb-rnaseq-install-arcashla-ref.sh*.
+```sh
+sudo chmod +x lpb-rnaseq-set-up-arcashla.sh
+sudo bash lpb-rnaseq-set-up-arcashla.sh
+```
+The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it tries to. the script performs the four-step setup once on the host: (a) git clone --depth 1 of the ANHIG/IMGTHLA repository (IPD-IMGT/HLA database release 3.64.0, ~1.2 GB at depth 1), (b) unzip of hla.dat.zip and other compressed archives inside the IMGTHLA repo (the uncompressed hla.dat is too large for git so the repo ships it compressed), (c) seeding the host dat/info and dat/ref directories with the small JSON tables bundled inside the biocontainer (copied out via apptainer exec with a bind mount), and (d) running arcasHLA reference --rebuild once inside the container with the host dat/ directory bind-mounted over the container's read-only /usr/local/share/arcas-hla-0.6.0-2/dat, which generates hla.fasta, hla.idx, hla.p.json, hla.convert.json, hla_partial.fasta, hla_partial.idx, and hla_partial.p.json via Kallisto (v0.50.1 inside the biocontainer). Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices).
+
+**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule r06b_arcashla_genotype then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule r06d_arcashla_genotype_classII runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
+
+#### 7. Sex inference
+Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) were counted over the gene spans of *XIST* (a female / inactive-X marker) and a panel of Y-linked genes (*RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y*), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter was applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts were normalised to library size (counts per million) using total mapped reads, and samples were called XX (*XIST* ≥ 10 CPM, Y-panel < 20 CPM) or XY (*XIST* < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers were flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories were reserved for manual review. As in the exome workflow, inferred genetic sex was compared against clinical annotation as a sample-identity check. The summary data is stored in `../04_qc/00_inferred_sex.tsv`.
+
+#### 8. Cell-composition markers
+Reference-free marker-expression readout used for cell-composition QC to test whether an apparent neuronal/synaptic expression signature reflects grey-matter content or dissection variability rather than biology. Panels are defined in the CELL_MARKER_GENES config dictionary. Adding or editing a panel requires no rule changes.
+
+The panel:
+- "neuron": *RBFOX3, MAP2, NEFL, NEFM, NEFH, TUBB3, ENO2, INA*,
+- "astrocyte": *GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, SOX9, S100B*,
+- "oligodendrocyte": *MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*,
+- "opc": *PDGFRA, CSPG4, OLIG1, OLIG2*,
+- "microglia": *CSF1R, AIF1, P2RY12, CX3CR1, C1QA, C1QB, TMEM119*,
+- "endothelial": *CLDN5, FLT1, PECAM1, VWF*
+
+NB: SOX10 is a canonical OPC/oligodendrocyte marker but is also a VUS candidate gene in this study. It is deliberately omitted so the composition check stays independent of candidate evaluation.
+
+Output. Long format: sample, gene, cell_type, count, lib_size, cpm, log2cpm. Per-sample measurements only, every value depends solely on its own sample, so adding or removing samples never alters another sample's numbers.
+
+#### 9. Deconvolution (optional)
+ctivated via `-e DECONV_ENABLED=1` at container start (with `DECONV_CIBERSORTX=1` separately enabling r09e, expect high hunderds megabytes per reference).
+**r09a_mixture** (once, shared) — Reads every sample's STAR `ReadsPerGene.out.tab`, selects the strand column, maps versioned GENCODE v47 gene IDs to gene symbols via the GTF, sums duplicate symbols, and writes a symbol-space CPM matrix (`_mixture/mixture_symbol_cpm.tsv.gz`). This bridges the bulk counts (Ensembl IDs) into the symbol space the single-cell references use, and is computed once for all references.
+**r09b_reference** (per reference, cached) — Loads a canonical single-cell reference (`matrix.mtx.gz` / `features.tsv.gz` / `cells.tsv.gz`), collapses it to pseudobulk profiles per subject × class, restricts to genes shared with the mixture, and saves an hspe-ready reference object plus a marker-QC table. All matrix operations are sparse, so the large glia references never densify. Runs once per reference and caches.
+**r09c_run_hspe** (per reference × sample) — Deconvolves one bulk sample against one prepared reference with hspe ([Hunt & Gagnon-Bartsch 2021](https://doi.org/10.1214/20-aoas1395)), on log-scale expression, letting hspe select markers internally. Writes `09_deconv/{ref}/{sample}/proportions.tsv` (and the full hspe result) — the per-sample, per-reference estimate.
+**r09d_summary** (per reference) — Collates every sample's proportions for a reference into a wide `09_deconv/{ref}.tsv` (samples × classes), filling absent classes with zero. The logic is inlined as a `run:` block.
+**r09e_cibersortx_prep** (per reference, optional) — Emits the two files a manual CIBERSORTx ([Stee et al. 2020](https://doi.org/10.1007/978-1-0716-0301-7_7)) run needs into `09_deconv/_cibersortx/{ref}/`: a single-cell `refsample.txt` (genes × cells, cell-type labels as headers) and a `mixture.txt` (the same bulk matrix, reformatted). It only prepares the inputs — you run CIBERSORTx yourself — enabling a second, independent deconvolution method for cross-checking.
+**r09_deconv_all** (aggregator) — A no-output target listing all the stage's outputs, so `snakemake r09_deconv_all` builds the whole deconvolution stage. Resolves to nothing when the stage is disabled.
+
 #### 10. Pipeline outputs
 Per sample:
- - `../03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam` plus index (canonical DROP input),
+ - `../03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam` + index (canonical DROP input),
  - `../03_bam_star/{sample}/{sample}.SJ.out.tab` (FRASER input),
  - `../03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab` (OUTRIDER input, mergeable with GTEx V11 counts),
  - `../03_bam_star/{sample}/{sample}.Aligned.toTranscriptome.out.bam` (RSEM input if needed)
@@ -388,6 +445,7 @@ Cohort-level:
  - `../03_bam_star/00_mapping_stat/mapping_stat.txt` (alignment summary),
  - `../04_qc/00_qc_summary.tsv` (RNA-seq QC summary with outlier flags),
  - `../04_qc/00_inferred_sex.tsv` (sex inference).
+ - `../04_qc/00_cell_marker_expression.tsv` (cell-composition markers).
  - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files)
 
 ## DROP pipeline
@@ -431,5 +489,5 @@ Helpful notes:
 Helper function similar to fgsea::plotGseaTable that prints GSEA results table with tier-gene highlights:
 *lpb-drop-post-outrider-plot-gsea-highlighted.R*<br>
 
-## AI disclosure
+## AI usage disclosure
 The scripts were produced with the assistance from Claude Opus 4.7 / 4.8
