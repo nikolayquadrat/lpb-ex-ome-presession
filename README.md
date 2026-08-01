@@ -426,12 +426,24 @@ NB: SOX10 is a canonical OPC/oligodendrocyte marker but is also a VUS candidate 
 Output. Long format: sample, gene, cell_type, count, lib_size, cpm, log2cpm. Per-sample measurements only, every value depends solely on its own sample, so adding or removing samples never alters another sample's numbers.
 
 #### 9. Deconvolution (optional)
-ctivated via `-e DECONV_ENABLED=1` at container start (with `DECONV_CIBERSORTX=1` separately enabling r09e, expect high hunderds megabytes per reference).
+Activated via `-e DECONV_ENABLED=1` at container start (with `DECONV_CIBERSORTX=1` separately enabling r09e, expect high hunderds megabytes per reference).
 **r09a_mixture** (once, shared) — Reads every sample's STAR `ReadsPerGene.out.tab`, selects the strand column, maps versioned GENCODE v47 gene IDs to gene symbols via the GTF, sums duplicate symbols, and writes a symbol-space CPM matrix (`_mixture/mixture_symbol_cpm.tsv.gz`). This bridges the bulk counts (Ensembl IDs) into the symbol space the single-cell references use, and is computed once for all references.
 **r09b_reference** (per reference, cached) — Loads a canonical single-cell reference (`matrix.mtx.gz` / `features.tsv.gz` / `cells.tsv.gz`), collapses it to pseudobulk profiles per subject × class, restricts to genes shared with the mixture, and saves an hspe-ready reference object plus a marker-QC table. All matrix operations are sparse, so the large glia references never densify. Runs once per reference and caches.
 **r09c_run_hspe** (per reference × sample) — Deconvolves one bulk sample against one prepared reference with hspe ([Hunt & Gagnon-Bartsch 2021](https://doi.org/10.1214/20-aoas1395)), on log-scale expression, letting hspe select markers internally. Writes `09_deconv/{ref}/{sample}/proportions.tsv` (and the full hspe result) — the per-sample, per-reference estimate.
 **r09d_summary** (per reference) — Collates every sample's proportions for a reference into a wide `09_deconv/{ref}.tsv` (samples × classes), filling absent classes with zero. The logic is inlined as a `run:` block.
 **r09e_cibersortx_prep** (per reference, optional) — Emits the two files a manual CIBERSORTx ([Stee et al. 2020](https://doi.org/10.1007/978-1-0716-0301-7_7)) run needs into `09_deconv/_cibersortx/{ref}/`: a single-cell `refsample.txt` (genes × cells, cell-type labels as headers) and a `mixture.txt` (the same bulk matrix, reformatted). It only prepares the inputs — you run CIBERSORTx yourself — enabling a second, independent deconvolution method for cross-checking.
+
+Run it like that:
+```sh
+docker container run --rm --privileged \
+-v .../09_deconv/_cibersortx/siletti_cortex:/src/data \
+-v .../09_deconv/_cibersortx/siletti_cortex/results:/src/outdir \
+cibersortx/fractions --username xxxxx@xxx --token xxxxxxxx \
+--refsample refsample.txt --mixture mixture.txt \
+--single_cell TRUE --rmbatchSmode TRUE --QN FALSE \
+--verbose TRUE --perm 1000
+```
+
 **r09_deconv_all** (aggregator) — A no-output target listing all the stage's outputs, so `snakemake r09_deconv_all` builds the whole deconvolution stage. Resolves to nothing when the stage is disabled.
 
 #### 10. Pipeline outputs
