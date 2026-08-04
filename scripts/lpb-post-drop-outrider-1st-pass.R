@@ -23,49 +23,6 @@ experiments <- list(
             "HC91" = c("KH3_HC91_BA9_S57",  "HC91_BA9_29"),
             "SZ06" = c("KH15_SZ06_BA9_S67", "SZ06_BA9_5")
         )
-    ),
-    "ba22p_ba4_cortex_gtex" = list(
-        "outrider_tag" = "cortex_gtex",
-        "averaging_mode" = "groups",
-        "samples" = list(
-            "SZ07" = c("SZ07_BA22p_16","SZ07_BA22p_17","SZ07_BA22p_18",
-                       "SZ07_BA4_7","SZ07_BA4_8","SZ07_BA4_9"),
-            "HC91" = c("HC91_BA22p_30","KH23_HC91_BA22p_S75",
-                       "HC91_BA4_28"),
-            "SZ06" = c("SZ06_BA22p_6","KH35_SZ06_BA22p_S85",
-                       "SZ06_BA4_4")
-        )
-    ),
-    "ba22p_cortex_gtex" = list(
-        "outrider_tag" = "cortex_gtex",
-        "averaging_mode" = "simple",
-        "samples" = list(
-            "SZ07" = c("SZ07_BA22p_16","SZ07_BA22p_17","SZ07_BA22p_18"),
-            "HC91" = c("HC91_BA22p_30","KH23_HC91_BA22p_S75"),
-            "SZ06" = c("SZ06_BA22p_6","KH35_SZ06_BA22p_S85")
-        )
-    ),
-    "ba4_cortex_gtex" = list(
-        "outrider_tag" = "cortex_gtex",
-        "averaging_mode" = "simple",
-        "samples" = list(
-            "SZ07" = c("SZ07_BA4_7","SZ07_BA4_8","SZ07_BA4_9"),
-            "HC91" = c("HC91_BA4_28"),
-            "SZ06" = c("SZ06_BA4_4")
-        )
-    ),
-    "all_inhouse" = list(
-        "outrider_tag" = "inhouse_all_regions",
-        "averaging_mode" = "groups",
-        "samples" = list(
-            "SZ07" = c("KH16_SZ07_BA9_S68", "SZ07_BA9_14",
-                       "SZ07_BA22p_16","SZ07_BA22p_17","SZ07_BA22p_18",
-                       "SZ07_BA4_7","SZ07_BA4_8","SZ07_BA4_9"),
-            "HC91" = c("HC91_BA22p_30","KH23_HC91_BA22p_S75","HC91_BA4_28",
-                       "HC91_BA9_29","KH3_HC91_BA9_S57"),
-            "SZ06" = c("KH15_SZ06_BA9_S67", "SZ06_BA9_5","SZ06_BA22p_6",
-                       "KH35_SZ06_BA22p_S85","SZ06_BA4_4")
-        )
     )
 )
 git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession"
@@ -83,28 +40,6 @@ signed_min_abs <- function(x, shrink_discordant = TRUE) {
     }
     val
 }
-# % notation
-# k=\operatorname*{arg\,min}_{j}\,|z_j|, \qquad S_0 = z_k .
-# 
-# % shrinkage factor
-# \phi=
-#     \begin{cases}
-# \displaystyle 1-\frac{\min_j|z_j|}{\max_j|z_j|},
-# & \text{nonzero } z_j \text{ differ in sign (discordant),}\\[2.2ex]
-# 1, & \text{otherwise (concordant).}
-# \end{cases}
-# 
-# % combined statistic
-# S = z_k\,\phi .
-# 
-# % m = 2 specialization
-# S=
-#     \begin{cases}
-# z_k, & \operatorname{sign}(z_1)\,\operatorname{sign}(z_2)\ge 0,\\[1.6ex]
-# z_k\!\left(1-\dfrac{\min(|z_1|,|z_2|)}{\max(|z_1|,|z_2|)}\right),
-# & \operatorname{sign}(z_1)\,\operatorname{sign}(z_2)<0,
-# \end{cases}
-# \qquad k=\operatorname*{arg\,min}_{i\in\{1,2\}}|z_i| .
 
 # **** custom GSEA plotting functions -------
 source(sprintf("%s/scripts/lpb-post-drop-fgsea-emap.R", git_folder))
@@ -397,79 +332,3 @@ for(exp in names(experiments)) {
                     git_folder, exp))
     
 }
-
-# Do they replicate? =========
-fgsea_uncorrected <- list()
-fgsea_collapsed   <- list()
-fgsea_pathways   <- list()
-fgsea_leadingedge   <- list()
-for(exp in names(experiments)[!(names(experiments) %in% c("all_inhouse", "ba22p_ba4_cortex_gtex"))]) {
-    if(file.exists(sprintf("%s/data/post-drop/fst-pass/%s_%s_fgsea_results.xlsx",
-                            git_folder, exp, "SZ07") )) {
-        fgsea_uncorrected[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
-                git_folder, exp, "SZ07"), sheet = "fgsea_res_sig_uncorrected")$pathway
-        fgsea_collapsed[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
-                git_folder, exp, "SZ07"), sheet = "fgsea_res_sig")$pathway
-        fgsea_pathways[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
-                git_folder, exp, "SZ07"), sheet = "tiered_genes_in_pathways")$pathway
-        fgsea_leadingedge[[exp]] <- readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
-                git_folder, exp, "SZ07"), sheet = "tiered_genes_in_pathways")$pathway[readxl::read_xlsx(sprintf("%s/data/post-drop/%s_%s_fgsea_results.xlsx",
-                                                                                                                git_folder, exp, "SZ07"), sheet = "tiered_genes_in_pathways")$evidence == "leading_edge"]
-    }
-}
-gg_color_hue <- function(n) {
-    hues = seq(15, 375, length = n + 1)
-    hcl(h = hues, l = 65, c = 100)[1:n]
-}
-
-venn::venn(
-     fgsea_uncorrected,
-     zcolor=gg_color_hue(3),
-     borders = F,
-     ellipse=F,
-     lty=0,
-     bty="n",
-     lwd=0,
-     box=F,
-     ilabels = "counts"
-)
-venn::venn(
-     fgsea_collapsed,
-     zcolor=gg_color_hue(4),
-     borders = F,
-     ellipse=F,
-     lty=0,
-     bty="n",
-     lwd=0,
-     box=F,
-     ilabels = "counts"
-)
-venn::venn(
-    fgsea_pathways,
-     zcolor=gg_color_hue(4),
-     borders = F,
-     ellipse=F,
-     lty=0,
-     bty="n",
-     lwd=0,
-     box=F,
-     ilabels = "counts"
-)
-venn::venn(
-    fgsea_leadingedge,
-     zcolor=gg_color_hue(4),
-     borders = F,
-     ellipse=F,
-     lty=0,
-     bty="n",
-     lwd=0,
-     box=F,
-     ilabels = "counts"
-)
-
-fgsea_uncorrected$ba9_gtex[fgsea_uncorrected$ba9_gtex %in% fgsea_uncorrected$ba22p_cortex_gtex & 
-                               fgsea_uncorrected$ba9_gtex %in% fgsea_uncorrected$ba4_cortex_gtex]
-fgsea_collapsed$ba9_gtex[fgsea_collapsed$ba9_gtex %in% fgsea_collapsed$ba22p_cortex_gtex & 
-                         fgsea_collapsed$ba9_gtex %in% fgsea_collapsed$ba4_cortex_gtex]
-fgsea_pathways$ba9_gtex[fgsea_pathways$ba9_gtex %in% fgsea_pathways$ba22p_cortex_gtex & 
-                            fgsea_pathways$ba9_gtex %in% fgsea_pathways$ba4_cortex_gtex]
