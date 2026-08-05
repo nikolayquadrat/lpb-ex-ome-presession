@@ -448,4 +448,4 @@ plot_donor_specificity <- plot_donor_specificity_table(
 )
 ggplot2::ggsave(sprintf("%s/data/post-drop/trd-pass/plot_donor_specificity_table.png", git_folder),
                 plot = plot_donor_specificity$grob,
-                width = 12, height = 8, dpi = 300)
+                width = 10, height = 6, dpi = 300)
