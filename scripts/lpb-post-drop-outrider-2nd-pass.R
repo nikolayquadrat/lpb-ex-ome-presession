@@ -22,7 +22,7 @@ experiments <- list(
         )
     )
 )
-git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession"
+git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession" # <-- SET THE GIT PATH
 exome_name <- "e1-19"
 
 # Functions ========
@@ -195,7 +195,7 @@ for (tier_gene in tier_genes) {
                    emapplot_collapsed, width = 12, height = 9, dpi = 150, bg = "white")
             
             
-            # **** **** how often genes similar to the tiered gene is ended up in significant pathways -----------
+            # **** **** how often genes similar to the tiered gene are ended up in significant pathways -----------
             empirical_p_results <- minp_size_matched_test(
                 candidates   = tier_gene,
                 fgsea_res    = significant_pathways[, c("pathway", "pval")],
@@ -330,3 +330,4 @@ names(list_of_tables) <- tier_genes
 
 empiric_p_df <- bind_rows(list_of_tables)
 empiric_p_df$emp_p_bh <- p.adjust(empiric_p_df$emp_p, method = "BH")
+writexl::write_xlsx(empiric_p_df, sprintf("%s/data/post-drop/snd-pass/ba9_gtex_SZ07_fgsea_results_empirical.xlsx", git_folder))

@@ -25,7 +25,7 @@ experiments <- list(
         )
     )
 )
-git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession"
+git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession" # <-- SET THE GIT PATH
 exome_name <- "e1-19"
 
 # Functions ========

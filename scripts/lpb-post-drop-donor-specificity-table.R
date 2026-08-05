@@ -137,11 +137,47 @@ plot_donor_specificity_table <- function(
         sz07_nes_col    = "SZ07_simple_NES",
         others_nes_col  = "other_donors_NES",
         n_smaller_col   = "n_donors_psmallerSZ07",
+        # ---- optional cell-type specificity column ----------------------------
+        # Supply per-pathway mean neuronal delta_log2 (from the raw-pseudobulk
+        # specificity.tsv). Positive = neuronal-leaning leading edge, negative =
+        # non-neuronal, near 0 = composition-independent. Give EITHER named
+        # numeric vectors keyed by pathway name, OR unnamed vectors aligned to
+        # `res[[pathway_col]]` row order. Column appears only if at least one is
+        # given; both may be supplied (leading edge shown, whole-set in ()).
+        spec_le         = NULL,   # mean delta over LEADING-EDGE genes
+        spec_all        = NULL,   # mean delta over the WHOLE pathway gene set
+        spec_header     = "neuronal\nspecificity",
+        spec_digits     = 2,
+        spec_width      = 1.4,    # relative width of the specificity column
+        # ---- optional composition-correlation columns -------------------------
+        # Per-pathway Spearman rho of donor NES vs cell fraction, WITHIN groups
+        # (from pathway_composition_correlation(): rho_HC and rho_SZ). Pass as
+        # numeric vectors NAMED by pathway (or unnamed, aligned to res rows).
+        # Each column appears only if its vector is given; both sit AFTER the
+        # neuronal-specificity column, in the order rho_HC then rho_SZ.
+        rho_hc          = NULL,
+        rho_sz          = NULL,
+        rho_hc_header   = "\u03c1 HC",
+        rho_sz_header   = "\u03c1 SZ",
+        rho_digits      = 2,
+        rho_width       = 1.0,
+        # ---- optional SZ07 composition-residual column (RECOMMENDED) ----------
+        # Per-pathway z-score of SZ07's NES vs what its cell composition predicts
+        # (pathway_composition_correlation()$sz07_residual_z). Uses ALL non-SZ07
+        # donors to fit NES~fraction, so it is better powered than the within-
+        # group rho columns. Large |z| = enrichment NOT explained by composition
+        # (regulatory signal); near 0 = composition-explained. Pass as a numeric
+        # vector NAMED by pathway (or unnamed, aligned to res rows). Sits after
+        # the specificity / rho columns.
+        resid_z         = NULL,
+        resid_z_header  = "SZ07\nresid-z",
+        resid_z_digits  = 1,
+        resid_z_width   = 1.1,
         label_fn        = NULL,
         label_wrap      = NULL,
         label_size      = 7.5,
         shorten_names   = 44,
-        colwidths       = c(8, 1.2, 1.0, 1.3, 5.5),
+        colwidths       = NULL,   # default set below (depends on spec column)
         group_header_height = 0.85,
         render          = TRUE) {
 
@@ -292,6 +328,54 @@ plot_donor_specificity_table <- function(
     Msel  <- M[match(sel[[pathway_col]], res[[pathway_col]]), , drop = FALSE]
     szsel <- sz[match(sel[[pathway_col]], res[[pathway_col]])]
 
+    # ---- resolve the optional specificity vectors to selected-row order ----
+    # A vector may be named (keyed by pathway) or unnamed (aligned to res rows).
+    show_spec   <- !is.null(spec_le) || !is.null(spec_all)
+    show_rho_hc <- !is.null(rho_hc)
+    show_rho_sz <- !is.null(rho_sz)
+    show_resid_z <- !is.null(resid_z)
+    resolve_spec <- function(v, what) {
+        if (is.null(v)) return(rep(NA_real_, nrow(sel)))
+        v <- as.numeric(v)
+        if (!is.null(names(v)) && any(nzchar(names(v)))) {
+            out <- unname(v[sel[[pathway_col]]])          # by pathway name
+        } else {
+            if (length(v) != nrow(res))
+                stop(sprintf(paste0("unnamed `%s` has length %d but must equal the ",
+                     "number of rows in `res` (%d) to align positionally; or pass ",
+                     "a vector NAMED by pathway."), what, length(v), nrow(res)))
+            out <- v[match(sel[[pathway_col]], res[[pathway_col]])]
+        }
+        out
+    }
+    spec_le_sel  <- resolve_spec(spec_le,  "spec_le")
+    spec_all_sel <- resolve_spec(spec_all, "spec_all")
+    rho_hc_sel   <- resolve_spec(rho_hc,   "rho_hc")
+    rho_sz_sel   <- resolve_spec(rho_sz,   "rho_sz")
+    resid_z_sel  <- resolve_spec(resid_z,  "resid_z")
+
+    # optional middle columns between NES and donors, in display order
+    n_middle <- as.integer(show_spec) + as.integer(show_rho_hc) +
+                as.integer(show_rho_sz) + as.integer(show_resid_z)
+    ncol_tab <- 5L + n_middle
+    # `colwidths` always describes the BASE 5 columns
+    # (pathway, padj, NES, donors, strip). When the specificity column is shown,
+    # its width is inserted between NES and donors, so a length-5 colwidths from
+    # a prior call keeps working. A length-6 colwidths is taken as-is.
+    if (is.null(colwidths)) colwidths <- c(8, 1.2, 1.0, 1.3, 5.5)   # base 5
+    extra_w <- c(if (show_spec) spec_width,
+                 if (show_rho_hc) rho_width,
+                 if (show_rho_sz) rho_width,
+                 if (show_resid_z) resid_z_width)
+    if (length(colwidths) == 5L && length(extra_w) > 0)
+        colwidths <- append(colwidths, extra_w, after = 3L)   # insert after NES
+    if (length(colwidths) != ncol_tab)
+        stop(sprintf(paste0("colwidths has length %d but the table has %d columns%s. ",
+             "Pass 5 base widths (pathway, padj, NES, donors, strip) -- the ",
+             "specificity width is inserted automatically -- or exactly %d."),
+             length(colwidths), ncol_tab,
+             if (show_spec) " (incl. specificity)" else "", ncol_tab))
+
     # ---- shared NES scale across every row --------------------------------
     xr <- range(c(as.vector(Msel), szsel, 0), na.rm = TRUE)
     xr <- xr + c(-1, 1) * 0.04 * diff(xr)
@@ -327,6 +411,21 @@ plot_donor_specificity_table <- function(
     fmt_n <- function(x) if (is.na(x)) "NA" else sprintf("%.2f", x)
     # n / N -- the fraction conveys "how many of the cohort match SZ07"
     fmt_frac <- function(n, N) if (is.na(n)) "NA" else sprintf("%d/%d", as.integer(n), N)
+    # specificity: leading-edge value, with whole-set value in parentheses when
+    # both are supplied. Signed, so the + is kept for the neuronal direction.
+    fmt_spec <- function(le, all) {
+        f <- function(x) if (is.na(x)) NA_character_
+                         else sprintf(paste0("%+.", spec_digits, "f"), x)
+        a <- f(le); b <- f(all)
+        if (is.na(a) && is.na(b)) return("NA")
+        if (is.na(a)) return(sprintf("(%s)", b))
+        if (is.na(b)) return(a)
+        sprintf("%s (%s)", a, b)
+    }
+    fmt_rho <- function(r) if (is.na(r)) "NA"
+                           else sprintf(paste0("%+.", rho_digits, "f"), r)
+    fmt_z   <- function(z) if (is.na(z)) "NA"
+                           else sprintf(paste0("%+.", resid_z_digits, "f"), z)
     # display-label pipeline: label_fn -> wrap (or shorten). Applied to the
     # rendered text only; `pathway_col` stays the join key throughout.
     make_label <- function(s) {
@@ -348,33 +447,57 @@ plot_donor_specificity_table <- function(
 
     has_nsm <- n_smaller_col %in% names(sel)
 
-    header <- list(
+    header <- c(list(
         grid::textGrob("Pathway", x = 1, hjust = 1, gp = grid::gpar(fontface = "bold", fontsize = 9)),
         grid::textGrob("padj",    gp = grid::gpar(fontface = "bold", fontsize = 9)),
-        grid::textGrob("NES",     gp = grid::gpar(fontface = "bold", fontsize = 9)),
+        grid::textGrob("NES",     gp = grid::gpar(fontface = "bold", fontsize = 9))),
+        if (show_spec) list(grid::textGrob(spec_header,
+            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+        if (show_rho_hc) list(grid::textGrob(rho_hc_header,
+            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+        if (show_rho_sz) list(grid::textGrob(rho_sz_header,
+            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+        if (show_resid_z) list(grid::textGrob(resid_z_header,
+            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+        list(
         grid::textGrob("donors\np<SZ07", gp = grid::gpar(fontface = "bold", fontsize = 8)),
         grid::textGrob("donor NES (shared scale)", gp = grid::gpar(fontface = "bold", fontsize = 9))
-    )
+    ))
 
     make_data_row <- function(i) {
         nsm <- if (has_nsm) sel[[n_smaller_col]][i] else sel$.n_more[i]
-        list(
+        c(list(
             grid::textGrob(make_label(sel[[pathway_col]][i]), x = 1, hjust = 1,
                            gp = grid::gpar(fontsize = label_size)),
             grid::textGrob(fmt_p(sel[[padj_col]][i]), gp = grid::gpar(fontsize = 7.5)),
-            grid::textGrob(fmt_n(sel[[nes_col]][i]),  gp = grid::gpar(fontsize = 7.5)),
+            grid::textGrob(fmt_n(sel[[nes_col]][i]),  gp = grid::gpar(fontsize = 7.5))),
+            if (show_spec) list(grid::textGrob(
+                fmt_spec(spec_le_sel[i], spec_all_sel[i]),
+                gp = grid::gpar(fontsize = 7.5))),
+            if (show_rho_hc) list(grid::textGrob(fmt_rho(rho_hc_sel[i]),
+                gp = grid::gpar(fontsize = 7.5))),
+            if (show_rho_sz) list(grid::textGrob(fmt_rho(rho_sz_sel[i]),
+                gp = grid::gpar(fontsize = 7.5))),
+            if (show_resid_z) list(grid::textGrob(fmt_z(resid_z_sel[i]),
+                gp = grid::gpar(fontsize = 7.5))),
+            list(
             grid::textGrob(fmt_frac(nsm, n_other),    gp = grid::gpar(fontsize = 7.5)),
             make_strip(i)
-        )
+        ))
     }
-    make_group_row <- function(label) list(
+    make_group_row <- function(label) c(list(
         grid::textGrob(label, x = 1, hjust = 1,
                        gp = grid::gpar(fontface = "bold.italic", fontsize = 8.5,
                                        col = "grey25")),
-        grid::nullGrob(), grid::nullGrob(), grid::nullGrob(),
+        grid::nullGrob(), grid::nullGrob()),
+        if (show_spec) list(grid::nullGrob()),
+        if (show_rho_hc) list(grid::nullGrob()),
+        if (show_rho_sz) list(grid::nullGrob()),
+        if (show_resid_z) list(grid::nullGrob()),
+        list(grid::nullGrob(),
         grid::linesGrob(x = grid::unit(c(0, 1), "npc"), y = grid::unit(c(0.5, 0.5), "npc"),
                         gp = grid::gpar(col = "grey85", lwd = 0.8))
-    )
+    ))
 
     # ---- assemble rows (with group headers) --------------------------------
     row_grobs <- list(); row_h <- numeric(0)
@@ -409,8 +532,12 @@ plot_donor_specificity_table <- function(
             axis.ticks.x = ggplot2::element_line(colour = "grey40"),
             axis.title.x = ggplot2::element_text(size = 8),
             plot.margin  = grid::unit(c(8, 2, 0, 2), "pt"))
-    axis_row <- list(grid::nullGrob(), grid::nullGrob(), grid::nullGrob(),
-                     grid::nullGrob(), ggplot2::ggplotGrob(axis_p))
+    axis_row <- c(list(grid::nullGrob(), grid::nullGrob(), grid::nullGrob()),
+                  if (show_spec) list(grid::nullGrob()),
+                  if (show_rho_hc) list(grid::nullGrob()),
+                  if (show_rho_sz) list(grid::nullGrob()),
+                  if (show_resid_z) list(grid::nullGrob()),
+                  list(grid::nullGrob(), ggplot2::ggplotGrob(axis_p)))
 
     # ---- legend row --------------------------------------------------------
     leg_lab <- c(sz07_label, names(group_colors))
@@ -425,13 +552,17 @@ plot_donor_specificity_table <- function(
         ggplot2::scale_x_continuous(limits = c(0.5, length(leg_lab) + 1.2)) +
         ggplot2::scale_y_continuous(limits = c(0.4, 1.6)) +
         ggplot2::theme_void()
-    legend_row <- list(grid::nullGrob(), grid::nullGrob(), grid::nullGrob(),
-                       grid::nullGrob(), ggplot2::ggplotGrob(leg_p))
+    legend_row <- c(list(grid::nullGrob(), grid::nullGrob(), grid::nullGrob()),
+                    if (show_spec) list(grid::nullGrob()),
+                    if (show_rho_hc) list(grid::nullGrob()),
+                    if (show_rho_sz) list(grid::nullGrob()),
+                    if (show_resid_z) list(grid::nullGrob()),
+                    list(grid::nullGrob(), ggplot2::ggplotGrob(leg_p)))
 
     all_grobs <- c(header, unlist(row_grobs, recursive = FALSE), axis_row, legend_row)
     g <- gridExtra::arrangeGrob(
         grobs   = all_grobs,
-        ncol    = 5,
+        ncol    = ncol_tab,
         nrow    = length(row_h) + 3L,
         widths  = grid::unit(colwidths, "null"),
         heights = grid::unit(c(1.1, row_h, 1.1, 0.7), "null"))
@@ -445,6 +576,13 @@ plot_donor_specificity_table <- function(
     out$sz07_rank      <- sel$.rank
     out$n_more_extreme <- sel$.n_more
     out$n_donors       <- n_other
+    if (show_spec) {
+        if (!is.null(spec_le))  out$spec_neuronal_LE  <- spec_le_sel
+        if (!is.null(spec_all)) out$spec_neuronal_all <- spec_all_sel
+    }
+    if (show_rho_hc) out$rho_HC <- rho_hc_sel
+    if (show_rho_sz) out$rho_SZ <- rho_sz_sel
+    if (show_resid_z) out$sz07_residual_z <- resid_z_sel
     if (has_nsm)
         out$donors_p_lt_SZ07 <- sprintf("%d/%d", as.integer(sel[[n_smaller_col]]), n_other)
     rownames(out) <- NULL

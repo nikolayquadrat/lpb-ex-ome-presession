@@ -12,6 +12,7 @@ library(OUTRIDER)   # v1.22.0
 library(fgsea)      # v1.30.0
 library(msigdbr)    # v7.5.1
 library(enrichplot) # v1.24.4
+library(stringr)
 
 # Arguments ============
 experiments <- list(
@@ -36,7 +37,7 @@ experiments <- list(
         )
     )
 )
-git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession"
+git_folder <- "C:/Users/Nikolay/Dropbox/Git/lpb-ex-ome-presession" # <-- SET THE GIT PATH
 exome_name <- "e1-19"
 
 # Functions ========
@@ -44,6 +45,7 @@ exome_name <- "e1-19"
 source(sprintf("%s/scripts/lpb-post-drop-fgsea-emap.R", git_folder))
 source(sprintf("%s/scripts/lpb-post-drop-outrider-plot-gsea-highlighted.R", git_folder))
 source(sprintf("%s/scripts/lpb-post-drop-donor-specificity-table.R", git_folder))
+source(sprintf("%s/scripts/lpb-post-drop-pathway-composition-correlation.R", git_folder))
 
 # ENSG --> HGNC dictionary ==========
 constraint <- fread(sprintf("%s/data/exome-pipe/data/gnomad_v4.1_constraint_metrics.tsv", git_folder))
@@ -319,6 +321,7 @@ for(exp in names(experiments)) {
 }
 
 # Aggregate ==========
+# **** SZ07-specific pathways ---------
 exp <- "ba9_gtex"
 list_of_tables <- lapply(names(experiments[[exp]][["samples"]]), function(x) {
     readxl::read_xlsx(sprintf("%s/data/post-drop/trd-pass/ba9_gtex_%s_fgsea_results.xlsx", git_folder, x),
@@ -334,6 +337,44 @@ significant_pathways$SZ07_simple_NES <- NA
 significant_pathways$other_donors_NES <- NA
 significant_pathways$NES_gap <- NA
 
+
+# **** GSEA cell-type independence classifier ----------
+cib_siletti_specificity <- read.delim(sprintf("%s/data/rnaseq-pipe/00_additional_files/deconv/reference_canonical/siletti_cortex/specificity.tsv", git_folder))
+
+cib_siletti <- read.delim(sprintf("%s/data/rnaseq-pipe/09_deconv/_cibersortx/siletti_cortex/results/CIBERSORTx_Adjusted.txt", git_folder))
+cib_siletti <- cib_siletti %>% 
+    mutate(donor = sub("^(KH\\d+_|)*([^_]+)_.*$", "\\2", Mixture)) %>% 
+    mutate(region = sub("^.*_(.*)_.*", "\\1", Mixture)) %>% 
+    group_by(donor, region) %>% 
+    summarise(neuronal = mean(neuronal), .groups = "drop") %>% 
+    mutate(group = case_when(
+        donor == "SZ07" ~ "SZ07",
+        grepl("SZ", donor) ~ "SZ",
+        grepl("HC", donor) ~ "HC",
+        TRUE ~ NA_character_
+    )) %>% 
+    filter(region == "BA9")
+
+significant_pathways$leading_edge_neuronal_score <- sapply(1:dim(significant_pathways)[1], function(y) {
+    mean(sapply(unlist(strsplit(significant_pathways$leadingEdge[y], split = ", ")), function(x) {
+            if (x %in% cib_siletti_specificity$gene) {
+                cib_siletti_specificity$delta_log2[cib_siletti_specificity$gene == x ]
+            } else {
+                NA
+            }
+        }), na.rm = TRUE)
+    })
+significant_pathways$pathway_neuronal_score <- sapply(1:dim(significant_pathways)[1], function(y) {
+    mean(sapply(unlist(strsplit(significant_pathways$pathway_genes[y], split = ", ")), function(x) {
+            if (x %in% cib_siletti_specificity$gene) {
+                cib_siletti_specificity$delta_log2[cib_siletti_specificity$gene == x ]
+            } else {
+                NA
+            }
+        }), na.rm = TRUE)
+    })
+
+# **** final plot -----------
 for (sp in significant_pathways$pathway) {
     # sp <- "HALLMARK_TNFA_SIGNALING_VIA_NFKB"
     fgsea_res_other_donors_sp <- fgsea_res_all %>% 
@@ -368,6 +409,18 @@ classify <- function(p) {
 }
 pg <- setNames(vapply(significant_pathways$pathway, classify, character(1)), significant_pathways$pathway)
 significant_pathways$pathway_group <- as.vector(pg)
+
+donor_neuronal_frac <- cib_siletti$neuronal[cib_siletti$donor != "SZ07"]
+names(donor_neuronal_frac) <- cib_siletti$donor[cib_siletti$donor != "SZ07"]
+sz07_neuronal_frac <- cib_siletti$neuronal[cib_siletti$donor == "SZ07"]
+ct <- pathway_composition_correlation(
+    res = significant_pathways,
+    donor_ids       = names(experiments[[exp]][["samples"]])[names(experiments[[exp]][["samples"]]) != "SZ07"],
+    donor_groups    = ifelse(grepl("SZ",names(experiments[[exp]][["samples"]])[names(experiments[[exp]][["samples"]]) != "SZ07"]), "SZ", "HC"), # same order
+    donor_fraction  = donor_neuronal_frac,
+    sz07_fraction   = sz07_neuronal_frac,
+    method = "spearman")
+
 writexl::write_xlsx(significant_pathways %>% 
                         dplyr::select(pathway, pathway_group, everything()) %>% 
                         mutate(pathway_group = factor(pathway_group, levels = c(
@@ -377,7 +430,7 @@ writexl::write_xlsx(significant_pathways %>%
                     sprintf("%s/data/post-drop/trd-pass/trd_pass_significant_pathways_fgsea_results.xlsx",
                             git_folder))
 
-out <- plot_donor_specificity_table(
+plot_donor_specificity <- plot_donor_specificity_table(
     res             = significant_pathways,
     donor_ids       = names(experiments[[exp]][["samples"]])[names(experiments[[exp]][["samples"]]) != "SZ07"],  # POSITIONAL — see caveat below
     donor_groups    = ifelse(grepl("SZ",names(experiments[[exp]][["samples"]])[names(experiments[[exp]][["samples"]]) != "SZ07"]), "SZ", "HC"), # same order
@@ -387,106 +440,12 @@ out <- plot_donor_specificity_table(
     rank_by         = "gap", # or "z" / "padj"
     label_fn        = strip_msigdb_prefix,
     label_wrap      = 80, # keeps the WHOLE name
-    colwidths       = c(9, 1.2, 1.0, 1.3, 5.5)
+    colwidths       = c(9, 1.2, 1.0, 1.3, 5.5),
+    spec_le  = significant_pathways$leading_edge_neuronal_score,   # mean delta_log2 over leading-edge genes
+    spec_all = significant_pathways$pathway_neuronal_score,        # mean delta_log2 over whole pathway
+    # resid_z  = setNames(ct$sz07_residual_z, ct$pathway), # basically, telling that the SZ07 is an outlier
+    render = TRUE
 )
-out$data   # the numbers behind the figure: gap, z, rank, n_more_extreme
-
-# Check the cell-type imbalances ===========
-
-library(dplyr); library(tidyr); library(stringr)
-drop_inner <- readxl::read_xlsx(sprintf("%s/data/drop-pipe/drop_summaries.xlsx", git_folder))
-m <- read.delim(sprintf("%s/data/rnaseq-pipe/04_qc/00_cell_marker_expression.tsv", git_folder))
-
-# study-specific parsing lives here, not in the workflow
-m <- m %>%
-    mutate(
-        region = str_extract(sample, "BA22p|BA9|BA4"),   # BA22p first: longest wins
-        donor  = str_extract(sample, "(HC|SZ)\\d+M?")
-    )
-
-scores_all <- m %>%
-    filter(sample %in% drop_inner$RNA_ID) %>% 
-    filter(!is.na(log2cpm)) %>%
-    group_by(region, gene) %>%
-    filter(n() >= 3, sd(log2cpm) > 0) %>%            # need spread to z-score
-    mutate(z = as.numeric(scale(log2cpm))) %>%       # z per gene WITHIN region
-    ungroup() %>%
-    group_by(sample, donor, region, cell_type) %>%
-    summarise(score = mean(z), n_markers = n(), .groups = "drop") %>%
-    pivot_wider(names_from = cell_type,
-                values_from = c(score, n_markers))
-
-# composite + the actual question — an analysis choice, so it lives here
-scores <- scores_all %>%
-    mutate(
-        glia = rowMeans(cbind(score_astrocyte, score_oligodendrocyte,
-                              score_opc, score_microglia), na.rm = TRUE),
-        neu_minus_glia = score_neuron - glia) %>%
-    dplyr::select(donor, region, sample, score_oligodendrocyte, score_astrocyte,
-           glia, score_neuron, neu_minus_glia) %>% 
-    mutate(group = case_when(
-        donor == "SZ07" ~ "SZ07",
-        grepl("SZ", donor) ~ "SZ",
-        grepl("HC", donor) ~ "HC",
-        TRUE ~ NA_character_
-    )) %>% 
-    mutate(group = factor(group, levels = c("SZ07","SZ","HC"))) %>% 
-    dplyr::arrange(group, sample)
-
-scores$sample <- factor(scores$sample, levels = scores$sample)
-ggplot(data = scores, aes(x = sample, y = neu_minus_glia, fill = group))+
-    geom_col()+
-    scale_fill_manual(values = c(
-        "SZ07"="#d62728",
-        "SZ"  ="#e69f00",
-        "HC"  ="#0072b2"
-    ))+
-    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
-    facet_grid(cols = vars(region), scales="free_x", space  = "free_x")
-
-scores <- scores_all %>%
-    dplyr::select(donor, region, sample,
-                  score_bowen19_type2_down,
-                  score_bowen19_type2_up,
-                  score_cytokine_response_genes,
-                  score_fromer16_down,
-                  score_fromer16_up,
-                  score_lanz19_dlpfc_neuronal_down,
-                  score_ruzicka24_down,
-                  score_synaptic_readout) %>% 
-    mutate(group = case_when(
-        donor == "SZ07" ~ "SZ07",
-        grepl("SZ", donor) ~ "SZ",
-        grepl("HC", donor) ~ "HC",
-        TRUE ~ NA_character_
-    )) %>% 
-    mutate(group = factor(group, levels = c("SZ07","SZ","HC"))) %>% 
-    tidyr::pivot_longer(-c(donor, region, sample, group), names_to = "score", values_to = "z") %>% 
-    dplyr::arrange(group, sample) %>% 
-    mutate(score = sub("score_", "", score)) %>% 
-    mutate(score = case_when(
-        score == "bowen19_type2_down" ~ "bowen19\ntype2 (down)",
-        score == "bowen19_type2_up" ~ "bowen19\ntype2 (up)",
-        score == "cytokine_response_genes" ~ "cytokine\nresponse",
-        score == "fromer16_down" ~ "fromer16\ndown",
-        score == "fromer16_up" ~ "fromer16\nup",
-        score == "lanz19_dlpfc_neuronal_down" ~ "lanz19 DLPFC\nneuronal down",
-        score == "ruzicka24_down" ~ "ruzicka24\ndown",
-        score == "synaptic_readout" ~ "synaptic\nreadout",
-        TRUE ~ NA_character_
-    ))
-
-scores$sample <- factor(scores$sample, levels = unique(scores$sample))
-ggplot(data = scores, aes(x = sample, y = z, fill = group))+
-    geom_col()+
-    scale_fill_manual(values = c(
-        "SZ07"="#d62728",
-        "SZ"  ="#e69f00",
-        "HC"  ="#0072b2"
-    ))+
-    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
-    facet_grid(rows = vars(score), cols = vars(region), scales="free", space  = "free_x",
-               labeller = labeller(
-                   .cols = label_wrap_gen(width = 20),
-                   .rows = label_wrap_gen(width = 15)
-               ))
+ggplot2::ggsave(sprintf("%s/data/post-drop/trd-pass/plot_donor_specificity_table.png", git_folder),
+                plot = plot_donor_specificity$grob,
+                width = 12, height = 8, dpi = 300)
