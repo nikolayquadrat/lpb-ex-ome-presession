@@ -26,7 +26,7 @@
 #  7. Version coherence is enforced explicitly: VEP_CACHE_RELEASE,
 #     VEP_PLUGINS_RELEASE, DBNSFP_VERSION are the single source of truth,
 #     printed in a banner at the start, and a sanity-check function
-#     warns if you've manually broken alignment (e.g., changed the
+#     warns in case of manually broken alignment (e.g., changed the
 #     plugin branch but left the dbNSFP version on v4.x).
 #  8. Final completeness validation walks the full expected-files list
 #     and exits non-zero if anything is missing or malformed.
@@ -64,8 +64,8 @@
 #     per-chromosome downloads complete. The helper deletes per-chromosome
 #     ~184 GB of source files as it processes them, leaving only the
 #     ~30 GB merged stripped VCF that VEP --custom uses. Set
-#     SKIP_GNOMAD_PROCESSING=1 in the env to opt out (e.g. when you want
-#     to do the heavy processing on a different machine). Failures count
+#     SKIP_GNOMAD_PROCESSING=1 in the env to opt out (e.g. in case of
+#     the heavy processing on a different machine). Failures count
 #     as real failures.
 # 12. gnomAD per-chromosome downloads are now gated on the absence of the
 #     merged stripped file. A re-run with the merged file already present
@@ -122,13 +122,14 @@ VEP_PLUGINS=/mnt/data/exome/annotation/vep/plugins
 VEP_PLUGIN_DATA=/mnt/data/exome/annotation/vep/plugin_data
 VEP_CUSTOM=/mnt/data/exome/annotation/vep/custom
 DATA_DIR=/mnt/data/exome/data
-CAPTURE_DIR=/mnt/data/exome/annotation/capture
-CAPTURE_BED="$CAPTURE_DIR/capture.bed"
+CAPTURE_DIR=/mnt/data/exome/annotation/agilent # or whatever
+CAPTURE_INTERVAL_LIST="$CAPTURE_DIR/S33266436_Regions.padded100.interval_list" # Agilent SureSelect: register at https://earray.chem.agilent.com/suredesign/
+CAPTURE_BED="$CAPTURE_DIR/S33266436_Regions.padded100.bed"   # derived below
 GENE_MODEL_DIR=/mnt/data/exome/annotation/gene_models
 GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
 
 # --- OPTIONAL: snRNA-seq deconvolution references (feed the RNA-seq hspe
-#     deconvolution, NOT the exome pipeline). Off by default; enable with
+#     deconvolution, not the exome pipeline). Off by default; enable with
 #     BUILD_DECONV_REFERENCE=1. See section 10.
 #
 #     Each reference is produced by a self-contained script in
@@ -139,20 +140,14 @@ GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
 #
 #     Large shared source download (~37 GB for the two Siletti h5ad, + HNOCA);
 #     see the section 10 header and the summary disk note before enabling.
-DECONV_DIR=/mnt/data/rnaseq/annotation/deconv
+DECONV_DIR=/mnt/data/exome/RNASEQ/rnaseq-drop/00_additional_files/deconv # change this ugliness later
 DECONV_SOURCE_DIR="$DECONV_DIR/source"                # shared big vendor h5ad
 DECONV_OUT_ROOT="$DECONV_DIR/reference_canonical"     # one subdir per reference
-DECONV_SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)/scripts_to_make_deconv_reference"
-# Python for the builders: an ISOLATED venv, never system python (system pip
-# collides with apt-managed packages -- e.g. typing_extensions has no RECORD
-# file and cannot be pip-uninstalled). Built on demand inside the deconv gate.
-DECONV_VENV="${DECONV_VENV:-$DECONV_DIR/venv}"
-DECONV_PYTHON="$DECONV_VENV/bin/python3"
-DECONV_PYLIBS="anndata h5py scipy pandas numpy"   # NOT scanpy (unused)
+DECONV_SCRIPTS_DIR=/mnt/data/exome/scripts/scripts_to_make_deconv_reference
 # Optional subset: space-separated script basenames (no .py) to build; empty =
 # all scripts in the folder. e.g. DECONV_REFERENCES="siletti_cortex"
 DECONV_REFERENCES="${DECONV_REFERENCES:-}"
-# Source URLs are read by the scripts from the environment (no stable
+# If source h5ad files are abcent source URLs are read by the scripts from the environment (no stable
 # programmatic URL for the CELLxGENE Siletti files); export before running:
 #     export SILETTI_NEURONS_URL=...  SILETTI_NONNEURONS_URL=...
 #     (HNOCA defaults to its Zenodo URL; override with HNOCA_H5AD_URL.)
@@ -298,7 +293,7 @@ log INFO "manifest:     $MANIFEST_FILE"
 NO_INSTALL="${NO_INSTALL:-0}"
 
 # List of tools the script actually needs
-REQUIRED_TOOLS="wget curl aria2c git unzip tabix bcftools python3 sha256sum"
+REQUIRED_TOOLS="wget curl aria2c git unzip tabix bcftools bedtools python3 sha256sum"
 MISSING_TOOLS=()
 for t in $REQUIRED_TOOLS; do
     command -v "$t" >/dev/null 2>&1 || MISSING_TOOLS+=("$t")
@@ -358,6 +353,38 @@ if (( HAVE_PYTHON == 0 )); then
 fi
 if (( HAVE_SHA256 == 0 )); then
     log WARN "sha256sum unavailable - manifest will lack hash entries"
+fi
+
+# --- Python libs for the deconvolution builders: isolated venv, never system ---
+# System pip collides with apt-managed packages (e.g. typing_extensions has no
+# RECORD file and cannot be uninstalled by pip). A venv sidesteps this entirely.
+DECONV_VENV="$DECONV_DIR/venv"
+DECONV_PYTHON="$DECONV_VENV/bin/python3"
+DECONV_PYLIBS="anndata h5py scipy pandas numpy"
+
+if [[ ! -x "$DECONV_PYTHON" ]]; then
+    log INFO "creating deconvolution venv at $DECONV_VENV"
+    if ! python3 -m venv "$DECONV_VENV" 2>/dev/null; then
+        log ERROR "could not create venv (need: sudo apt-get install -y python3-venv)"
+        FAILED_ITEMS+=("deconv:venv-create"); N_FAIL+=1
+    else
+        "$DECONV_PYTHON" -m pip install --quiet --upgrade pip
+    fi
+fi
+
+if [[ -x "$DECONV_PYTHON" ]]; then
+    # check against the VENV interpreter, not system python3
+    MISSING_PYLIBS=()
+    for lib in $DECONV_PYLIBS; do
+        "$DECONV_PYTHON" -c "import $lib" 2>/dev/null || MISSING_PYLIBS+=("$lib")
+    done
+    if [[ ${#MISSING_PYLIBS[@]} -gt 0 ]]; then
+        log INFO "installing into venv: ${MISSING_PYLIBS[*]}"
+        if ! "$DECONV_PYTHON" -m pip install --quiet "${MISSING_PYLIBS[@]}"; then
+            log ERROR "pip install into venv failed (check network/proxy)"
+            FAILED_ITEMS+=("deconv:pip"); N_FAIL+=1
+        fi
+    fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -1637,6 +1664,22 @@ expect_file "$DATA_DIR/ASC_gene_results_with_hgnc.tsv"
 section "7b. GENCODE gene model & per-gene coding BED"
 cd "$GENE_MODEL_DIR"
 
+# Derive the calling-footprint BED from the Picard interval_list the caller
+# uses (interval_list is 1-based inclusive with an @SQ header; BED is 0-based
+# half-open). This is the footprint callability must be judged over.
+if [[ -s "$CAPTURE_INTERVAL_LIST" && ! -s "$CAPTURE_BED" ]]; then
+    post_process_step "convert Regions.padded100.interval_list -> BED" \
+        bash -c '
+            grep -v "^@" "$1" \
+              | awk "BEGIN{OFS=\"\t\"} {print \$1, \$2-1, \$3}" \
+              | sort -k1,1 -k2,2n \
+              | bedtools merge -i - > "$2"
+        ' _ "$CAPTURE_INTERVAL_LIST" "$CAPTURE_BED"
+    [[ -s "$CAPTURE_BED" ]] && \
+        manifest_record "$(realpath "$CAPTURE_BED")" "post-processed" "interval_list->bed"
+fi
+
+expect_file "$CAPTURE_BED"
 GENCODE_GTF="gencode.v${GENCODE_VERSION}.basic.annotation.gtf.gz"
 GENCODE_URL="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_${GENCODE_VERSION}/${GENCODE_GTF}"
 GENE_CDS_BED="$GENE_MODEL_DIR/gene_cds.hg38.bed"
@@ -1688,15 +1731,7 @@ else
 fi
 
 # =============================================================================
-# 8. CAPTURE BED -- cannot be automated
-# =============================================================================
-section "8. Capture-kit BED"
-manual_needed "$CAPTURE_BED" \
-    "Get GRCh38 target-region BED from wet-lab supplier or kit vendor (Agilent SureSelect: register at https://earray.chem.agilent.com/suredesign/). Place at $CAPTURE_BED"
-expect_file "$CAPTURE_BED"
-
-# =============================================================================
-# 9. VEP + samtools Singularity image (required by VEP rule for LOFTEE)
+# 8. VEP + samtools Singularity image (required by VEP rule for LOFTEE)
 # =============================================================================
 # The upstream Ensembl VEP container does NOT ship samtools. LOFTEE silently
 # fails to register if samtools is missing at runtime - and silent failure
@@ -1876,7 +1911,6 @@ fi
 
 expect_file "$VEP_LOFTEE_SIMG"
 
-# =============================================================================
 # 10. OPTIONAL: snRNA-seq deconvolution references (-> RNA-seq hspe)
 # -----------------------------------------------------------------------------
 # Driver for the reference builders in scripts_to_make_deconv_reference/. Each
@@ -1918,7 +1952,7 @@ elif [[ ! -d "$DECONV_SCRIPTS_DIR" ]]; then
 else
     # ---- ensure an isolated venv with the builder's python deps ----
     # (venv, never system pip: avoids the apt-vs-pip RECORD collision on
-    # externally-managed Ubuntu. scanpy is NOT needed -- builders don't use it.)
+    # externally-managed Ubuntu).
     deconv_ready=1
     if [[ ! -x "$DECONV_PYTHON" ]]; then
         log INFO "creating deconvolution venv at $DECONV_VENV"
@@ -2159,7 +2193,7 @@ ALSO AUTOMATED
   - LOFTEE supporting data: aria2 from Broad
   - DDG2P: TSV with JSON->TSV fallback
   - SCHEMA HGNC join: auto-runs once SCHEMA TSV is in place
-  - REVEL conversion: auto-runs once you place the ZIP
+  - REVEL conversion: auto-runs once the ZIP is in place
   - dbNSFP md5 verification: auto-runs once .md5 is in place
   - gnomAD strip+concat: auto-runs after per-chromosome downloads complete;
       deletes ~184 GB of per-chromosome originals as it processes them and
@@ -2196,8 +2230,8 @@ Logs and manifest
 
   Re-running this script is idempotent - it retries only failures and
   picks up post-processing for any newly-supplied manual files. The
-  manifest gives you a per-file audit trail (size, sha256, source URL,
-  validation status) so you can confirm content stability across runs.
+  manifest gives a per-file audit trail (size, sha256, source URL,
+  validation status).
 
 EOF
 
