@@ -365,6 +365,12 @@ def build_reference(h5ad_paths, outdir, label_fn, subject_col,
     gz_lines(os.path.join(outdir, "cells.tsv.gz"),
              ("\t".join(x) + "\n" for x in zip(cell_ids, subj, srclab, clslab)))
 
+    # ---- per-gene cell-type specificity (from the SAME raw pseudobulk) --------
+    # Complete, unfiltered values (unlike CIBERSORTx's signature GEP, which drops
+    # sub-population markers like GFAP under a coarse partition). Binary refs get
+    # a signed log2 ratio; multi-class refs get tau. Written to specificity.tsv.
+    spec_meta = write_specificity(gxc, genes, clslab, outdir)
+
     prov = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "sources": [{"path": p, "sha256": sha256(p)} for p in h5ad_paths],
@@ -377,6 +383,7 @@ def build_reference(h5ad_paths, outdir, label_fn, subject_col,
     }
     if provenance_extra:
         prov.update(provenance_extra)
+    prov["specificity"] = spec_meta
     with open(os.path.join(outdir, "provenance.json"), "w") as fh:
         json.dump(prov, fh, indent=2)
     eprint(f"[done] {prov['n_cells']} cells, {prov['n_subjects']} subjects, "
@@ -384,7 +391,85 @@ def build_reference(h5ad_paths, outdir, label_fn, subject_col,
     return prov
 
 
+def write_specificity(gxc, genes, cell_classes, outdir, pseudocount=1.0):
+    """Per-gene cell-type specificity from raw per-class pseudobulk.
+
+    Aggregates counts per class (sparse, no densify), CPM-normalises each class
+    profile, then:
+      * 2 classes  -> signed log2 ratio delta = log2((A+eps)/(B+eps)), where A is
+                      the alphabetically-FIRST class. Sign gives the compartment,
+                      magnitude the degree. 'higher_in' names the class.
+      * >2 classes -> tau = sum(1 - x_i/x_max)/(n-1) on linear CPM (Yanai index):
+                      0 = uniform (composition-independent), 1 = single-class
+                      (pure composition proxy). 'dominant_class' = argmax.
+    Writes <outdir>/specificity.tsv (gene + per-class CPM + score columns).
+    Returns a small metadata dict for provenance.
+    """
+    import numpy as np, scipy.sparse as sp, csv, os
+    classes = sorted(set(cell_classes))
+    cc = np.asarray(cell_classes)
+    # sparse (cells x class) 0/1 indicator -> gxc(genes x cells) %*% ind = per-class sums
+    col = {c: j for j, c in enumerate(classes)}
+    j_idx = np.fromiter((col[c] for c in cc), dtype=int, count=len(cc))
+    ind = sp.csc_matrix((np.ones(len(cc)), (np.arange(len(cc)), j_idx)),
+                        shape=(len(cc), len(classes)))
+    pb = np.asarray((gxc @ ind).todense())               # genes x classes (summed)
+    # CPM per class (column-wise); sum==mean-per-cell in CPM so summing is fine
+    colsum = pb.sum(axis=0, keepdims=True)
+    colsum[colsum == 0] = 1.0
+    cpm = pb / colsum * 1e6
+
+    header = ["gene"] + [f"cpm_{c}" for c in classes]
+    rows = []
+    if len(classes) == 2:
+        method = "log2_ratio"
+        a, b = classes[0], classes[1]                    # a = first alphabetically
+        A, B = cpm[:, 0], cpm[:, 1]
+        delta = np.log2((A + pseudocount) / (B + pseudocount))
+        higher = np.where(delta >= 0, a, b)
+        header += ["delta_log2", "higher_in", "positive_class", "negative_class"]
+        for i, g in enumerate(genes):
+            rows.append([g] + [f"{v:.6g}" for v in cpm[i]]
+                        + [f"{delta[i]:.6g}", higher[i], a, b])
+        meta = {"method": method, "score_column": "delta_log2",
+                "convention": f"positive = higher in '{a}', negative = '{b}'",
+                "pseudocount": pseudocount, "classes": classes}
+    else:
+        method = "tau"
+        xmax = cpm.max(axis=1)
+        n = len(classes)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratios = cpm / xmax[:, None]                 # x_i / x_max
+        tau = np.where(xmax > 0, (n - ratios.sum(axis=1)) / (n - 1), np.nan)
+        dom = np.array(classes)[cpm.argmax(axis=1)]
+        dom = np.where(xmax > 0, dom, "NA")
+        header += ["tau", "dominant_class", "max_cpm"]
+        for i, g in enumerate(genes):
+            tstr = "NA" if np.isnan(tau[i]) else f"{tau[i]:.6g}"
+            rows.append([g] + [f"{v:.6g}" for v in cpm[i]]
+                        + [tstr, dom[i], f"{xmax[i]:.6g}"])
+        meta = {"method": method, "score_column": "tau",
+                "note": "tau in [0,1]; 0=uniform, 1=single-class; NA if gene "
+                        "unexpressed in all classes", "classes": classes}
+
+    out = os.path.join(outdir, "specificity.tsv")
+    tmp = out + ".partial"
+    with open(tmp, "w", newline="") as fh:
+        w = csv.writer(fh, delimiter="\t", lineterminator="\n")
+        w.writerow(header)
+        w.writerows(rows)
+    os.replace(tmp, out)
+    eprint(f"[spec] {method}: {len(genes)} genes x {len(classes)} classes "
+           f"-> specificity.tsv")
+    meta["file"] = "specificity.tsv"
+    meta["n_genes"] = len(genes)
+    return meta
+
+
 def already_built(outdir):
-    """Idempotency check the scripts use to no-op on re-run."""
+    """Idempotency check the scripts use to no-op on re-run. Requires the
+    specificity file too, so references built before specificity was added are
+    rebuilt to generate it."""
     return os.path.isfile(os.path.join(outdir, "matrix.mtx.gz")) \
-        and os.path.isfile(os.path.join(outdir, "provenance.json"))
+        and os.path.isfile(os.path.join(outdir, "provenance.json")) \
+        and os.path.isfile(os.path.join(outdir, "specificity.tsv"))
