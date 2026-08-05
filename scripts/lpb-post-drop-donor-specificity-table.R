@@ -173,6 +173,8 @@ plot_donor_specificity_table <- function(
         resid_z_header  = "SZ07\nresid-z",
         resid_z_digits  = 1,
         resid_z_width   = 1.1,
+        header_lineheight = 0.9,  # <1 tightens the gap between 2-line headers
+        header_height     = 1.5,  # height of the header row (raise if top clips)
         label_fn        = NULL,
         label_wrap      = NULL,
         label_size      = 7.5,
@@ -448,20 +450,20 @@ plot_donor_specificity_table <- function(
     has_nsm <- n_smaller_col %in% names(sel)
 
     header <- c(list(
-        grid::textGrob("Pathway", x = 1, hjust = 1, gp = grid::gpar(fontface = "bold", fontsize = 9)),
-        grid::textGrob("padj",    gp = grid::gpar(fontface = "bold", fontsize = 9)),
-        grid::textGrob("NES",     gp = grid::gpar(fontface = "bold", fontsize = 9))),
+        grid::textGrob("Pathway", x = 1, hjust = 1, gp = grid::gpar(fontface = "bold", fontsize = 9, lineheight = header_lineheight)),
+        grid::textGrob("padj",    gp = grid::gpar(fontface = "bold", fontsize = 9, lineheight = header_lineheight)),
+        grid::textGrob("NES",     gp = grid::gpar(fontface = "bold", fontsize = 9, lineheight = header_lineheight))),
         if (show_spec) list(grid::textGrob(spec_header,
-            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+            gp = grid::gpar(fontface = "bold", fontsize = 8, lineheight = header_lineheight))),
         if (show_rho_hc) list(grid::textGrob(rho_hc_header,
-            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+            gp = grid::gpar(fontface = "bold", fontsize = 8, lineheight = header_lineheight))),
         if (show_rho_sz) list(grid::textGrob(rho_sz_header,
-            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+            gp = grid::gpar(fontface = "bold", fontsize = 8, lineheight = header_lineheight))),
         if (show_resid_z) list(grid::textGrob(resid_z_header,
-            gp = grid::gpar(fontface = "bold", fontsize = 8))),
+            gp = grid::gpar(fontface = "bold", fontsize = 8, lineheight = header_lineheight))),
         list(
-        grid::textGrob("donors\np<SZ07", gp = grid::gpar(fontface = "bold", fontsize = 8)),
-        grid::textGrob("donor NES (shared scale)", gp = grid::gpar(fontface = "bold", fontsize = 9))
+        grid::textGrob("donors\np<SZ07", gp = grid::gpar(fontface = "bold", fontsize = 8, lineheight = header_lineheight)),
+        grid::textGrob("donor NES (shared scale)", gp = grid::gpar(fontface = "bold", fontsize = 9, lineheight = header_lineheight))
     ))
 
     make_data_row <- function(i) {
@@ -565,7 +567,7 @@ plot_donor_specificity_table <- function(
         ncol    = ncol_tab,
         nrow    = length(row_h) + 3L,
         widths  = grid::unit(colwidths, "null"),
-        heights = grid::unit(c(1.1, row_h, 1.1, 0.7), "null"))
+        heights = grid::unit(c(header_height, row_h, 1.1, 0.7), "null"))
 
     if (render) { grid::grid.newpage(); grid::grid.draw(g) }
 
