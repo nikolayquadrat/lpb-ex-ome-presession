@@ -1,7 +1,7 @@
 # Joint Exome/Transcriptome Mutation Prioritisation in Low SZ-PRS Brain
 <img src="images/prs-comparison.png" alt="Title" width="15%">
 *Link to the study*
-* -- While the study was motivated by availavility of transcriptome data for this low SZ-PRS brain, the repo is just about exome mutations prioritisation and the using joint RNA-seq and exome data for the DROP pipeline. The brain context is implied in many parts of the workflow, but not necessary.
+* -- While the study was motivated by availavility of transcriptome data for this low SZ-PRS brain, the repo is just about exome mutations prioritisation and the using joint RNA-seq and exome data for the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). The brain context is implied in many parts of the workflow, but not necessary.
 
 ## Ia. Variant-calling and annotation: reference data acquisition and post-processing
 *scripts\lpb-exome-priritisation-collect-data.sh*<br>
@@ -22,7 +22,7 @@ The GRCh38 reference assembly with ALT contigs (Homo_sapiens_assembly38.fasta) a
 Ensembl VEP cache release 112 was downloaded from ftp.ensembl.org. VEP plugin source code was cloned from two repositories: the official Ensembl VEP_plugins repository pinned to release/115 (required for dbNSFP v5 column-layout compatibility), and the LOFTEE plugin from the konradjk/loftee repository on the grch38 branch. To accommodate VEP's single-directory plugin-loading model, all .pm files from both repositories were copied into a single canonical directory (plugins/flat/); copies (rather than symlinks) avoid Singularity bind-mount path-resolution failures.
 
 #### 3a. Plugin data resources
-- **LOFTEE** ([Karczewski et al. 2020](doi:10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) were obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Source of information for the tier A variants (see below).
+- **LOFTEE** ([Karczewski et al. 2020](https://doi:10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) were obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Source of information for the tier A variants (see below).
 - **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)) single-nucleotide-variant scores. Were downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Source of information for the tier A variants.
 - **SpliceAI indel scores**. Were obtained *manually* via the Illumina BaseSpace CLI (project 66029966) due to licensing constraints, academic use. Source of information for the tier A variants.
 - **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz). Were obtained from the DeepMind public bucket and tabix-indexed. Source of information for the tier B variants.
@@ -193,7 +193,7 @@ Functional annotation. The cohort VCF was annotated by Ensembl VEP 112 (rule `r1
 Genetic sex was inferred from sequencing coverage over the capture targets of the analysis-ready (post-BQSR) BAMs. For each sample, mean read depth was computed across capture-target intervals on the autosomes (chr1–chr22), chromosome X, and chromosome Y using samtools bedcov (MAPQ ≥ 20), and two normalised ratios were formed: an X-ratio (mean chrX depth / mean autosomal depth) and a Y-ratio (mean chrY depth / mean autosomal depth). Samples were called XX (X-ratio ≥ 0.80, Y-ratio < 0.15) or XY (X-ratio < 0.65, Y-ratio ≥ 0.15); samples falling outside these bands were flagged as ambiguous, capturing sex-chromosome aneuploidies, sample swaps or contamination, and low-coverage samples for manual review. Inferred genetic sex was cross-checked against clinical records, the summary table is stored in `../qc/inferred_sex.tsv`.
 
 #### 9. HLA class I typing in the exome pipeline
-**OptiType 1.3.5** ([Szolek et al. 2014](doi.org/10.1093/bioinformatics/btu548)); container: quay.io/biocontainers/optitype:1.3.5--hdfd78af_3. OptiType takes the paired-end trimmed FASTQs from `r01_fastp_trim` as input. The rule first pre-filters reads with razers3 against OptiType's bundled HLA reference (/usr/local/bin/data/hla_reference_dna.fasta) to drastically reduce input size, then converts the filtered BAMs back to FASTQ with samtools and runs OptiTypePipeline.py which solves an integer-linear-program (ILP) for the allele combination that best explains the read evidence. The biocontainer omits the standard config.ini, so the rule generates one at run-time pointing to the GLPK ILP solver. Output is a single TSV at `13_hla/optitype/{sample}/{sample}_result.tsv` with one row containing the two-allele calls for HLA-A, HLA-B, and HLA-C at two-field resolution.
+**OptiType 1.3.5** ([Szolek et al. 2014](https://doi.org/10.1093/bioinformatics/btu548)); container: quay.io/biocontainers/optitype:1.3.5--hdfd78af_3. OptiType takes the paired-end trimmed FASTQs from `r01_fastp_trim` as input. The rule first pre-filters reads with razers3 against OptiType's bundled HLA reference (/usr/local/bin/data/hla_reference_dna.fasta) to drastically reduce input size, then converts the filtered BAMs back to FASTQ with samtools and runs OptiTypePipeline.py which solves an integer-linear-program (ILP) for the allele combination that best explains the read evidence. The biocontainer omits the standard config.ini, so the rule generates one at run-time pointing to the GLPK ILP solver. Output is a single TSV at `13_hla/optitype/{sample}/{sample}_result.tsv` with one row containing the two-allele calls for HLA-A, HLA-B, and HLA-C at two-field resolution.
 
 #### 10. Tier classification
 *scripts\lpb-exome-prioritisation-tier-candidates.py*<br>
@@ -410,7 +410,7 @@ The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--h
 - running arcasHLA reference --rebuild once inside the container with the host dat/ directory bind-mounted over the container's read-only /usr/local/share/arcas-hla-0.6.0-2/dat, which generates hla.fasta, hla.idx, hla.p.json, hla.convert.json, hla_partial.fasta, hla_partial.idx, and hla_partial.p.json via Kallisto (v0.50.1 inside the biocontainer).
 Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices).
 
-**arcasHLA 0.6.0** ([Orenbuch et al. 2020](doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule `r06b_arcashla_genotype` then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule `r06d_arcashla_genotype_classII` runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
+**arcasHLA 0.6.0** ([Orenbuch et al. 2020](https://doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule `r06b_arcashla_genotype` then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule `r06d_arcashla_genotype_classII` runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
 
 #### 7. Sex inference
 Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) were counted over the gene spans of *XIST* (a female / inactive-X marker) and a panel of Y-linked genes (*RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y*), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter was applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts were normalised to library size (counts per million) using total mapped reads, and samples were called XX (*XIST* ≥ 10 CPM, Y-panel < 20 CPM) or XY (*XIST* < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers were flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories were reserved for manual review. As in the exome workflow, inferred genetic sex was compared against clinical annotation as a sample-identity check. The summary data is stored in `../04_qc/00_inferred_sex.tsv`.
@@ -419,14 +419,14 @@ Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplic
 Reference-free marker-expression readout used for cell-composition QC to test whether an apparent neuronal/synaptic expression signature reflects grey-matter content or dissection variability rather than biology. Panels are defined in the CELL_MARKER_GENES config dictionary. Adding or editing a panel requires no rule changes.
 
 The panel:
-- "neuron": *RBFOX3, MAP2, NEFL, NEFM, NEFH, TUBB3, ENO2, INA*,
-- "astrocyte": *GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, SOX9, S100B*,
-- "oligodendrocyte": *MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*,
-- "opc": *PDGFRA, CSPG4, OLIG1, OLIG2*,
-- "microglia": *CSF1R, AIF1, P2RY12, CX3CR1, C1QA, C1QB, TMEM119*,
+- "neuron": *RBFOX3, MAP2, NEFL, NEFM, NEFH, TUBB3, ENO2, INA*;
+- "astrocyte": *GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, SOX9, S100B*;
+- "oligodendrocyte": *MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*;
+- "opc": *PDGFRA, CSPG4, OLIG1, OLIG2*;
+- "microglia": *CSF1R, AIF1, P2RY12, CX3CR1, C1QA, C1QB, TMEM119*;
 - "endothelial": *CLDN5, FLT1, PECAM1, VWF*
 
-NB: SOX10 is a canonical OPC/oligodendrocyte marker but is also a VUS candidate gene in this study. It is deliberately omitted so the composition check stays independent of candidate evaluation.
+NB: *SOX10* is a canonical OPC/oligodendrocyte marker gene, but it is also a VUS candidate gene in the study. It is deliberately omitted so the composition check stays independent of candidate evaluation.
 
 Output. Long format: sample, gene, cell_type, count, lib_size, cpm, log2cpm. Per-sample measurements only, every value depends solely on its own sample, so adding or removing samples never alters another sample's numbers.
 
@@ -466,12 +466,31 @@ Cohort-level:
  - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files)
 
 ## DROP pipeline
+```mermaid
+flowchart LR
+	E["Exome data\nVCF"]
+	R["individual RNA-seq data\nBAM"]
+	GTEx["GTExRNA-seq data\ncount matrix"]
+	OUTRIDER["OUTRIDER\nAberrant Expression"]
+	FRASER["FRASER\nAberrant Splicing"]
+	MAE["MAE\nMono-allelic expression"]
+	
+	R --> OUTRIDER
+	GTEx --> OUTRIDER
+	R --> FRASER
+	R --> MAE
+	E --> MAE
+```
+
 Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andrade, Leonhard Wachutka, Laure Frésard, Mirjana Gusic, et al. 2021.
 “Detection of Aberrant Gene Expression Events in RNA Sequencing Data.”
 Nature Protocols 16 (2): 1276–96. https://doi.org/10.1038/s41596-020-00462-5.
 
 Installation and manual are described here:<br>
 https://gagneurlab-drop.readthedocs.io/en/latest/installation.html
+```sh
+mamba create -n drop_env -c conda-forge -c bioconda drop --override-channels
+```
 
 Input files:
 - BAM and their respective index files from the RNA-seq pipeline (`../03_bam_star`)
