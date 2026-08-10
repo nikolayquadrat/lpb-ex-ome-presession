@@ -412,6 +412,17 @@ Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices
 
 **arcasHLA 0.6.0** ([Orenbuch et al. 2020](https://doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule `r06b_arcashla_genotype` then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule `r06d_arcashla_genotype_classII` runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
 
+The established HLA alleles are used in the frameshift neophorms check with [NetMHCpan v4.2](https://services.healthtech.dtu.dk/services/NetMHCpan-4.2/) (class I) [Nilsson et al. 2025](https://doi.org/10.3389/fimmu.2025.1616113)) /[NetMHCIIpan v4.3](https://services.healthtech.dtu.dk/services/NetMHCIIpan-4.3/) (class II) ([Nilsson et al. 2023](https://doi.org/10.1126/sciadv.adj6367)) follwed by BLASTP or with MHCflurry/NetMHCIIpan with the provided script *lpb-post-drop-izumo4_neomorph_pipeline.py*:
+```powershell
+py -3.10 -m venv mhc-env
+.\mhc-env\Scripts\Activate.ps1
+python --version # should read 3.10.x
+pip install --upgrade pip
+pip install mhcflurry biopython
+mhcflurry-downloads fetch
+scripts/
+```
+
 #### 7. Sex inference
 Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) were counted over the gene spans of *XIST* (a female / inactive-X marker) and a panel of Y-linked genes (*RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y*), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter was applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts were normalised to library size (counts per million) using total mapped reads, and samples were called XX (*XIST* ≥ 10 CPM, Y-panel < 20 CPM) or XY (*XIST* < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers were flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories were reserved for manual review. As in the exome workflow, inferred genetic sex was compared against clinical annotation as a sample-identity check. The summary data is stored in `../04_qc/00_inferred_sex.tsv`.
 
@@ -469,8 +480,8 @@ Cohort-level:
 ```mermaid
 flowchart LR
 	E["Exome data\nVCF"]
-	R["individual RNA-seq data\nBAM"]
-	GTEx["GTExRNA-seq data\ncount matrix"]
+	R["Individual RNA-seq data\nBAM"]
+	GTEx["External RNA-seq data\ncount matrix"]
 	OUTRIDER["OUTRIDER\nAberrant Expression"]
 	FRASER["FRASER\nAberrant Splicing"]
 	MAE["MAE\nMono-allelic expression"]
