@@ -1,7 +1,9 @@
 # Joint Exome/Transcriptome Mutation Prioritisation in Low SZ-PRS Brain
 <img src="images/prs-comparison.png" alt="Title" width="15%">
-*Link to the study*
-* -- While the study was motivated by availavility of transcriptome data for this low SZ-PRS brain, the repo is just about exome mutations prioritisation and the using joint RNA-seq and exome data for the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). The brain context is implied in many parts of the workflow, but not necessary.
+
+*Future Link to the study*
+
+While the study was motivated by availavility of transcriptome data for this low SZ-PRS brain, the repo is just about exome mutations prioritisation and the using joint RNA-seq and exome data for the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). The brain context is implied in many parts of the workflow, but not necessary.
 
 ## Ia. Variant-calling and annotation: reference data acquisition and post-processing
 *scripts\lpb-exome-priritisation-collect-data.sh*<br>
@@ -53,6 +55,18 @@ sudo env BUILD_DECONV_REFERENCE=1 DECONV_REFERENCES="siletti_cortex" bash ./lpb-
 Section 10 is an optional stage (off by default; enabled with `BUILD_DECONV_REFERENCE=1`) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. It is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
 
 **Architecture**. The 10 section is a thin *driver*. The actual recipes live in a sibling folder, `scripts_to_make_deconv_reference/`, one self-contained Python script per reference and the common part in *scripts/scripts_to_make_deconv_reference/_deconv_common.py*. The driver discovers every `*.py` there (skipping `_`-prefixed library modules), optionally restricts to a subset via `DECONV_REFERENCES`, and runs each one. Adding a new reference means dropping in a new script; the driver never changes. Before running any builder, the driver ensures an isolated Python venv at `$DECONV_DIR/venv` and installs `anndata h5py scipy pandas numpy` into it. The venv is created and populated once and reused on subsequent runs; every builder is invoked with the venv's interpreter so the dependencies propagate to all of them.
+
+The same venv could be used later for the cell-specificity requests:
+```sh
+cd .../rnaseq-drop/00_additional_files/deconv/source
+.../rnaseq-drop/00_additional_files/deconv/venv/bin/python3 \
+    lpb-post-drop-celltype-expression-for-specific-gene-in-siletti-data.py \
+	--gene-ensembl ENSG00000099840 --gene-symbol IZUMO4 \
+    --h5ad siletti_neurons.h5ad siletti_nonneurons.h5ad \
+    --groupby supercluster_term \
+    --min-cells 50 \
+    --out izumo4_by_celltype.tsv
+```
 
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
@@ -204,7 +218,7 @@ A Python script classifies per-sample variants into three tiers (rule r12_tier_c
 
 ## II. RNA-seq alignment and QC pipeline for DROP
 *scripts\lpb-rnaseq-pipe.smk*<br>
-A Snakemake workflow processes paired-end (or single-end) RNA-seq FASTQ files into STAR-aligned, duplicate-marked BAM files suitable as input to the DROP framework (Yépez et al. 2021) for monoallelic-expression, expression-outlier, and splicing-outlier detection. Alignment parameters and reference files match the GTEx Analysis V11 RNA-seq pipeline exactly, allowing direct merging of the resulting gene-level read counts with the GTEx V11 expression matrix for OUTRIDER reference-panel expansion.
+A Snakemake workflow processes paired-end (or single-end) RNA-seq FASTQ files into STAR-aligned, duplicate-marked BAM files suitable as input to the DROP framework ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)) for monoallelic-expression, expression-outlier, and splicing-outlier detection. Alignment parameters and reference files match the GTEx Analysis V11 RNA-seq pipeline exactly, allowing direct merging of the resulting gene-level read counts with the GTEx V11 expression matrix for OUTRIDER reference-panel expansion.
 
 ### Usage
 ```sh
