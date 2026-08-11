@@ -1,20 +1,26 @@
-# Joint Exome/Transcriptome Mutation Prioritisation in Low SZ-PRS Brain
-<img src="images/prs-comparison.png" alt="Title" width="15%">
+# Joint Exome/Transcriptome Mutation Prioritisation in a Low-SZ-PRS Brain
+## The original study
+<img src="images/prs-comparison.png" alt="SZ-PGS distribution with SZ07 highlighted as the red dot" width="15%">
 
 *Future Link to the study*
 
-While the study was motivated by availavility of transcriptome data for this low SZ-PRS brain, the repo is just about exome mutations prioritisation and the using joint RNA-seq and exome data for the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). The brain context is implied in many parts of the workflow, but not necessary.
+Although the study was motivated by the availability of transcriptome data for this low-SZ-PRS brain, this repository focuses on exome mutation prioritisation and the joint use of RNA-seq and exome data in the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). Brain-specific context appears throughout the workflow but is not required.
+
+## Overview
+This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on **single-case (n=1) analysis against cohort and reference data**.
+
+The exome workflow performs variant calling, annotation, quality control, and prioritisation of rare variants into candidate tiers based on predicted functional impact, gene constraint, population frequency, and disease-relevant gene sets. The RNA-seq workflow generates analysis-ready alignments and quality-control metrics for the DROP framework, enabling detection of aberrant expression, aberrant splicing, and monoallelic expression. Additional components support HLA typing, contamination screening, sex inference, cell-composition assessment, and optional cell-type deconvolution.
 
 ## Ia. Variant-calling and annotation: reference data acquisition and post-processing
-*scripts\lpb-exome-priritisation-collect-data.sh*<br>
-A bash pipeline designed to assemble all reference and annotation resources required by the variant-calling and annotation workflow. The script is idempotent, supports atomic resumption after interruption, and produces a manifest (TSV format) recording each managed file's path, size, SHA-256 hash, source URL, and validation status. Tested on Ubuntu, 6 vCPUs, 96 GB RAM environment.
+*scripts/lpb-exome-priritisation-collect-data.sh*<br>
+A bash pipeline designed to assemble all reference and annotation resources required by the variant-calling and annotation workflow. The script is idempotent, supports atomic resumption after interruption, and produces a manifest (TSV format) recording each managed file's path, size, SHA-256 hash, source URL, and validation status. Tested on Ubuntu in an environment with 6 vCPUs and 96 GB RAM.
 
 Usage:
 ```sh
-sudo chmod +x lpb-exome-pririotisation-collect-data.sh
+sudo chmod +x lpb-exome-prioritisation-collect-data.sh
 sudo env BUILD_DECONV_REFERENCE=1 bash lpb-exome-prioritisation-collect-data.sh # or w/o 'env BUILD_DECONV_REFERENCE=1' if not needed
 ```
-The disk space requirement: ~350Gb for the reference data (without scRNAseq for deconvolution, expect ~40Gb per dataset) + ~12Gb per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
+The disk space requirement: ~350GB for the reference data (without scRNA-seq for deconvolution, expect ~40GB per dataset) + ~12GB per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
 
 ### Under the hood
 #### 1. Reference genome and known-sites VCFs
@@ -24,16 +30,16 @@ The GRCh38 reference assembly with ALT contigs (Homo_sapiens_assembly38.fasta) a
 Ensembl VEP cache release 112 was downloaded from ftp.ensembl.org. VEP plugin source code was cloned from two repositories: the official Ensembl VEP_plugins repository pinned to release/115 (required for dbNSFP v5 column-layout compatibility), and the LOFTEE plugin from the konradjk/loftee repository on the grch38 branch. To accommodate VEP's single-directory plugin-loading model, all .pm files from both repositories were copied into a single canonical directory (plugins/flat/); copies (rather than symlinks) avoid Singularity bind-mount path-resolution failures.
 
 #### 3a. Plugin data resources
-- **LOFTEE** ([Karczewski et al. 2020](https://doi:10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) were obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Source of information for the tier A variants (see below).
-- **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)) single-nucleotide-variant scores. Were downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Source of information for the tier A variants.
-- **SpliceAI indel scores**. Were obtained *manually* via the Illumina BaseSpace CLI (project 66029966) due to licensing constraints, academic use. Source of information for the tier A variants.
-- **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz). Were obtained from the DeepMind public bucket and tabix-indexed. Source of information for the tier B variants.
-- **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)**. Downloaded manually from https://sites.google.com/site/revelgenomics/downloads. The panel require explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data were used under non-commercial research license. Source of information for the tier B variants.
-- **CADD** v1.7 SNV and indel scores ([Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)). Were retrieved from the University of Washington's CADD non-commercial license distribution.
+- **LOFTEE** ([Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) were obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Used for Tier A classification (see below, Ib, section 10).
+- **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)). Single-nucleotide-variant scores were downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Used for Tier A classification.
+- **SpliceAI indel scores**. Were obtained *manually* via the Illumina BaseSpace CLI (project 66029966) due to licensing constraints, academic use. Used for Tier A classification.
+- **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz) were obtained from the DeepMind public bucket and tabix-indexed. Source of information for the tier B variants.
+- **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)** were downloaded manually from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data were used under a non-commercial research license. Source of information for the tier B variants.
+- **CADD** v1.7 SNV and indel scores ([Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)) were retrieved from the University of Washington's CADD non-commercial license distribution.
 - **dbNSFP** v5.3.1a (academic-use branch) ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. Was supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).
 
 #### 3b. Custom Singularity image for the VEP annotation
-This workflow uses a custom Singularity image for the VEP annotation step instead of the stock ensemblorg/ensembl-vep:release_112.0 container. The image is built from the official Ensembl VEP 112 container, with samtools added for LOFTEE support. LOFTEE requires samtools faidx during annotation, especially for checks involving the ancestral allele FASTA. Without samtools, VEP may still run, but LOFTEE can emit warnings such as Can't exec "samtools" and may produce incomplete or incorrect LoF, LoF_filter, and LoF_flags annotations. In particular, variants that should be downgraded by LOFTEE filters such as ANC_ALLELE may otherwise remain incorrectly classified as high-confidence LoF. The custom image is built once and stored as a local .simg file. The image preserves the official VEP 112 environment and only adds the missing runtime dependency required by LOFTEE.
+This workflow uses a custom Singularity image for the VEP annotation step instead of the stock `ensemblorg/ensembl-vep:release_112.0` container. The image is built from the official Ensembl VEP 112 container, with samtools added for LOFTEE support. LOFTEE requires samtools faidx during annotation, especially for checks involving the ancestral allele FASTA. Without samtools, VEP may still run, but LOFTEE can emit warnings such as "Can't exec `samtools`" and may produce incomplete or incorrect `LoF`, `LoF_filter`, and `LoF_flags` annotations. In particular, variants that should be downgraded by LOFTEE filters such as `ANC_ALLELE` may otherwise remain incorrectly classified as high-confidence LoF. The custom image is built once and stored as a local `.simg` file. The image preserves the official VEP 112 environment and only adds the missing runtime dependency required by LOFTEE.
 
 #### 4. Population-frequency annotation
 gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X and Y; ~184 GB total). A helper script (gnomad_strip_concat.sh) is generated by the script and auto-invoked to strip each per-chromosome VCF to relevant AF columns (AF, AF_nfe, AF_afr, AF_amr, AF_eas, AF_sas, AF_fin, AF_asj, nhomalt, AC, AN) using bcftools 1.19 in parallel, concatenating the stripped files into a single bgzipped VCF (~30 GB final), and removing per-chromosome originals as each was processed to bound peak disk usage. The gnomAD constraint table (LOEUF and pLI metrics) is downloaded separately.
@@ -48,13 +54,13 @@ ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/202
 - **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel was retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion.
 
 #### 7. (optional) scRNA-seq reference for deconvolution
-run the script with the set BUILD_DECONV_REFERENCE flag:
+run the script with the BUILD_DECONV_REFERENCE flag set:
 ```sh
 sudo env BUILD_DECONV_REFERENCE=1 DECONV_REFERENCES="siletti_cortex" bash ./lpb-exome-prioritisation-collect-data.sh
 ```
-Section 10 is an optional stage (off by default; enabled with `BUILD_DECONV_REFERENCE=1`) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. It is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
+This section 10 is an optional stage (off by default; enabled with `BUILD_DECONV_REFERENCE=1`) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. It is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
 
-**Architecture**. The 10 section is a thin *driver*. The actual recipes live in a sibling folder, `scripts_to_make_deconv_reference/`, one self-contained Python script per reference and the common part in *scripts/scripts_to_make_deconv_reference/_deconv_common.py*. The driver discovers every `*.py` there (skipping `_`-prefixed library modules), optionally restricts to a subset via `DECONV_REFERENCES`, and runs each one. Adding a new reference means dropping in a new script; the driver never changes. Before running any builder, the driver ensures an isolated Python venv at `$DECONV_DIR/venv` and installs `anndata h5py scipy pandas numpy` into it. The venv is created and populated once and reused on subsequent runs; every builder is invoked with the venv's interpreter so the dependencies propagate to all of them.
+**Architecture**. The section is a thin *driver*. The actual recipes live in a sibling folder, `scripts_to_make_deconv_reference/`, one self-contained Python script per reference and the common part in *scripts/scripts_to_make_deconv_reference/_deconv_common.py*. The driver discovers every `*.py` there (skipping `_`-prefixed library modules), optionally restricts to a subset via `DECONV_REFERENCES`, and runs each one. Adding a new reference means dropping in a new script; the driver never changes. Before running any builder, the driver ensures an isolated Python venv at `$DECONV_DIR/venv` and installs `anndata h5py scipy pandas numpy` into it. The venv is created and populated once and reused on subsequent runs; every builder is invoked with the venv's interpreter so the dependencies propagate to all of them.
 
 The same venv could be used later for the cell-specificity requests:
 ```sh
@@ -70,21 +76,21 @@ cd .../rnaseq-drop/00_additional_files/deconv/source
 
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
-The section produces reference data in in its own folder under `$DECONV_OUT_ROOT`:
+The section produces reference data in its own folder under `$DECONV_OUT_ROOT`:
 - `siletti_cortex` — adult human neocortex, neuronal vs non-neuronal, for the SZ07 composition analysis from the Siletti et al dataset ([Siletti et al 2023](https://doi.org/10.1126/science.add7046)).
 
 #### 8. Validation
 Final completeness validation iterates over expected files, confirming non-zero size and presence of required indices (.tbi for VCF/TSV.gz, .fai/.dict for FASTA). Version coherence between VEP cache, plugin branch, and dbNSFP release is enforced at startup. Post-processing failures (REVEL conversion, SCHEMA HGNC join, gnomAD strip+concat, plugin flattening) propagate to the script's exit code.
 
 ## Ib. Variant-calling and annotation: pipeline
-*scripts\lpb-exome-prioritisation-pipe.smk*<br>
+*scripts/lpb-exome-prioritisation-pipe.smk*<br>
 A Snakemake workflow processes paired-end whole-exome sequencing data from raw FASTQ to tier-classified candidate variant tables suitable for downstream DROP monoallelic-expression analysis. Each rule executes inside a per-tool Singularity container, ensuring tool-version reproducibility; rules are designed to resume from intermediate outputs after interruption.
 
 ### Usage
-- Exomes are provided in the mounted /tmp/fastq folder
+- Exomes are provided in the mounted `/tmp/fastq` folder
 - Outputs are written in the same folder
-- Tested in a snakemake container in Intel Ice Lake VM with 6 cores and 96Gb RAM with Ububntu 24.04 LTS
-Run snakemake container (nested containers is a design choice).
+- Tested in a Snakemake container on an Intel Ice Lake VM with 6 cores and 96 GB RAM running Ubuntu 24.04 LTS.
+Run snakemake container. Using nested containers is a deliberate design choice.
 ```sh
 sudo docker container run --rm --privileged -it \
 -v "${PWD}:/tmp" \
@@ -101,7 +107,7 @@ snakemake --snakefile /tmp/repo/lpb-exome-prioritisation-pipe.smk \
 	--resources disk_mb="${DISK_MB_BUDGET}" \
     --set-resource-scopes disk_mb=global
 ```
-The disk space requirement: ~400Gb for the reference data and ~12Gb per exome, however could be much larger with intermediatory files. `$DISK_MB_BUDGET` is usefull to set as the actual available space for the workflow to run.
+The workflow requires approximately 400 GB for reference data and 12 GB per exome, although peak usage can be substantially higher because of intermediate files. Set `$DISK_MB_BUDGET` to the disk space actually available to the workflow.
 
 ### Under the hood
 ```mermaid
@@ -197,9 +203,9 @@ The cohort VCF was left-aligned and multiallelics were split using `bcftools nor
 
 #### 6. Internal artifact filtering
 *this step requires an exome panel, at least a couple dozen samples*<br>
-Four rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) with autosome restriction and MAF/genotype-rate filters (`--maf 0.05 --geno 0.05 --hwe 1e-6`) produced a BED file from the cohort VCF (`r09b_make_plink_bed`); KING-format kinship coefficients were computed via `--make-king-table` (`r09c_kinship_table`). A custom Python helper (*scripts\lpb-exome-prioritisation-pick-family-representatives.py*) performed connected-component analysis on related-pair edges (KING kinship ≥ 0.0442, the third-degree-relative threshold), retaining one lexicographically-first representative per family (`r09d_pick_representatives`). The cohort VCF was then subset to representatives and re-tagged with bcftools +fill-tags AC,AN; sites with AC ≥ 2 among representatives that were absent or rare (AF < 0.001) in gnomAD v4.1 were flagged as artifact-suspect tuples (`r09e_artifact_blacklist`). This procedure removes recurrent batch / mapping / sample-prep artifacts that gnomAD-AF filtering alone cannot detect, while avoiding false positives from variants shared across related samples.
+Four rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) with autosome restriction and MAF/genotype-rate filters (`--maf 0.05 --geno 0.05 --hwe 1e-6`) produced a BED file from the cohort VCF (`r09b_make_plink_bed`); KING-format kinship coefficients were computed via `--make-king-table` (`r09c_kinship_table`). A custom Python helper (*scripts/lpb-exome-prioritisation-pick-family-representatives.py*) performed connected-component analysis on related-pair edges (KING kinship ≥ 0.0442, the third-degree-relative threshold), retaining one lexicographically-first representative per family (`r09d_pick_representatives`). The cohort VCF was then subset to representatives and re-tagged with bcftools +fill-tags AC,AN; sites with AC ≥ 2 among representatives that were absent or rare (AF < 0.001) in gnomAD v4.1 were flagged as artifact-suspect tuples (`r09e_artifact_blacklist`). This procedure removes recurrent batch / mapping / sample-prep artifacts that gnomAD-AF filtering alone cannot detect, while avoiding false positives from variants shared across related samples.
 
-#### 7. Per-sample VCF extraction
+#### 7. Per-sample VCF extraction and annotation
 The cohort VCF was demultiplexed into per-sample VCFs by bcftools 1.19 with private-variant retention (`r10_per_sample_vcf`).
 Functional annotation. The cohort VCF was annotated by Ensembl VEP 112 (rule `r11_vep_annotate_cohort`) using the offline cache, MANE-Select / canonical / biotype transcript prioritization (`--pick_allele_gene --pick_order mane_select,canonical,biotype`), and HGVS notation. Plugins were loaded from a flattened directory and included AlphaMissense, REVEL, LOFTEE (high-confidence loss-of-function flag), CADD v1.7, SpliceAI (max delta scores across acceptor/donor gain/loss), and dbNSFP v5.3.1a fields (MutationTaster_pred, PROVEAN_pred, MetaLR_pred, MetaRNN_pred, M-CAP_pred, PrimateAI_pred, ClinPred_pred, BayesDel_addAF_pred). VEP --custom annotations attached gnomAD v4.1 exome population-stratified allele frequencies and ClinVar clinical-significance fields.
 
@@ -210,14 +216,14 @@ Genetic sex was inferred from sequencing coverage over the capture targets of th
 **OptiType 1.3.5** ([Szolek et al. 2014](https://doi.org/10.1093/bioinformatics/btu548)); container: quay.io/biocontainers/optitype:1.3.5--hdfd78af_3. OptiType takes the paired-end trimmed FASTQs from `r01_fastp_trim` as input. The rule first pre-filters reads with razers3 against OptiType's bundled HLA reference (/usr/local/bin/data/hla_reference_dna.fasta) to drastically reduce input size, then converts the filtered BAMs back to FASTQ with samtools and runs OptiTypePipeline.py which solves an integer-linear-program (ILP) for the allele combination that best explains the read evidence. The biocontainer omits the standard config.ini, so the rule generates one at run-time pointing to the GLPK ILP solver. Output is a single TSV at `13_hla/optitype/{sample}/{sample}_result.tsv` with one row containing the two-allele calls for HLA-A, HLA-B, and HLA-C at two-field resolution.
 
 #### 10. Tier classification
-*scripts\lpb-exome-prioritisation-tier-candidates.py*<br>
+*scripts/lpb-exome-prioritisation-tier-candidates.py*<br>
 A Python script classifies per-sample variants into three tiers (rule r12_tier_candidates). Common variants (gnomAD popmax AF ≥ 0.001) and internal artifact sites are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
 - **Tier A** captures DROP-testable predicted loss-of-function and splice-disrupting variants (LOFTEE high-confidence LoF, or SpliceAI max delta ≥ 0.20).
 - **Tier B** captures rank-only damaging missense candidates in constrained genes (gnomAD LOEUF < 0.6, from gnomAD v4.0+ (2024) paper) by AlphaMissense likely-pathogenic class (score ≥ 0.564) or ClinGen-endorsed REVEL ≥ 0.773 ([Pejaver et al. 2022](https://doi.org/10.1016/j.ajhg.2022.10.013)).
 - **Tier C** captures any rare protein-altering variant in a curated gene set (SCHEMA at FDR ≤ 0.25, ASC at FDR ≤ 0.25, or DDG2P confidence ≥ 2). Per-panel boolean membership flags and panel-specific annotation columns (e.g., SCHEMA Q meta, OR for protein-truncating variants; DDG2P mode-of-inheritance and aggregated phenotypes) are appended to all output tables. BipEx burden statistics are reported as annotation only and do not define Tier C panel membership.
 
 ## II. RNA-seq alignment and QC pipeline for DROP
-*scripts\lpb-rnaseq-pipe.smk*<br>
+*scripts/lpb-rnaseq-pipe.smk*<br>
 A Snakemake workflow processes paired-end (or single-end) RNA-seq FASTQ files into STAR-aligned, duplicate-marked BAM files suitable as input to the DROP framework ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)) for monoallelic-expression, expression-outlier, and splicing-outlier detection. Alignment parameters and reference files match the GTEx Analysis V11 RNA-seq pipeline exactly, allowing direct merging of the resulting gene-level read counts with the GTEx V11 expression matrix for OUTRIDER reference-panel expansion.
 
 ### Usage
@@ -248,7 +254,7 @@ time snakemake --snakefile /tmp/repo/lpb-rnaseq-pipe.smk \
 		-B /usr/local/share/arcas-hla-0.6.0-2/dat:/usr/local/share/arcas-hla-0.6.0-2/dat"
 ```
 
-The disk space requirement: ~35Gb for genome, annotation, and STAR index + ~9Gb per typical transcriptome. USE_TRIMMING, ARCASHLA_ENABLED, CONTAMINATION_ENABLED, and DECONV_ENABLED could be swithced off. You may need to run the *lpb-rnaseq-set-up-arcashla.sh* script beforehand if you want HLA typing from Arcas.
+Approximately 35 GB is required for the genome, annotation, and STAR index, plus approximately 9 GB per typical transcriptome. `USE_TRIMMING`, `ARCASHLA_ENABLED`, `CONTAMINATION_ENABLED`, and `DECONV_ENABLED` can be switched off. Run *lpb-rnaseq-set-up-arcashla.sh* beforehand if arcasHLA typing is required.
 
 ### Under the hood
 ```mermaid
@@ -347,7 +353,7 @@ flowchart LR
 ```
 
 #### 1. Reference assembly and annotation
-The reference genome is Homo_sapiens_assembly38_noALT_noHLA_noDecoy.fasta (the GTEx-specific GRCh38 build with ALT, HLA, and decoy contigs removed; obtainable from the Broad TOPMed bucket or from ENCODE as a drop-in equivalent). Gene annotation is GENCODE v47 (gencode.v47.GRCh38.annotation.gtf), matching the GTEx V11 release. The STAR genome index is built once with --sjdbOverhang set to the user's read length minus one (configurable at the top of the Snakefile via READ_LENGTH); for parity with GTEx's 2x76bp reads, set READ_LENGTH = 76 (I left my longer 150bp reads as is).
+The reference genome is Homo_sapiens_assembly38_noALT_noHLA_noDecoy.fasta (the GTEx-specific GRCh38 build with ALT, HLA, and decoy contigs removed; obtainable from the Broad TOPMed bucket or from ENCODE as a drop-in equivalent). Gene annotation is GENCODE v47 (gencode.v47.GRCh38.annotation.gtf), matching the GTEx V11 release. The STAR genome index is built once with `--sjdbOverhang` set to the user's read length minus one (configurable at the top of the Snakefile via READ_LENGTH). For parity with GTEx 2×76-bp reads, set READ_LENGTH = 76; otherwise, set it to the actual read length.
 ```sh
 mkdir -p ${PWD}/00_additional_files/gtex_v11_refs
 cd ${PWD}/00_additional_files/gtex_v11_refs
@@ -365,7 +371,7 @@ mv gencode.v47.annotation.gtf gencode.v47.GRCh38.annotation.gtf
 Adapter and quality trimming is performed with Trim Galore (default Illumina-adapter detection). The step can be disabled (USE_TRIMMING = False) for strict GTEx parity, in which case STAR's soft-clipping handles adapter contamination.
 
 #### 3. STAR alignment
-STAR 2.7.11b (rule `r03d_STAR_mapping_GTEx`) aligns the trimmed reads to the indexed genome using the exact parameter set from the Broad GTEx pipeline's run_STAR.py: `--twopassMode Basic, --outFilterMultimapNmax 20, --outFilterType BySJout, --outFilterMismatchNoverLmax 0.1, --alignIntronMin 20, --alignIntronMax 1000000, --limitSjdbInsertNsj 1200000, --outFilterScoreMinOverLread 0.33, --outFilterMatchNminOverLread 0.33, --alignSoftClipAtReferenceEnds Yes, --quantMode TranscriptomeSAM GeneCounts, --outSAMtype BAM SortedByCoordinate, --outSAMunmapped Within`, with chimeric-detection flags (`--chimSegmentMin 15, --chimJunctionOverhangMin 15, --chimOutType Junctions WithinBAM SoftClip, --chimMainSegmentMultNmax 1`) per the TOPMed/GTEx convention. Per-sample read-group tags (`ID:{sample} SM:{sample} PL:ILLUMINA LB:lib1`) are injected via `--outSAMattrRGline` for downstream-tool compatibility. The two-pass mode and BySJout filter together substantially improve novel-junction detection, which is important for FRASER's splice-outlier analysis. STAR produces three outputs per sample: a coordinate-sorted genome-aligned BAM, a transcriptome-coordinate BAM (for downstream RSEM if needed), the gene-level read-count table (ReadsPerGene.out.tab, mergeable with the GTEx V11 count matrix), the splice-junction table (SJ.out.tab, used by FRASER), and a chimeric-junction file. Aligned BAMs are indexed by samtools 1.9 (rule `r03e_index_bam`).
+STAR 2.7.11b (rule `r03d_STAR_mapping_GTEx`) aligns the trimmed reads to the indexed genome using the exact parameter set from the Broad GTEx pipeline's run_STAR.py: `--twopassMode Basic, --outFilterMultimapNmax 20, --outFilterType BySJout, --outFilterMismatchNoverLmax 0.1, --alignIntronMin 20, --alignIntronMax 1000000, --limitSjdbInsertNsj 1200000, --outFilterScoreMinOverLread 0.33, --outFilterMatchNminOverLread 0.33, --alignSoftClipAtReferenceEnds Yes, --quantMode TranscriptomeSAM GeneCounts, --outSAMtype BAM SortedByCoordinate, --outSAMunmapped Within`, with chimeric-detection flags (`--chimSegmentMin 15, --chimJunctionOverhangMin 15, --chimOutType Junctions WithinBAM SoftClip, --chimMainSegmentMultNmax 1`) per the TOPMed/GTEx convention. Per-sample read-group tags (`ID:{sample} SM:{sample} PL:ILLUMINA LB:lib1`) are injected via `--outSAMattrRGline` for downstream-tool compatibility. The two-pass mode and BySJout filter together substantially improve novel-junction detection, which is important for FRASER's splice-outlier analysis. STAR produces these outputs: a coordinate-sorted genome-aligned BAM, a transcriptome-coordinate BAM (for downstream RSEM if needed), the gene-level read-count table (ReadsPerGene.out.tab, mergeable with the GTEx V11 count matrix), the splice-junction table (SJ.out.tab, used by FRASER), and a chimeric-junction file. Aligned BAMs are indexed by samtools 1.9 (rule `r03e_index_bam`).
 
 Per-sample STAR Log.final.out files are parsed into a single TSV (rule `r03h_mapping_stat`, `00_mapping_stat/mapping_stat.txt`) reporting input read counts, uniquely mapped read counts and percentages, multi-mapped percentages, "too many loci" rates, and unmapped fractions per sample.
 
@@ -384,7 +390,7 @@ Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical dupl
  - PCT_USABLE_BASES. Fraction of all PF bases (not just aligned) that landed in mRNA (PF_ALIGNED_BASES × PCT_MRNA_BASES / PF_BASES). Combines alignment rate and library purity into one number.
  - MEDIAN_CV_COVERAGE. Median coefficient of variation in coverage across the 1000 most-expressed transcripts (CV = stdev/mean). Lower is better — uniform coverage means small CV. Values <0.6 are typical for good libraries; >0.8 indicates uneven coverage (often degradation-driven).
  - MEDIAN_5PRIME_BIAS. Median ratio of coverage at the 5' end vs. the middle of the top-1000 transcripts. Values near 0.5 = balanced; <0.3 = 5' depleted; >0.7 = 5' enriched. 5' enrichment with poly-A selection is unusual and may suggest a library-prep issue.
- - MEDIAN_3PRIME_BIAS. Median ratio of coverage at the 3' end vs. the middle. The single most diagnostic degradation signature for poly-A libraries. Values near 0.5 = balanced; >0.7 = significant 3' enrichment from RNA degradation (poly-A primers pulled coverage toward the 3' end as transcripts fragmented); >0.8 = severe degradation. Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.
+ - MEDIAN_3PRIME_BIAS. Median ratio of coverage at the 3' end vs. the middle. The single most diagnostic degradation signature for poly-A libraries. Values near 0.5 = balanced; >0.7 = significant 3' enrichment from RNA degradation (poly-A primers pulled coverage toward the 3' end as transcripts fragmented); >0.8 = severe degradation.
  - MEDIAN_5PRIME_TO_3PRIME_BIAS. Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.
  - PCT_CORRECT_STRAND_READS. For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.
  - Uniquely_mapped. Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; below 10M, autoencoder denoising breaks down and outlier detection becomes unreliable.
@@ -397,27 +403,27 @@ Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical dupl
  These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
 
 #### 5. Neurotropic pathogens / contamination check (optional)
-Probably a little bit extensive list of the species (*00_additional_files/contamination/species.txt*) is designed for screening human RNA-sequencing data for microbial signals, including viruses, bacteria, fungi, protozoa, free-living amoebae, and helminths. The list is organised by biological and analytical priority, beginning with neurotropic and neuroinvasive pathogens, followed by brain post-mortem and autopsy-background signatures, laboratory and environmental contamination sentinels, and computational decoy controls. Each organism is represented by a selected genome or reference assembly to facilitate reproducible alignment-based screening.
+The list of the species (*00_additional_files/contamination/species.txt*) is intentionally broad and is designed to screen human RNA-seq data for microbial signals, including viruses, bacteria, fungi, protozoa, free-living amoebae, and helminths. The list is organised by biological and analytical priority, beginning with neurotropic and neuroinvasive pathogens, followed by brain post-mortem and autopsy-background signatures, laboratory and environmental contamination sentinels, and computational decoy controls. Each organism is represented by a selected genome or reference assembly to facilitate reproducible alignment-based screening.
 
-Contamination check is done with the provided species list on entropy-filtered (bbduk) unmapped reads. The bwa-mem2 alignment parameters is set to be stricter than default to supress false positives:
+The contamination check is performed on entropy-filtered (`bbduk`) unmapped reads using the provided species list. The BWA-MEM2 alignment parameters are more stringent than the defaults to suppress false positives:
 - -T 95: minimum alignment score 95 (default is 30).
 - -k 35: minimum seed 35bp (default 19).
 - -B 6: mismatch penalty 6 (default 4).
 - -O 8: gap open penalty 8 (default 6).
 - -L 10: clipping penalty 10 (default 5).<br>
 
-The rRNA regions in the genomes of the pathogenes were hardmasked due to high expecteded homology with human rRNA.
+rRNA regions in the pathogen genomes were hard-masked because of the expected high homology with human rRNA.
 Multi-mapped reads with the same score are counted for every species separately to not downweight reads for related species in the list.
-These measures vastly reduce false positives but not eliminate them entirely.
+These measures substantially reduce false positives but do not eliminate them entirely.
 Note that for bacteria and many viruses (Flaviviruses, Arenaviruses etc) poor recovery is expected with the poly(A)-selected RNA method.
 
 #### 6. arcasHLA reference (optional)
-Build the arcasHLA reference data on the host filesystem with the script *lpb-rnaseq-install-arcashla-ref.sh*.
+Build the arcasHLA reference data on the host filesystem with the script *lpb-rnaseq-set-up-arcashla.sh*.
 ```sh
 sudo chmod +x lpb-rnaseq-set-up-arcashla.sh
 sudo bash lpb-rnaseq-set-up-arcashla.sh
 ```
-The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it tries to. the script performs the four-step setup once on the host:
+The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it attempts to do so. The script performs the following four-step setup once on the host:
 - git clone --depth 1 of the ANHIG/IMGTHLA repository (IPD-IMGT/HLA database release 3.64.0, ~1.2 GB at depth 1),
 - unzip of hla.dat.zip and other compressed archives inside the IMGTHLA repo (the uncompressed hla.dat is too large for git so the repo ships it compressed),
 - seeding the host dat/info and dat/ref directories with the small JSON tables bundled inside the biocontainer (copied out via apptainer exec with a bind mount), and
@@ -426,7 +432,7 @@ Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices
 
 **arcasHLA 0.6.0** ([Orenbuch et al. 2020](https://doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule `r06b_arcashla_genotype` then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule `r06d_arcashla_genotype_classII` runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
 
-The established HLA alleles are used in the frameshift neophorms check with [NetMHCpan v4.2](https://services.healthtech.dtu.dk/services/NetMHCpan-4.2/) (class I) [Nilsson et al. 2025](https://doi.org/10.3389/fimmu.2025.1616113)) /[NetMHCIIpan v4.3](https://services.healthtech.dtu.dk/services/NetMHCIIpan-4.3/) (class II) ([Nilsson et al. 2023](https://doi.org/10.1126/sciadv.adj6367)) follwed by BLASTP or with MHCflurry/NetMHCIIpan with the provided script *lpb-post-drop-izumo4_neomorph_pipeline.py*:
+The established HLA alleles are used in the frameshift neomorphs check with [NetMHCpan v4.2](https://services.healthtech.dtu.dk/services/NetMHCpan-4.2/) (class I) [Nilsson et al. 2025](https://doi.org/10.3389/fimmu.2025.1616113)) /[NetMHCIIpan v4.3](https://services.healthtech.dtu.dk/services/NetMHCIIpan-4.3/) (class II) ([Nilsson et al. 2023](https://doi.org/10.1126/sciadv.adj6367)) followed by BLASTP or with MHCflurry/NetMHCIIpan with the provided script *lpb-post-drop-izumo4_neomorph_pipeline.py*:
 ```powershell
 py -3.10 -m venv mhc-env
 .\mhc-env\Scripts\Activate.ps1
@@ -434,16 +440,18 @@ python --version # should read 3.10.x
 pip install --upgrade pip
 pip install mhcflurry biopython
 mhcflurry-downloads fetch
-scripts/
+python scripts/lpb-post-drop-izumo4_neomorph_pipeline.py # full pipeline (bind + BLAST)
+python scripts/lpb-post-drop-izumo4_neomorph_pipeline.py --null-natural-aa --n-draws N_DRAWS --blastp --max-blast 100
+python scripts/lpb-post-drop-izumo4_neomorph_pipeline.py --null-with-blastp --peptide RQRDPGAGR --n-shuffles 100 --batch-size 5 --add-clades
 ```
 
 #### 7. Sex inference
-Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) were counted over the gene spans of *XIST* (a female / inactive-X marker) and a panel of Y-linked genes (*RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y*), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter was applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts were normalised to library size (counts per million) using total mapped reads, and samples were called XX (*XIST* ≥ 10 CPM, Y-panel < 20 CPM) or XY (*XIST* < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers were flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories were reserved for manual review. As in the exome workflow, inferred genetic sex was compared against clinical annotation as a sample-identity check. The summary data is stored in `../04_qc/00_inferred_sex.tsv`.
+Genetic sex was inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) were counted over the gene spans of *XIST* (a female / inactive-X marker) and a panel of Y-linked genes (*RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y*), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter was applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts were normalised to library size (counts per million) using total mapped reads, and samples were called XX (*XIST* ≥ 10 CPM, Y-panel < 20 CPM) or XY (*XIST* < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers were flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories were reserved for manual review. As in the exome workflow, inferred genetic sex was compared against clinical annotation as a sample-identity check. The summary table is stored in `../04_qc/00_inferred_sex.tsv`.
 
 #### 8. Cell-composition markers
-Reference-free marker-expression readout used for cell-composition QC to test whether an apparent neuronal/synaptic expression signature reflects grey-matter content or dissection variability rather than biology. Panels are defined in the CELL_MARKER_GENES config dictionary. Adding or editing a panel requires no rule changes.
+A reference-free marker-expression readout is used for cell-composition QC to test whether an apparent neuronal/synaptic expression signature reflects grey-matter content or dissection variability rather than biology. Panels are defined in the CELL_MARKER_GENES config dictionary. Adding or editing a panel requires no rule changes.
 
-The panel:
+Marker panels:
 - "neuron": *RBFOX3, MAP2, NEFL, NEFM, NEFH, TUBB3, ENO2, INA*;
 - "astrocyte": *GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, SOX9, S100B*;
 - "oligodendrocyte": *MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*;
@@ -453,17 +461,17 @@ The panel:
 
 NB: *SOX10* is a canonical OPC/oligodendrocyte marker gene, but it is also a VUS candidate gene in the study. It is deliberately omitted so the composition check stays independent of candidate evaluation.
 
-Output. Long format: sample, gene, cell_type, count, lib_size, cpm, log2cpm. Per-sample measurements only, every value depends solely on its own sample, so adding or removing samples never alters another sample's numbers.
+Output: long-format columns `sample`, `gene`, `cell_type`, `count`, `lib_size`, `cpm`, and `log2cpm`. Measurements are computed independently for each sample, so adding or removing samples does not alter another sample's values.
 
 #### 9. Deconvolution (optional)
-Activated via `-e DECONV_ENABLED=1` at container start (with `DECONV_CIBERSORTX=1` separately enabling r09e, expect high hunderds megabytes per reference).<br>
+Activated via `-e DECONV_ENABLED=1` at container start (with `DECONV_CIBERSORTX=1` separately enabling r09e, expect several hundred megabytes per reference).<br>
 **r09a_mixture** (once, shared) — Reads every sample's STAR `ReadsPerGene.out.tab`, selects the strand column, maps versioned GENCODE v47 gene IDs to gene symbols via the GTF, sums duplicate symbols, and writes a symbol-space CPM matrix (`_mixture/mixture_symbol_cpm.tsv.gz`). This bridges the bulk counts (Ensembl IDs) into the symbol space the single-cell references use, and is computed once for all references.<br>
 **r09b_reference** (per reference, cached) — Loads a canonical single-cell reference (`matrix.mtx.gz` / `features.tsv.gz` / `cells.tsv.gz`), collapses it to pseudobulk profiles per subject × class, restricts to genes shared with the mixture, and saves an hspe-ready reference object plus a marker-QC table. All matrix operations are sparse, so the large glia references never densify. Runs once per reference and caches.<br>
 **r09c_run_hspe** (per reference × sample) — Deconvolves one bulk sample against one prepared reference with hspe ([Hunt & Gagnon-Bartsch 2021](https://doi.org/10.1214/20-aoas1395)), on log-scale expression, letting hspe select markers internally. Writes `09_deconv/{ref}/{sample}/proportions.tsv` (and the full hspe result) — the per-sample, per-reference estimate.<br>
 **r09d_summary** (per reference) — Collates every sample's proportions for a reference into a wide `09_deconv/{ref}.tsv` (samples × classes), filling absent classes with zero. The logic is inlined as a `run:` block.<br>
 **r09e_cibersortx_prep** (per reference, optional) — Emits the two files a manual CIBERSORTx ([Steen et al. 2020](https://doi.org/10.1007/978-1-0716-0301-7_7)) run needs into `09_deconv/_cibersortx/{ref}/`: a single-cell `refsample.txt` (genes × cells, cell-type labels as headers) and a `mixture.txt` (the same bulk matrix, reformatted). It only prepares the inputs — you run CIBERSORTx yourself — enabling a second, independent deconvolution method for cross-checking.<br>
 
-Run it like that:
+Run CIBERSORTx as follows:
 ```sh
 docker container run --rm --privileged \
 -v .../09_deconv/_cibersortx/siletti_cortex:/src/data \
@@ -490,7 +498,7 @@ Cohort-level:
  - `../04_qc/00_cell_marker_expression.tsv` (cell-composition markers).
  - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files)
 
-## DROP pipeline
+## III. DROP pipeline
 ```mermaid
 flowchart LR
 	E["Exome data\nVCF"]
@@ -518,13 +526,13 @@ mamba create -n drop_env -c conda-forge -c bioconda drop --override-channels
 ```
 
 Input files:
-- BAM and their respective index files from the RNA-seq pipeline (`../03_bam_star`)
+- BAM files and their respective index files from the RNA-seq pipeline (`../03_bam_star`)
 - VCF files from the exome pipeline and their respective index files (`../10_per_sample_vcf`). Only used for the MAE module.
 - a configuration file containing the different parameters (*config.yaml*)
 - a sample annotation file
 - a gene annotation file (gtf): Matching [GENCODE v47 annotation](https://www.gencodegenes.org/human/release_47.html) (used in the RNA-seq workflow earlier)
 - a reference genome fasta file and its respective index (used in the RNA-seq workflow earlier)
-- processed external count matrices for the OUTRIDER module, we used GTEx v11 Cortex BA9 counts data and meta-data:<br>
+- processed external count matrices for the OUTRIDER module. In this study, we used GTEx V11 cortex BA9 count data and metadata:<br>
 https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression
 https://gtexportal.org/home/downloads/adult-gtex/metadata
 
@@ -544,38 +552,42 @@ Helpful notes:
 - in the mixed in-house and external sample table, annotation should be set as NAs for the in-house samples for some reason.
 - for the external counts matrix, set "geneID" as a gene identifier name.
 
-### System analysis on top of the OUTRIDER results
+## IV. System analysis on top of the OUTRIDER results
 
 ### First pass
 *scripts/lpb-post-drop-outrider-1st-pass.R*<br>
-Original GSEA on the outrider results.<br>
+Initial GSEA of the OUTRIDER results.<br>
 
 Helper functions:<br>
 *scripts/lpb-post-drop-fgsea-emap.R* -- similar to `enrichplot::emapplot`.<br>
-<img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Title" width="35%"><br>
+<img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="35%"><br>
 
 *scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* -- similar to `fgsea::plotGseaTable` that prints GSEA results table with tier-gene highlights.<br>
-<img src="images/ba9_gtex_SZ07_gsea_hallmark_plot.png" alt="Title" width="35%"><br>
+<img src="images/ba9_gtex_SZ07_gsea_hallmark_plot.png" alt="Compact GSEA visualisation" width="35%"><br>
 
 ### Second pass
 *scripts/lpb-post-drop-outrider-2nd-pass.R*<br>
-To assess whether a candidate gene's transcriptomic pathway neighbourhood is enriched in an individual's expression outlier profile beyond chance, a matched-sampling procedure is implemented. For each gene, we defined its statistic as the minimum enrichment p-value (min-p) across all gene sets containing it, taken from a single GSEA analysis of the individual's per-gene outlier ranking; min-p thus reflects the strength of the gene's most strongly enriched pathway. Because heavily annotated genes belong to more, and to more varied, gene sets and therefore have more opportunities to attain a low min-p, we calibrated each candidate against an empirical null of genes matched on pathway-size profile: each gene was summarised by the number of its pathways falling in defined size classes (e.g. specific vs broad), and candidates were compared only to genes sharing the same size-class stratum. Matching on the size profile rather than on total pathway membership avoids the saturation that arises when all candidates are near-maximal hubs, while controlling both the number and the size distribution of a gene's pathways—the joint determinant of the min-p null, since large gene sets attain small p-values through aggregation of diffuse signal and small sets through concentrated signal. The empirical significance of each candidate was computed as the fraction of stratum-matched background genes (drawn from the exome-testable gene universe) whose min-p was at least as extreme as the candidate's, and p-values were adjusted across candidates by the Benjamini–Hochberg procedure.
+To assess whether a candidate gene's transcriptomic pathway neighbourhood is enriched in an individual's expression outlier profile beyond chance, a matched-sampling procedure is implemented.
 
-To prevent circularity, whereby a gene that drives its own pathways' enrichment would vouch for itself, the enrichment analysis used to score each candidate was recomputed with that gene removed from the ranking (leave-one-out), while the background pool was scored on the original analysis (*<-- this is what differs with the first pass*); gene-set membership was left intact throughout.
+For each gene, we defined its statistic as the minimum enrichment p-value (min-p) across all gene sets containing it, taken from a single GSEA analysis of the individual's per-gene outlier ranking; min-p thus reflects the strength of the gene's most strongly enriched pathway. Because heavily annotated genes belong to more, and to more varied, gene sets and therefore have more opportunities to attain a low min-p, we calibrated each candidate against an empirical null of genes matched on pathway-size profile: each gene was summarised by the number of its pathways falling in defined size classes (e.g. specific vs broad), and candidates were compared only to genes sharing the same size-class stratum. Matching on the size profile rather than on total pathway membership avoids the saturation that arises when all candidates are near-maximal hubs, while controlling both the number and the size distribution of a gene's pathways—the joint determinant of the min-p null, since large gene sets attain small p-values through aggregation of diffuse signal and small sets through concentrated signal.
+
+The empirical significance of each candidate was computed as the fraction of stratum-matched background genes (drawn from the exome-testable gene universe) whose min-p was at least as extreme as the candidate's, and p-values were adjusted across candidates by the Benjamini–Hochberg procedure.
+
+To prevent circularity, whereby a gene that drives its own pathways' enrichment would vouch for itself, the enrichment analysis used to score each candidate was recomputed with that gene removed from the ranking (leave-one-out), while the background pool was scored on the original analysis (*this leave-one-out procedure is the key difference from the first-pass analysis*); gene-set membership was left intact throughout.
 
 Helper function:
 *scripts/lpb-post-drop-minp-size-matched-test.R*<br> The core function of the analysis.
 
 ### Cell composition assessment for donor samples 
-*scripts/lpb-post-drop-cell-type-assessment-full.R*<br> Checks bias in cell composition in RNAseq samples (marker-based and CIBERSORTx).<br>
-<img src="images/cell_type.png" alt="Title" width="35%"><br>
+*scripts/lpb-post-drop-cell-type-assessment.R*<br> Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
+<img src="images/cell_type.png" alt="Cell types by samples" width="35%"><br>
 
 ### Third pass
-Answers the question whether any cell-type-independent GSEA enrichment exists for a specific donor.
+Tests whether cell-type-independent GSEA enrichment is present in a specific donor.
 *scripts/lpb-post-drop-outrider-3rd-pass.R*<br>
 Helper function:
-*scripts/lpb-post-drop-donor-specificity-table.R*. Displays top enriched GSEA pathways with the most NES difference between a specific donor and other donors. The patways are grouped by categories.<br>
-<img src="images/plot_donor_specificity_table.png" alt="Title" width="35%"><br>
+*scripts/lpb-post-drop-donor-specificity-table.R*. Displays the top enriched GSEA pathways with the largest NES differences between a specific donor and the other donors. Pathways are grouped into categories.<br>
+<img src="images/plot_donor_specificity_table.png" alt="Main post-OUTRIDER figure" width="35%"><br>
 
 ## AI usage disclosure
-The scripts were produced with the assistance from Claude Opus 4.7 / 4.8
+The scripts were developed with assistance from Claude Opus 4.7 / 4.8
