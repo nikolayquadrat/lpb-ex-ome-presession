@@ -33,8 +33,8 @@ from collections import defaultdict
 # CONFIG  -- edit these
 # ---------------------------------------------------------------------------
 
-# (1) neomorph peptide (novel C-terminus). Replace with SZ07's translated region.
-NEOMORPH_PEPTIDE = "PAKISECRSPAQSRLPRQRDPGAGRSPGFSSCPPPGRSWTKWRQQCTR" 
+# (1) neomorph peptide (novel C-terminus).
+NEOMORPH_PEPTIDE = "PAKISECRSPAQSRLPRQRDPGAGRSPGFSSCPPPGRSWTKWRQQCTR" # IXUMO4's PAKI + 44aa neomorph sequence
 
 # (3a) TYPED class I alleles. Use his real HLA typing, not these defaults.
 #     MHCflurry allele format: "HLA-A*02:01".
@@ -92,7 +92,7 @@ REQUIRE_ANCHOR_CONSERVED = True      # anchors must be identity/positive (set Fa
 ALLOW_GAPS = False                   # gapped near-matches are non-physiological for a short core
 
 EMAIL = "nikolay.quadrat@gmail.con"
-# organisms to FLAG in the output because you have INDEPENDENT evidence for them
+# organisms to FLAG in the output because of independent evidence for them
 # (a pre-specified prior beats anything the broad scan turns up by chance).
 PRIORITY_ORGANISMS = ["Homo"] 
 
@@ -558,40 +558,91 @@ def _blast_one(seq, use_local_blast=False):
     return total, exact, taxa
 
 
-def null_model_blast(peptide, n_shuffles=20, seed=0, use_local_blast=False):
+def _blast_group(seqs, use_local_blast=False, entrez=None):
+    """BLAST a LIST of peptides and return {seq: (total, exact, taxa_set)}.
+    Remote path submits the whole list as ONE batched qblast job (not one per
+    seq) -- this is what keeps NCBI from throttling. Local loops per seq."""
+    out = {s: (0, 0, set()) for s in seqs}
+    if use_local_blast:
+        for s in seqs:
+            t, e, taxa = _blast_one(s, True)
+            out[s] = (t, e, taxa)
+        return out
+    hits = blast_batch_remote(list(seqs), {s: "I" for s in seqs}, entrez=entrez)
+    agg = {s: [0, 0, set()] for s in seqs}
+    for h in hits:
+        q = h["query"]
+        agg.setdefault(q, [0, 0, set()])
+        agg[q][0] += 1
+        if h.get("tier") == "exact":
+            agg[q][1] += 1
+        agg[q][2].add(h["organism"])
+    for s in seqs:
+        out[s] = (agg[s][0], agg[s][1], agg[s][2])
+    return out
+
+
+def null_model_blast(peptide, n_shuffles=20, seed=0, use_local_blast=False,
+                     batch_size=50):
     """Composition-matched BLAST null for ONE binder peptide (e.g. RQRDPGAGR).
     Shuffle preserves amino-acid composition and only scrambles order, isolating
-    'is it THIS sequence' from 'is it the residue composition'. Remote BLAST is
-    slow, so n_shuffles defaults low; raise it (or use --local-blast) for a
-    tighter null."""
+    'is it THIS sequence' from 'is it the residue composition'.
+
+    The real peptide + all shuffles are BLASTed in ONE batched submission (or a
+    few chunks of batch_size), not one request each -- so remote NCBI sees ~1-2
+    jobs instead of n_shuffles+1, which avoids the throttling that makes repeated
+    single submissions crawl. Use --local-blast for an unthrottled, larger null."""
     import statistics as st
     from collections import Counter
     rng = random.Random(seed)
     chars = list(peptide)
 
     print(f"[blast-null] testing {peptide}  (n_shuffles={n_shuffles}, "
-          f"{'local' if use_local_blast else 'remote'} BLAST)")
-    real_total, real_exact, real_taxa = _blast_one(peptide, use_local_blast)
-    print(f"[blast-null] REAL: {real_total} hits ({real_exact} exact), "
+          f"{'local' if use_local_blast else 'remote, batched'} BLAST)")
+
+    # generate unique composition-matched shuffles up front
+    shuffles, seen, attempts = [], set(), 0
+    while len(shuffles) < n_shuffles and attempts < n_shuffles * 50:
+        rng.shuffle(chars)
+        s = "".join(chars)
+        attempts += 1
+        if s == peptide or s in seen:
+            continue
+        seen.add(s)
+        shuffles.append(s)
+    if len(shuffles) < n_shuffles:
+        print(f"[blast-null] only {len(shuffles)} distinct shuffles exist for this "
+              f"composition; using those")
+
+    # BLAST real + shuffles together, in batches (few requests total)
+    all_seqs = [peptide] + shuffles
+    results = {}
+    batches = [all_seqs[i:i + batch_size] for i in range(0, len(all_seqs), batch_size)]
+    for bi, batch in enumerate(_progress(batches, total=len(batches),
+                                         desc="blast null batches"), 1):
+        try:
+            results.update(_blast_group(batch, use_local_blast,
+                                        entrez=BLAST_TAXA["all"]))
+        except Exception as ex:
+            print(f"   [warn] batch {bi}/{len(batches)} failed: {ex}")
+    if peptide not in results:
+        print("[blast-null] real peptide BLAST failed -- cannot compute null")
+        return
+
+    real_total, real_exact, real_taxa = results[peptide]
+    print(f"[blast-null] REAL {peptide}: {real_total} hits ({real_exact} exact), "
           f"{len(real_taxa)} distinct taxa")
 
     null_total, null_exact = [], []
     taxon_counter = Counter()
-    done = 0
-    for i in _progress(range(n_shuffles), total=n_shuffles, desc="blast null"):
-        rng.shuffle(chars)
-        shuf = "".join(chars)
-        if shuf == peptide:                      # skip accidental identity
+    for s in shuffles:
+        if s not in results:
             continue
-        try:
-            t, e, taxa = _blast_one(shuf, use_local_blast)
-        except Exception as ex:
-            print(f"   [warn] shuffle {shuf} failed: {ex}")
-            continue
-        null_total.append(t); null_exact.append(e)
+        t, e, taxa = results[s]
+        null_total.append(t)
+        null_exact.append(e)
         taxon_counter.update(taxa)
-        done += 1
-        print(f"   [{i+1:2d}/{n_shuffles}] {shuf}: {t} hits ({e} exact)")
+        print(f"   {s}: {t} hits ({e} exact)")
 
     if not null_total:
         print("[blast-null] no shuffles completed -- cannot compute null")
@@ -613,7 +664,7 @@ def null_model_blast(peptide, n_shuffles=20, seed=0, use_local_blast=False):
     print(f"[blast-null] most common taxa across shuffles (same GC-rich orgs as the "
           f"real run? => compositional attractor):")
     for org, c in taxon_counter.most_common(12):
-        print(f"   {c:3d}/{done}  {org}")
+        print(f"   {c:3d}/{len(null_total)}  {org}")
 
 
 # ---------------------------------------------------------------------------
@@ -769,12 +820,14 @@ if __name__ == "__main__":
     ap.add_argument("--max-blast", type=int, default=50,
                     help="cap on random strong binders BLASTed under --null-natural-aa --blastp")
     ap.add_argument("--n-shuffles", type=int, default=20,
-                    help="shuffles for --null-with-blastp, remote BLAST is slow (default 20)")
+                    help="shuffles for --null-with-blastp (batched, so remote-safe)")
+    ap.add_argument("--batch-size", type=int, default=50,
+                    help="peptides per batched qblast submission (--null-with-blastp)")
     a = ap.parse_args()
     if a.null_with_blastp:
         # here --peptide should be a SINGLE binder k-mer, e.g. RQRDPGAGR
         null_model_blast(a.peptide, n_shuffles=a.n_shuffles,
-                         use_local_blast=a.local_blast)
+                         use_local_blast=a.local_blast, batch_size=a.batch_size)
     elif a.null_natural_aa:
         # --peptide defaults to the saved NEOMORPH region (novel C-term)
         null_model_natural(a.peptide, length=a.neomorph_length, n_draws=a.n_draws,
