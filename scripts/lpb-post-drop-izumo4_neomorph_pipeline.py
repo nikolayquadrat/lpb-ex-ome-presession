@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 IZUMO4 neomorph -> neoantigen -> microbial/viral-mimicry pipeline (MOCK / scaffold).
-
 Steps:
   1. input peptide            -- the novel neomorph C-terminus
   2. tile                     -- class I: 8-11-mers; class II: handled by NetMHCIIpan
@@ -9,7 +8,6 @@ Steps:
   4. get strong binders       -- class I (MHCflurry) AND class II (NetMHCIIpan)
   5. BLAST them               -- vs BACTERIAL and VIRAL proteins
   6. find 100% hits           -- full-length exact matches
-
 Install:
     pip install mhcflurry biopython
     mhcflurry-downloads fetch                  # class I models (one-time)
@@ -67,10 +65,11 @@ STRONG_RANK_II = 2.0                 # class II: %Rank_EL (<=2 strong, NetMHCIIp
 
 # (5/6) BLAST: search BOTH bacteria and viruses; each hit is tagged by taxon.
 BLAST_DB = "nr"
-# ALL genomes: no taxon restriction (entrez_query omitted). Remote mode submits
+# Genomes: no taxon restriction (entrez_query omitted). Remote mode submits
 # every binder in ONE batched job -- API-safe. Set entrez to a string here only
 # if you want to re-narrow (e.g. "txid5653[ORGN]" for Trypanosomatidae).
-BLAST_TAXA = {"all": None}
+# BLAST_TAXA = {"all": None}
+BLAST_TAXA = {"all": "bacteria[organism] OR viruses[organism]"}
 BLAST_LOCAL_DBS = {"all": "nr"}      # local: name of your combined protein DB
 BLAST_MATRIX = "PAM70"               # looser than PAM30 for short peptides (was PAM30)
 BLAST_GAPCOSTS = "10 1"              # matches PAM70 (PAM30 wants "9 1")
@@ -85,19 +84,34 @@ BLAST_PAUSE_S = 12                   # >=10 s: NCBI throttles anonymous heavy us
 #   positives  >= ceil(MIN_POSITIVE_FRAC*qlen)  (conservative subs, e.g. K<->R, I<->L, count)
 # Optionally require the MHC ANCHOR positions to stay identical/conservative, since a
 # substitution there more likely kills binding than one at a TCR-contact position.
+# Optional pre-specified pathogen/contamination universe. When --add-species is
+# passed, the eukaryotes in this file (+ bacteria/viruses) are OR-COMBINED with
+# BLAST_TAXA above (addition, not substitution). Default path = rnaseq-pipe layout.
+SPECIES_FILE = r"data\rnaseq-pipe\00_additional_files\contamination\species.txt"
+# Higher-taxon (clade) terms covering the contamination list's eukaryotes, for
+# --add-clades. Far fewer OR-terms than the ~50-species list, so NCBI's BLAST
+# entrez filter accepts it. Preferred for the shuffle-BLAST (combinatorial) null.
+CLADE_TERMS = [
+    "fungi[organism]",            # Aspergillus, Candida, Cryptococcus, Mucor, Fusarium, Malassezia, ...
+    "Apicomplexa[organism]",      # Toxoplasma, Plasmodium, Babesia
+    "Kinetoplastida[organism]",   # Trypanosoma, Leishmania
+    "Heterolobosea[organism]",    # Naegleria
+    "Amoebozoa[organism]",        # Acanthamoeba, Balamuthia
+    "Platyhelminthes[organism]",  # Schistosoma, Taenia, Echinococcus
+    "Nematoda[organism]",         # Toxocara, Angiostrongylus, Baylisascaris, Gnathostoma
+    "Ciliophora[organism]",       # Tetrahymena, Paramecium (decoys)
+]
 MAX_MISMATCH = 2                     # e.g. a 9-mer -> accept down to 7/9 identity
 MIN_POSITIVE_FRAC = 1.0              # every position must be identical OR a conservative sub
 ANCHOR_POSITIONS = (2, -1)           # 1-based; -1 = C-terminus. Typical class I anchors (P2, PΩ).
 REQUIRE_ANCHOR_CONSERVED = True      # anchors must be identity/positive (set False to disable)
 ALLOW_GAPS = False                   # gapped near-matches are non-physiological for a short core
-
-EMAIL = "nikolay.quadrat@gmail.con"
+# EMAIL = "nikolay.quadrat@gmail.com"
+EMAIL = "kondratyev@rncpz.ru"
 # organisms to FLAG in the output because of independent evidence for them
 # (a pre-specified prior beats anything the broad scan turns up by chance).
-PRIORITY_ORGANISMS = ["Homo"] 
-
+PRIORITY_ORGANISMS = ["Homo"]
 NETMHCIIPAN_BIN = "netMHCIIpan"      # path to the executable
-
 # Human proteome amino-acid frequencies (UniProt/Swiss-Prot, approx %). Used by the
 # natural-aa null. Weights need not sum to 100 (random.choices normalizes).
 AA_FREQ = {
@@ -308,6 +322,69 @@ def parse_organism(hit_def):
     carry it in the LAST [square brackets], e.g. '... [Toxoplasma gondii]'."""
     m = re.findall(r"\[([^\[\]]+)\]", hit_def or "")
     return m[-1] if m else "unknown"
+
+
+# --- optional pre-specified pathogen/contamination universe (--add-species) ---
+_EUK_KEYWORDS = ("fung", "yeast", "protozoa", "protist", "helminth",
+                 "amoeba", "mould", "mold")
+
+
+def _parse_species_eukaryotes(path):
+    """Read the contamination species list; return the EUKARYOTE organism names
+    (fungi/protozoa/helminths/protists). Bacteria & viruses are omitted here
+    because they're covered by the broad bacteria[organism]/viruses[organism]
+    terms and their short keys don't map to clean names. Classification is by
+    section-header keyword, so sentence-like '##' comments don't misfire."""
+    names, is_euk = {}, False
+    with open(path) as fh:
+        for raw in fh:
+            s = raw.strip()
+            if not s:
+                continue
+            if s.startswith("#"):
+                if raw.lstrip().startswith("##"):
+                    hdr = s.lstrip("#").strip().lower()
+                    is_euk = any(k in hdr for k in _EUK_KEYWORDS)
+                continue
+            if is_euk:
+                parts = s.split()
+                if len(parts) < 2:
+                    continue
+                toks = parts[0].split("_")
+                nm = (toks[0].capitalize() + " " +
+                      (toks[1].lower() if len(toks) > 1 else "")).strip()
+                names[nm] = True
+    return sorted(names)
+
+
+def _species_universe(path, include_broad=False):
+    """Entrez terms for the listed EUKARYOTES. By default returns ONLY the
+    eukaryote clauses (so --add-species is a pure addition to whatever base
+    already has bacteria/viruses). Set include_broad=True to also prepend the
+    broad bacteria/viruses terms (use when the base is None/unrestricted and you
+    want a self-contained universe)."""
+    names = _parse_species_eukaryotes(path)
+    terms = ([f'"{n}"[organism]' for n in names])
+    if include_broad:
+        terms = ["bacteria[organism]", "viruses[organism]"] + terms
+    return " OR ".join(terms), names
+
+
+def _species_terms(path):
+    """List of per-eukaryote '"Name"[organism]' entrez terms (+ the names)."""
+    names = _parse_species_eukaryotes(path)
+    return [f'"{n}"[organism]' for n in names], names
+
+
+def _combine_entrez(base, extra):
+    """OR-combine two entrez expressions (either may be None). Preserves base --
+    this is what makes --add-species an ADDITION, not a substitution."""
+    parts = []
+    if base and str(base).strip():
+        parts.append(f"({base})")
+    if extra and str(extra).strip():
+        parts.append(f"({extra})")
+    return " OR ".join(parts) if parts else None
 
 
 def blast_batch_remote(sequences, classmap, entrez=None, db=BLAST_DB):
@@ -823,7 +900,50 @@ if __name__ == "__main__":
                     help="shuffles for --null-with-blastp (batched, so remote-safe)")
     ap.add_argument("--batch-size", type=int, default=50,
                     help="peptides per batched qblast submission (--null-with-blastp)")
+    ap.add_argument("--add-clades", action="store_true",
+                    help="ADD higher-taxon clade terms covering the contamination list "
+                         "(fungi + Apicomplexa + Kinetoplastida + helminth/amoeba/ciliate "
+                         "phyla) to BLAST_TAXA via OR. NCBI-safe (few terms); preferred for "
+                         "the shuffle-BLAST null. Use INSTEAD of --add-species when the full "
+                         "species list is rejected as too complex.")
+    ap.add_argument("--add-species", action="store_true",
+                    help="ADD the per-species contamination universe (bacteria + viruses + "
+                         "~48 listed eukaryotes) to BLAST_TAXA via OR. Precise but the long "
+                         "OR-list may exceed NCBI's entrez limit; prefer --add-clades if so.")
+    ap.add_argument("--species-file", default=SPECIES_FILE,
+                    help=f"path to the contamination species list (default: {SPECIES_FILE})")
     a = ap.parse_args()
+
+    # optional: OR the pre-specified pathogen universe onto BLAST_TAXA (keeps the
+    # body value; every remote call site reads BLAST_TAXA['all'] at call time).
+    # optional: OR a pre-specified pathogen universe onto BLAST_TAXA (keeps the
+    # body value; every remote call site reads BLAST_TAXA['all'] at call time).
+    # --add-clades (few broad taxon terms, NCBI-safe) and/or --add-species (exact
+    # ~48-species list). Broad bacteria/viruses are prepended only if the body
+    # base is empty, so nothing is duplicated.
+    if a.add_clades or a.add_species:
+        base = BLAST_TAXA["all"]
+        terms, desc = [], []
+        if a.add_clades:
+            terms += CLADE_TERMS
+            desc.append(f"{len(CLADE_TERMS)} clades")
+        if a.add_species:
+            try:
+                sp, snames = _species_terms(a.species_file)
+                terms += sp
+                desc.append(f"{len(snames)} species")
+            except FileNotFoundError:
+                print(f"[warn] --add-species: file not found ({a.species_file}); "
+                      f"skipping species terms")
+        if terms:
+            if not (base and str(base).strip()):
+                terms = ["bacteria[organism]", "viruses[organism]"] + terms
+            BLAST_TAXA["all"] = _combine_entrez(base, " OR ".join(terms))
+            eff = BLAST_TAXA["all"] or "ALL (unrestricted)"
+            print(f"[universe] added {' + '.join(desc)} to BLAST_TAXA")
+            print(f"[universe] effective entrez: {eff[:120]}"
+                  f"{'...' if len(eff) > 120 else ''}")
+
     if a.null_with_blastp:
         # here --peptide should be a SINGLE binder k-mer, e.g. RQRDPGAGR
         null_model_blast(a.peptide, n_shuffles=a.n_shuffles,
