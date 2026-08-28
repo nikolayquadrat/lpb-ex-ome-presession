@@ -32,11 +32,11 @@ Ensembl VEP cache release 112 was downloaded from ftp.ensembl.org. VEP plugin so
 #### 3a. Plugin data resources
 - **LOFTEE** ([Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) were obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Used for Tier A classification (see below, Ib, section 10).
 - **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)). Single-nucleotide-variant scores were downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Used for Tier A classification.
-- **SpliceAI indel scores**. Were obtained *manually* via the Illumina BaseSpace CLI (project 66029966) due to licensing constraints, academic use. Used for Tier A classification.
+- **SpliceAI indel scores** were obtained *manually* due to licensing constraints via the Illumina BaseSpace CLI (project 66029966, academic use). Used for Tier A classification.
 - **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz) were obtained from the DeepMind public bucket and tabix-indexed. Source of information for the tier B variants.
 - **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)** were downloaded manually from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data were used under a non-commercial research license. Source of information for the tier B variants.
 - **CADD** v1.7 SNV and indel scores ([Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)) were retrieved from the University of Washington's CADD non-commercial license distribution.
-- **dbNSFP** v5.3.1a (academic-use branch) ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. Was supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).
+- **dbNSFP** v5.3.1a (academic-use branch) ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. The collection was supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).
 
 #### 3b. Custom Singularity image for the VEP annotation
 This workflow uses a custom Singularity image for the VEP annotation step instead of the stock `ensemblorg/ensembl-vep:release_112.0` container. The image is built from the official Ensembl VEP 112 container, with samtools added for LOFTEE support. LOFTEE requires samtools faidx during annotation, especially for checks involving the ancestral allele FASTA. Without samtools, VEP may still run, but LOFTEE can emit warnings such as "Can't exec `samtools`" and may produce incomplete or incorrect `LoF`, `LoF_filter`, and `LoF_flags` annotations. In particular, variants that should be downgraded by LOFTEE filters such as `ANC_ALLELE` may otherwise remain incorrectly classified as high-confidence LoF. The custom image is built once and stored as a local `.simg` file. The image preserves the official VEP 112 environment and only adds the missing runtime dependency required by LOFTEE.
@@ -48,7 +48,7 @@ gnomAD v4.1 exome sites VCFs were downloaded per chromosome (autosomes plus X an
 ClinVar GRCh38 was retrieved from a dated NCBI archive snapshot (archive_2.0/2026/clinvar_20260426.vcf.gz). ClinVar is attached to variants in the VEP step via --custom annotation, which copies the CLNSIG (clinical significance), CLNDN (disease name), CLNREVSTAT (review status), and CLNDISDB (disease database cross-references) INFO fields from the ClinVar record at matching coordinates onto the variant being annotated.
 
 #### 6. Gene panels
-*all downloaded manually*<br>
+*all need to be downloaded manually*<br>
 - **SureSelectXT Human All Exon V8 capture-kit BED file** (S33266436_Regions.bed & S33266436_Regions.padded100.interval_list). The capture-kit BED file is supplied externally from [the wet-laboratory provider](https://earray.chem.agilent.com/suredesign/search/entity.htm).
 - **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results were obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results were joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering (tier C).
 - **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel was retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion.
@@ -78,6 +78,7 @@ cd .../rnaseq-drop/00_additional_files/deconv/source
 
 The section produces reference data in its own folder under `$DECONV_OUT_ROOT`:
 - `siletti_cortex` — adult human neocortex, neuronal vs non-neuronal, for the SZ07 composition analysis from the Siletti et al dataset ([Siletti et al 2023](https://doi.org/10.1126/science.add7046)).
+- `siletti_glia_plus.py` — same, but for non-neuronal (super)clusters separately. For cluster codes, [consult Table S3 from the otiginal study](https://www.science.org/doi/10.1126/science.add7046#supplementary-materials).
 
 #### 8. Validation
 Final completeness validation iterates over expected files, confirming non-zero size and presence of required indices (.tbi for VCF/TSV.gz, .fai/.dict for FASTA). Version coherence between VEP cache, plugin branch, and dbNSFP release is enforced at startup. Post-processing failures (REVEL conversion, SCHEMA HGNC join, gnomAD strip+concat, plugin flattening) propagate to the script's exit code.
@@ -532,9 +533,9 @@ Input files:
 - a sample annotation file
 - a gene annotation file (gtf): Matching [GENCODE v47 annotation](https://www.gencodegenes.org/human/release_47.html) (used in the RNA-seq workflow earlier)
 - a reference genome fasta file and its respective index (used in the RNA-seq workflow earlier)
-- processed external count matrices for the OUTRIDER module. In this study, we used GTEx V11 cortex BA9 count data and metadata:<br>
-https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression
-https://gtexportal.org/home/downloads/adult-gtex/metadata
+- processed external count matrices for the OUTRIDER module. In this study, we used [GTEx V11](https://doi.org/10.1126/science.aaz1776) cortex BA9 count data and metadata:<br>
+https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression<br>
+https://gtexportal.org/home/downloads/adult-gtex/metadata (contains data for age at death and sex covariates)
 
 The GTEx data should be harmonised with the data in the experiment (the script *lpb-drop-align_gtex_counts.R*), for example:
 ```sh
