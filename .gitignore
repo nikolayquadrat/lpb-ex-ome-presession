@@ -10,4 +10,5 @@ scripts/lpb-drop-expand_gtex.py
 scripts/scripts_to_make_deconv_reference/*
 !scripts/scripts_to_make_deconv_reference/_deconv_common.py
 !scripts/scripts_to_make_deconv_reference/siletti_cortex.py
+!scripts/scripts_to_make_deconv_reference/siletti_glia_plus.py
 mhc-env/*
