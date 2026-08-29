@@ -58,7 +58,7 @@ run the script with the BUILD_DECONV_REFERENCE flag set:
 ```sh
 sudo env BUILD_DECONV_REFERENCE=1 DECONV_REFERENCES="siletti_cortex" bash ./lpb-exome-prioritisation-collect-data.sh
 ```
-This section 10 is an optional stage (off by default; enabled with `BUILD_DECONV_REFERENCE=1`) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. It is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
+This section 10 is an optional stage (off by default; enabled with `BUILD_DECONV_REFERENCE=1`) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. Unlike other parts of the script, it is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
 
 **Architecture**. The section is a thin *driver*. The actual recipes live in a sibling folder, `scripts_to_make_deconv_reference/`, one self-contained Python script per reference and the common part in *scripts/scripts_to_make_deconv_reference/_deconv_common.py*. The driver discovers every `*.py` there (skipping `_`-prefixed library modules), optionally restricts to a subset via `DECONV_REFERENCES`, and runs each one. Adding a new reference means dropping in a new script; the driver never changes. Before running any builder, the driver ensures an isolated Python venv at `$DECONV_DIR/venv` and installs `anndata h5py scipy pandas numpy` into it. The venv is created and populated once and reused on subsequent runs; every builder is invoked with the venv's interpreter so the dependencies propagate to all of them.
 
@@ -91,7 +91,7 @@ A Snakemake workflow processes paired-end whole-exome sequencing data from raw F
 - Exomes are provided in the mounted `/tmp/fastq` folder
 - Outputs are written in the same folder
 - Tested in a Snakemake container on an Intel Ice Lake VM with 6 cores and 96 GB RAM running Ubuntu 24.04 LTS.
-Run snakemake container. Using nested containers is a deliberate design choice.
+Run in snakemake container. Using nested containers is a deliberate design choice.
 ```sh
 sudo docker container run --rm --privileged -it \
 -v "${PWD}:/tmp" \
@@ -272,6 +272,7 @@ flowchart LR
 	id9[r03g_index_md_bam]
 	id10[r04a_make_refflat]
 	id11[r04b_make_rrna_intervals]
+
 	id12[r05d_contamination_screen]
 	id13[r05c_entropy_filter]
 	id14[r05b_extract_unmapped]
@@ -280,34 +281,74 @@ flowchart LR
 	id17[r05e_contamination_summary]
 	id18[r05f_contamination_uniformity]
 	id19[r05g_contamination_fractions]
+	
 	id20[r06c_hla_summary]
 	id21[r06b_arcashla_genotype]
 	id22[r06a_arcashla_extract]
 	id23[r06e_hla_summary_classII]
 	id24[r06d_arcashla_genotype_classII]
+
 	id25[r07c_infer_sex]
 	id26[r07b_sex_counts_per_sample]
 	id27[r07a_sex_marker_regions]
+
 	id28[r08c_cell_marker_expression]
 	id29[r08b_cell_marker_counts_per_sample]
 	id30[r08a_cell_marker_regions]
-	id31[r09d_summary]
-	id32[r09c_run_hspe]
-	id33[r09b_reference]
-	id34[r09a_mixture]
+	id33[r09d_summary]
+	id34[r09c_run_hspe]
+	id35[r09b_reference]
+	id36[r09a_mixture]
+	id37[r09e_cibersortx_prep]
+
+	id31[r10b_expression_xlsx]
+	id32[r10a_expression_tables]
+
+	style id12 stroke-width:2px,color:#35ed12
+	style id13 stroke-width:2px,color:#35ed12
+	style id14 stroke-width:2px,color:#35ed12
+	style id15 stroke-width:2px,color:#35ed12
+	style id16 stroke-width:2px,color:#35ed12
+	style id17 stroke-width:2px,color:#35ed12
+	style id18 stroke-width:2px,color:#35ed12
+	style id19 stroke-width:2px,color:#35ed12
+
+	style id20 stroke-width:2px,color:#ed1235
+	style id21 stroke-width:2px,color:#ed1235
+	style id22 stroke-width:2px,color:#ed1235
+	style id23 stroke-width:2px,color:#ed1235
+	style id24 stroke-width:2px,color:#ed1235
+
+	style id25 stroke-width:2px,color:#ca12ed
+	style id26 stroke-width:2px,color:#ca12ed
+	style id27 stroke-width:2px,color:#ca12ed
+
+	style id28 stroke-width:2px,color:#1235ed
+	style id29 stroke-width:2px,color:#1235ed
+	style id30 stroke-width:2px,color:#1235ed
+	style id31 stroke-width:2px,color:#1235ed
+	style id32 stroke-width:2px,color:#1235ed
+	style id33 stroke-width:2px,color:#1235ed
+	style id34 stroke-width:2px,color:#1235ed
+	style id35 stroke-width:2px,color:#1235ed
+	style id36 stroke-width:2px,color:#1235ed
+	style id37 stroke-width:2px,color:#1235ed
+
+	id17 --> id0
+	id28 --> id0
+	id37 --> id0
+	id23 --> id0
+	id19 --> id0
+	id34 --> id0
+	id1 --> id0
+	id2 --> id0
 	id7 --> id0
-	id32 --> id0
+	id20 --> id0
+	id18 --> id0
 	id6 --> id0
+	id33 --> id0
 	id31 --> id0
 	id25 --> id0
-	id19 --> id0
-	id17 --> id0
-	id2 --> id0
-	id28 --> id0
-	id1 --> id0
-	id23 --> id0
-	id18 --> id0
-	id20 --> id0
 	id2 --> id1
 	id5 --> id1
 	id4 --> id2
@@ -317,15 +358,15 @@ flowchart LR
 	id6 --> id7
 	id8 --> id7
 	id12 --> id7
-	id1 --> id8
 	id10 --> id8
-	id9 --> id8
+	id1 --> id8
 	id11 --> id8
+	id9 --> id8
 	id1 --> id9
 	id2 --> id11
-	id13 --> id12
 	id15 --> id12
 	id1 --> id12
+	id13 --> id12
 	id14 --> id13
 	id1 --> id14
 	id16 --> id15
@@ -339,18 +380,21 @@ flowchart LR
 	id24 --> id23
 	id22 --> id24
 	id26 --> id25
-	id27 --> id26
 	id1 --> id26
+	id27 --> id26
 	id9 --> id26
 	id29 --> id28
 	id1 --> id29
 	id30 --> id29
 	id9 --> id29
 	id32 --> id31
-	id34 --> id32
-	id33 --> id32
+	id2 --> id32
 	id34 --> id33
-	id2 --> id34
+	id36 --> id34
+	id35 --> id34
+	id36 --> id35
+	id2 --> id36
+	id36 --> id37
 ```
 
 #### 1. Reference assembly and annotation
@@ -495,8 +539,9 @@ Per sample:
 Cohort-level:
  - `../03_bam_star/00_mapping_stat/mapping_stat.txt` (alignment summary),
  - `../04_qc/00_qc_summary.tsv` (RNA-seq QC summary with outlier flags),
- - `../04_qc/00_inferred_sex.tsv` (sex inference).
- - `../04_qc/00_cell_marker_expression.tsv` (cell-composition markers).
+ - `../04_qc/00_inferred_sex.tsv` (sex inference),
+ - `../04_qc/00_cell_marker_expression.tsv` (cell-composition markers),
+ - `../04_qc/00_expression_summary.xlsx` (counts and TPM tables),
  - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files)
 
 ## III. DROP pipeline
