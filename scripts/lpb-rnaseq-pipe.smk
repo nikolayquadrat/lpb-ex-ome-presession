@@ -581,11 +581,6 @@ if not DECONV_ACTIVE:
     print(f"[r09] deconvolution stage inactive: {_reason}")
 
 
-
-
-
-
-
 # -----------------------------------------------------------------------------
 # Targets
 # -----------------------------------------------------------------------------
@@ -628,6 +623,7 @@ rule all:
         *(["/tmp/data/06_hla/00_hla_summary_classII.tsv"] if ARCASHLA_ENABLED else []),
         "/tmp/data/04_qc/00_inferred_sex.tsv",
         "/tmp/data/04_qc/00_cell_marker_expression.tsv",
+        "/tmp/data/04_qc/00_expression_summary.xlsx",
         ((expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
           + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
                    ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [])
@@ -3216,6 +3212,230 @@ rule r09e_cibersortx_prep:
         """
         Rscript {params.script} {input.mtx} {input.feat} {input.cells} \
             {input.mix} {output.ref} {output.mix} {params.maxcells}
+        """
+
+# =============================================================================
+# r10 -- cohort expression summary (counts + TPM)
+#   r10a : compute the two gene x sample matrices, emit as gzip TSVs
+#          (pure-Python run: block; needs nothing beyond pandas on the host)
+#   r10b : render the two TSVs into a single two-sheet .xlsx workbook
+#          (R + writexl, in the nikolayquadrat/toolbox:rnaseq3 container, so the
+#           host Snakemake env needs no openpyxl/xlsxwriter)
+#
+# Both TSV/sheet matrices are genes x samples with two leading gene-annotation
+# columns from the GTF:
+#     gene_id   : Ensembl id WITH GENCODE version suffix (e.g. ENSG00000141510.17)
+#     gene_name : HGNC symbol (human) / gene_name from the GTF for non-human
+#                 annotations (common name); "" if the gene is unnamed.
+#
+# Strand column: STAR ReadsPerGene.out.tab has 4 columns -- col1 gene_id,
+#   col2 unstranded, col3 forward, col4 reverse. We take DECONV_STRAND (default
+#   2 = reverse, the GTEx / Illumina TruSeq stranded-mRNA convention), matching
+#   the deconvolution stage. Override with -e DECONV_STRAND=... (0/1/2).
+#
+# TPM: gene length is the UNION-EXON length from the GTF (bp covered by >=1 exon,
+#   overlapping/alternative exons merged, NOT summed). TPM_i = count_i / len_i,
+#   normalised so each sample column sums to 1e6. Genes with no GTF exon length
+#   are dropped from the TPM table (kept in counts); reported in the log.
+# =============================================================================
+
+# Container with R + writexl (for r10b). Same override convention as the
+# other *_CONTAINER constants.
+RNASEQ3_CONTAINER = os.environ.get(
+    "RNASEQ3_CONTAINER", "docker://nikolayquadrat/toolbox:rnaseq3")
+
+
+rule r10a_expression_tables:
+    input:
+        star = expand(
+            "/tmp/data/03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab",
+            sample=samples),
+        gtf = GTF,
+    output:
+        counts_tsv = "/tmp/data/04_qc/00_expression_counts.tsv.gz",
+        tpm_tsv    = "/tmp/data/04_qc/00_expression_tpm.tsv.gz",
+    params:
+        strand = DECONV_STRAND,   # 0=unstranded, 1=fwd, 2=reverse (data index)
+    run:
+        import os, re, gzip
+        import pandas as pd
+
+        strand_col = 1 + int(params.strand)   # -> col2/3/4 of ReadsPerGene
+
+        # -- 1. GTF: union-exon length + gene_name, keyed by full gene_id ------
+        def _open(p):
+            return gzip.open(p, "rt") if str(p).endswith(".gz") else open(p)
+
+        gid_re   = re.compile(r'gene_id "([^"]+)"')
+        gname_re = re.compile(r'gene_name "([^"]+)"')
+        exons, names = {}, {}
+        with _open(input.gtf) as fh:
+            for line in fh:
+                if not line or line[0] == "#":
+                    continue
+                f = line.rstrip("\n").split("\t")
+                if len(f) < 9 or f[2] not in ("exon", "gene"):
+                    continue
+                m = gid_re.search(f[8])
+                if not m:
+                    continue
+                gid = m.group(1)
+                if gid not in names:
+                    gn = gname_re.search(f[8])
+                    if gn:
+                        names[gid] = gn.group(1)
+                if f[2] == "exon":
+                    exons.setdefault(gid, []).append((int(f[3]), int(f[4])))
+
+        lengths = {}
+        for gid, iv in exons.items():
+            iv.sort()
+            merged = []
+            for s_, e_ in iv:
+                if merged and s_ <= merged[-1][1] + 1:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e_))
+                else:
+                    merged.append((s_, e_))
+            lengths[gid] = sum(e_ - s_ + 1 for s_, e_ in merged)
+        print(f"[r10a] GTF: {len(lengths)} genes with exon length, "
+              f"{len(names)} named", flush=True)
+
+        # -- 2. per-sample STAR counts (chosen strand column) -----------------
+        count_cols = {}
+        for path in input.star:
+            sample = os.path.basename(path).replace(".ReadsPerGene.out.tab", "")
+            ids, vals = [], []
+            with open(path) as fh:
+                for line in fh:
+                    p = line.rstrip("\n").split("\t")
+                    if len(p) < 4 or p[0].startswith("N_"):
+                        continue
+                    ids.append(p[0])
+                    vals.append(int(p[strand_col]))
+            count_cols[sample] = pd.Series(vals, index=ids, dtype="int64")
+
+        first = os.path.basename(input.star[0]).replace(".ReadsPerGene.out.tab", "")
+        counts = pd.DataFrame(count_cols).reindex(count_cols[first].index)
+        counts = counts.fillna(0).astype("int64")
+        counts = counts[[s for s in samples if s in counts.columns]]
+        print(f"[r10a] counts: {counts.shape[0]} genes x {counts.shape[1]} samples",
+              flush=True)
+
+        # -- 3. TPM (union-exon length; per-sample column sums to 1e6) ---------
+        len_series = pd.Series(
+            {g: lengths.get(g, lengths.get(g.split(".")[0])) for g in counts.index},
+            dtype="float64")
+        have_len = len_series.notna()
+        n_missing = int((~have_len).sum())
+        if n_missing:
+            print(f"[r10a] WARN: {n_missing} genes have no GTF exon length; "
+                  f"excluded from TPM table (present in counts table)",
+                  file=sys.stderr)
+
+        c_for_tpm = counts.loc[have_len]
+        l_kb = (len_series.loc[have_len] / 1000.0)
+        rpk = c_for_tpm.div(l_kb, axis=0)
+        col_sums = rpk.sum(axis=0)
+        tpm = rpk.div(col_sums.replace(0, pd.NA), axis=1) * 1e6
+        tpm = tpm.fillna(0.0).round(4)
+
+        # -- 4. annotation columns + write gzip TSVs (gene_id as first column) -
+        def _annotate(df):
+            out = df.copy()
+            out.insert(0, "gene_name", [names.get(g, "") for g in out.index])
+            out.index.name = "gene_id"
+            return out.reset_index()          # gene_id becomes a real column
+
+        os.makedirs(os.path.dirname(output.counts_tsv), exist_ok=True)
+        _annotate(counts).to_csv(output.counts_tsv, sep="\t", index=False)
+        _annotate(tpm).to_csv(output.tpm_tsv, sep="\t", index=False)
+
+        print(f"[r10a] wrote:\n  {output.counts_tsv} "
+              f"({counts.shape[0]}x{counts.shape[1]})\n  {output.tpm_tsv} "
+              f"({tpm.shape[0]}x{tpm.shape[1]}) [strand col {strand_col}]",
+              flush=True)
+
+        # -- diagnostics: byte sizes + head preview, loud warning if empty -----
+        if counts.shape[0] == 0:
+            print("[r10a] WARN: counts table has 0 GENES -- the .xlsx will be "
+                  "empty. Check that the ReadsPerGene.out.tab files contain "
+                  "gene rows (not just the 4 N_* header lines) and that the "
+                  "strand column index is valid.", file=sys.stderr)
+        if counts.shape[1] == 0:
+            print("[r10a] WARN: 0 SAMPLES matched -- check `samples` vs the "
+                  "STAR output basenames.", file=sys.stderr)
+        for _p in (output.counts_tsv, output.tpm_tsv):
+            print(f"[r10a] {_p}: {os.path.getsize(_p)} bytes", flush=True)
+        with gzip.open(output.counts_tsv, "rt") as _fh:
+            _head = [next(_fh, "").rstrip("\n") for _ in range(3)]
+        print("[r10a] counts head (first 3 lines):\n  " + "\n  ".join(_head),
+              flush=True)
+
+
+rule r10b_expression_xlsx:
+    """
+    Render the two r10a TSVs into a single .xlsx with sheets 'counts' and 'TPM',
+    using R + writexl inside the rnaseq3 container (so the host env needs no
+    Python Excel writer). writexl::write_xlsx takes a named list of data frames
+    -> one sheet per name. read.delim keeps gene_id/gene_name as plain character
+    columns; check.names=FALSE preserves sample column names verbatim.
+    """
+    input:
+        counts_tsv = rules.r10a_expression_tables.output.counts_tsv,
+        tpm_tsv    = rules.r10a_expression_tables.output.tpm_tsv,
+    output:
+        xlsx = "/tmp/data/04_qc/00_expression_summary.xlsx",
+    singularity: RNASEQ3_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+
+        # --- shell-side: prove the container sees non-empty input TSVs --------
+        echo "[r10b] inputs on disk (inside container):"
+        ls -l {input.counts_tsv} {input.tpm_tsv}
+        # decompressed line counts (header + one row per gene). '|| true' guards
+        # against SIGPIPE from head under pipefail.
+        CN=$(gzip -dc {input.counts_tsv} | wc -l)
+        TN=$(gzip -dc {input.tpm_tsv}    | wc -l)
+        echo "[r10b] counts TSV: $CN lines (incl header); tpm TSV: $TN lines"
+        echo "[r10b] counts TSV head:"
+        gzip -dc {input.counts_tsv} | head -3 || true
+        if [ "$CN" -le 1 ]; then
+            echo "[r10b] ERROR: counts TSV has no data rows (<=1 line). The" >&2
+            echo "       emptiness originates in r10a, not here. Re-run r10a" >&2
+            echo "       and read its [r10a] diagnostics." >&2
+            exit 1
+        fi
+
+        # --- R side: read, report dimensions, refuse to write an empty book ---
+        Rscript -e '
+            suppressPackageStartupMessages(library(writexl));
+            args <- commandArgs(trailingOnly=TRUE);
+            cat(sprintf("[r10b][R] received %d args: %s\n",
+                        length(args), paste(args, collapse=" | ")));
+            if (length(args) < 3) stop("[r10b][R] need 3 args: counts_tsv tpm_tsv out_xlsx");
+            counts <- read.delim(gzfile(args[1]), header=TRUE, sep="\t",
+                                 check.names=FALSE, stringsAsFactors=FALSE,
+                                 quote="", comment.char="");
+            tpm    <- read.delim(gzfile(args[2]), header=TRUE, sep="\t",
+                                 check.names=FALSE, stringsAsFactors=FALSE,
+                                 quote="", comment.char="");
+            cat(sprintf("[r10b][R] counts parsed: %d rows x %d cols (%s)\n",
+                        nrow(counts), ncol(counts),
+                        paste(head(colnames(counts), 6), collapse=",")));
+            cat(sprintf("[r10b][R] tpm    parsed: %d rows x %d cols\n",
+                        nrow(tpm), ncol(tpm)));
+            if (nrow(counts) == 0 || nrow(tpm) == 0)
+                stop("[r10b][R] a parsed table has 0 rows -- refusing to write an empty workbook");
+            if (ncol(counts) < 3 || ncol(tpm) < 3)
+                stop("[r10b][R] <3 columns -- expected gene_id, gene_name, and >=1 sample");
+            write_xlsx(list(counts=counts, TPM=tpm), path=args[3]);
+            cat(sprintf("[r10b][R] wrote %s (%d bytes)\n",
+                        args[3], file.info(args[3])$size));
+        ' {input.counts_tsv} {input.tpm_tsv} {output.xlsx}
+
+        echo "[r10b] output on disk:"
+        ls -l {output.xlsx}
         """
 
 
