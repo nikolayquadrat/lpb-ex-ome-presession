@@ -161,7 +161,7 @@ for(exp in names(experiments)) {
         stopifnot(is.numeric(list_of_ranks[[donor]]), !is.null(names(list_of_ranks[[donor]])))
         stopifnot(all(fgsea_res_sig_uncorrected$pathway %in% names(pathway_list)))
         
-        # **** **** collapse pathways accross signatures collections ----------
+        # **** **** collapse pathways across signatures collections ----------
         collapsed_pathways <- collapsePathways( # could be long
             fgseaRes = fgsea_res_sig_uncorrected,
             pathways = pathway_list,
@@ -222,6 +222,7 @@ for(exp in names(experiments)) {
         # **** **** save results -----------
         writexl::write_xlsx(
             list(
+                "fgsea_res_all_uncorrected" = fgsea_res %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", ")))),
                 "fgsea_res_sig_uncorrected" = fgsea_res_sig_uncorrected %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", ")))),
                 "fgsea_res_sig" = fgsea_res_sig %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", ")))),
                 "tiered_genes_in_pathways" = tiered_genes_in_pathways_df %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", "))))

@@ -50,8 +50,8 @@ constraint <- constraint[mane_select == TRUE]  # one row per gene
 ensg_to_hgnc <- setNames(constraint$gene, sub("\\..*$", "", constraint$gene_id))
 
 # Candidate mutations ===========
-significant_pathways_w_tiered_genes <- readxl::read_xlsx(sprintf("%s/data/post-drop/fst-pass/ba9_gtex_SZ07_fgsea_results.xlsx", git_folder), sheet = "tiered_genes_in_pathways")
-tier_genes <- unique(significant_pathways_w_tiered_genes$tiered_gene)
+pass1_pathways_w_tiered_genes <- readxl::read_xlsx(sprintf("%s/data/post-drop/fst-pass/ba9_gtex_SZ07_fgsea_results.xlsx", git_folder), sheet = "tiered_genes_in_pathways")
+tier_genes <- unique(pass1_pathways_w_tiered_genes$tiered_gene)
 
 # GSEA signatures ===========
 hallmark <- msigdbr(species="Homo sapiens", category="H")
@@ -81,14 +81,14 @@ exome_callable_genes_df <- read.delim(sprintf("%s/data/exome-pipe/fastq/14_calla
 exome_callable_genes_df$callable[exome_callable_genes_df$gene == "GATA6"] <- "yes" # GATA6 is the exception
 exome_callable_genes_df[exome_callable_genes_df$gene %in% tier_genes,]
 
-significant_pathways <- readxl::read_xlsx(sprintf("%s/data/post-drop/fst-pass/ba9_gtex_SZ07_fgsea_results.xlsx", git_folder), sheet = "fgsea_res_sig_uncorrected")
+pass1_pathways <- readxl::read_xlsx(sprintf("%s/data/post-drop/fst-pass/ba9_gtex_SZ07_fgsea_results.xlsx", git_folder), sheet = "fgsea_res_all_uncorrected")
 
 # Main loop =========
 # recalculate GSEA enriched pathways and p-values for pathways without tier genes
 # and compare with their corresponding "size/hubness"-matched genes
 dir.create(sprintf("%s/data/post-drop/snd-pass", git_folder), showWarnings = FALSE)
 for (tier_gene in tier_genes) {
-    # tier_gene <- "CACNA1D"
+    # tier_gene <- "SLC11A1"
     cat("Tiered gene", tier_gene, "\n")
     output_folder <- sprintf("%s/data/post-drop/snd-pass/%s", git_folder, tier_gene)
     dir.create(output_folder, showWarnings = FALSE)
@@ -194,15 +194,14 @@ for (tier_gene in tier_genes) {
                            output_folder, exp, donor),
                    emapplot_collapsed, width = 12, height = 9, dpi = 150, bg = "white")
             
-            
-            # **** **** how often genes similar to the tiered gene are ended up in significant pathways -----------
+
             empirical_p_results <- minp_size_matched_test(
                 candidates   = tier_gene,
-                fgsea_res    = significant_pathways[, c("pathway", "pval")],
-                fgsea_res_g  = fgsea_res_sig_uncorrected[, c("pathway", "pval")],
+                fgsea_res    = pass1_pathways[, c("pathway", "pval", "size", "leadingEdge")],
+                fgsea_res_g  = fgsea_res_sig_uncorrected[, c("pathway", "pval", "size")],  # size optional here
                 pathway_list = pathway_list_unfiltered,
                 universe     = exome_callable_genes_df$gene[exome_callable_genes_df$callable == "yes"],
-                size_breaks  = c(20, 50, 100, 200), 
+                size_breaks  = c(20, 50, 100, 200),
                 profile_bins = 4
             )
             
@@ -329,5 +328,6 @@ list_of_tables <- lapply(tier_genes, function(x) {
 names(list_of_tables) <- tier_genes
 
 empiric_p_df <- bind_rows(list_of_tables)
-empiric_p_df$emp_p_bh <- p.adjust(empiric_p_df$emp_p, method = "BH")
+empiric_p_df$emp_p_bh[empiric_p_df$test == "set"] <- p.adjust(empiric_p_df$emp_p[empiric_p_df$test == "set"], method = "BH")
+empiric_p_df$emp_p_bh[empiric_p_df$test == "leading_edge"] <- p.adjust(empiric_p_df$emp_p[empiric_p_df$test == "leading_edge"], method = "BH")
 writexl::write_xlsx(empiric_p_df, sprintf("%s/data/post-drop/snd-pass/ba9_gtex_SZ07_fgsea_results_empirical.xlsx", git_folder))
