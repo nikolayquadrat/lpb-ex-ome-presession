@@ -613,14 +613,14 @@ Helpful notes:
 - for the external counts matrix, set "geneID" as a gene identifier name.
 
 ## IV. System analysis on top of the OUTRIDER results
-OUTRIDER’s results can be used to look into which biological processes tend to contain unusually expressed genes in a particular sample similar to how it is usually done by measuring how differential expression effects of individual genes concentrate in defined biological pathways.
+OUTRIDER results provide an opportunity to investigate whether genes with unusually high or low expression in a sample are enriched in specific biological processes by applying gene set enrichment analysis (GSEA) to OUTRIDER-derived z-scores, analogous to the application of GSEA to gene-level statistics from differential expression analyses.
 
 ### First pass
 *scripts/lpb-post-drop-outrider-1st-pass.R*<br>
 Initial GSEA of the OUTRIDER results.<br>
 
 Helper functions:<br>
-*scripts/lpb-post-drop-fgsea-emap.R* -- similar to the `emapplot()` function from (`enrichplot`)[https://doi.org/10.18129/B9.bioc.enrichplot].<br>
+*scripts/lpb-post-drop-fgsea-emap.R* -- similar to the `emapplot()` function from [`enrichplot`](https://doi.org/10.18129/B9.bioc.enrichplot).<br>
 <img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="35%"><br>
 
 *scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* -- similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
@@ -628,7 +628,11 @@ Helper functions:<br>
 
 ### Second pass
 *scripts/lpb-post-drop-outrider-2nd-pass.R*<br>
-To assess whether a candidate gene's transcriptomic pathway neighbourhood is enriched in an individual's expression outlier profile beyond chance, a matched-sampling procedure is implemented.
+To assess whether a candidate gene's (g) transcriptomic pathway neighbourhood is enriched in an individual's expression outlier profile beyond chance, a matched-sampling procedure is implemented.
+
+Significance is assessed against a matched empirical null (P). Membership is evaluated under two definitions, each constituting a separate test. Under set membership, g belongs to P if it is annotated to the pathway's gene set. Under leading-edge membership, g belongs to P only if it lies within P's GSEA leading edge — the subset of genes that drive the enrichment signal. Because the leading edge is a strict subset of the gene set, the leading-edge statistic is defined over fewer pathways and is systematically more conservative; it distinguishes genes that actively drive enrichment from those merely annotated to enriched sets. Both tests are computed for every candidate and reported jointly.
+
+The null pool comprises all genes of a predefined universe — here, the exome-callable gene set — with the candidates excluded. Each null gene is scored by the identical min-p statistic under the same membership definition as the candidate; the membership basis of the null is switched together with that of the candidate, because the two definitions induce different min-p distributions and scoring the candidate on leading-edge pathways while scoring the null on set membership would bias the empirical p-value. Consequently the null pool and its matching strata are constructed separately for each test.
 
 For each gene, its statistic as the minimum enrichment p-value (min-p) is defined across all gene sets containing it, taken from a single GSEA analysis of the individual's per-gene outlier ranking; min-p thus reflects the strength of the gene's most strongly enriched pathway. Because heavily annotated genes belong to more, and to more varied, gene sets and therefore have more opportunities to attain a low min-p, each candidate is calibrated against an empirical null of genes matched on pathway-size profile: each gene is summarised by the number of its pathways falling in defined size classes (e.g. specific vs broad), and candidates are compared only to genes sharing the same size-class stratum. Matching on the size profile rather than on total pathway membership avoids the saturation that arises when all candidates are near-maximal hubs, while controlling both the number and the size distribution of a gene's pathways—the joint determinant of the min-p null, since large gene sets attain small p-values through aggregation of diffuse signal and small sets through concentrated signal.
 
