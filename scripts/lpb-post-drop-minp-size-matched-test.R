@@ -1,76 +1,99 @@
 #' Prioritise candidate genes by min-p enrichment overlap, matched on pathway
-#' SIZE PROFILE (not total hubness)
+#' SIZE PROFILE -- run for BOTH membership bases (set + leading edge).
 #'
 #' Per-gene statistic: min-p = the smallest donor enrichment p-value across the
-#' pathways the gene belongs to (its single most strongly-enriched pathway).
-#' A candidate is "interesting" if its min-p is smaller (more extreme) than that
-#' of matched null genes.
+#' pathways the gene "belongs to". Belonging is defined TWO ways, each scored as
+#' its own test and returned together:
+#'   test = "set"          gene is a MEMBER of the pathway gene set (as given in
+#'                         `pathway_list`) -- the original behaviour.
+#'   test = "leading_edge" gene is in the pathway's GSEA LEADING EDGE (from
+#'                         `fgsea_res[[le_col]]`) -- among the genes that
+#'                         actually drive the enrichment. A strict subset of
+#'                         membership, and the more stringent question.
+#'
+#' Both tests share all machinery and differ ONLY in the gene->pathway map.
+#' Crucially, for each test the NULL POOL is scored under the SAME belonging
+#' rule as the candidate. Leading-edge membership is a strict subset of set
+#' membership, so a gene's min-p is drawn from fewer pathways and is expected to
+#' be LARGER under the leading-edge rule; scoring the candidate on leading-edge
+#' pathways while scoring the null on set membership would inflate the empirical
+#' p. Both must use the same basis, so the matched null pool AND the matching
+#' strata are rebuilt separately for each test (the size-profile distribution
+#' differs between bases).
 #'
 #' MATCHING. The null pool is matched on the gene's pathway SIZE PROFILE -- the
-#' counts of its pathways in each size class (e.g. small/specific vs large/broad)
-#' -- rather than on total pathway count (hubness). Total hubness is a poor
-#' covariate for min-p: it saturates for heavily-annotated genes (any gene in
-#' ~all pathways has some low-p pathway by breadth alone), so hubness-matched
-#' min-p cannot resolve candidates that are all near-maximal hubs. The size
-#' profile subsumes hubness (its bins sum to the total count) while separating
-#' "has specific-pathway opportunity" from "broad-only", which is the axis that
-#' carries the signal. Matching bins keep tied counts together (genes with the
-#' same profile are matchable), unlike an equal-frequency split.
+#' counts of its pathways in each size class (small/specific vs large/broad) --
+#' rather than on total pathway count (hubness). Total hubness saturates for
+#' heavily-annotated genes; the size profile subsumes hubness (its bins sum to
+#' the total count) while separating "has specific-pathway opportunity" from
+#' "broad-only", the axis that carries the signal. Under the leading_edge test
+#' the size class is still the FULL pathway size (a pathway's identity, hence
+#' its p-value, is unchanged); the profile just counts pathways the gene is in
+#' the leading edge OF, by size class -- the correct "opportunity" covariate for
+#' that statistic. Bins keep tied counts together.
 #'
 #' CIRCULARITY / leave-one-out. min-p uses the FIXED donor pathway p-values in
-#' `fgsea_res`. For a candidate that itself drives one of its pathways (i.e. is
-#' in that pathway's leading edge), its min-p is self-vouching. Handle that
-#' upstream: recompute enrichment with the candidate removed from the ranking
-#' and pass its leave-one-out enrichment run via `fgsea_res_g` for that gene.
-#' This matters
-#' only for leading-edge candidates; membership-only candidates barely move
-#' their pathways' p-values, so the shared `fgsea_res` is fine for them.
+#' `fgsea_res`. For a candidate that drives one of its pathways (is in that
+#' pathway's leading edge), its min-p is self-vouching; recompute enrichment
+#' with the candidate removed from the ranking and pass its leave-one-out run
+#' via `fgsea_res_g` to score that candidate's min-p on de-biased p-values.
+#' NOTE for the leading_edge test: the candidate's leading-edge MEMBERSHIP is
+#' taken from the ORIGINAL run, never the leave-one-out run -- removing the gene
+#' would by construction drop it from every leading edge and empty the
+#' statistic. Only the pathway P-VALUES are overlaid from the leave-one-out run.
+#' This is the same candidate-p / null-p asymmetry as the set test, now also
+#' spanning membership. Membership-only candidates barely move their pathways'
+#' p-values, so the shared `fgsea_res` is fine for them.
 #'
 #' @param candidates  Character vector of candidate gene symbols.
-#' @param fgsea_res   data.frame/data.table with a pathway-name column and a
-#'                    p-value column (the donor enrichment result). Every pathway
-#'                    in `pathway_list` that could contribute should appear here.
+#' @param fgsea_res   data.frame/data.table with a pathway-name column, a
+#'                    p-value column, and (for the leading_edge test) a
+#'                    leading-edge column. Every contributing pathway appears.
 #' @param pathway_list Named list: list("pathway" = c(genes...)). The tested
 #'                    collection (uncollapsed).
-#' @param universe    Character vector of genes the null pool is drawn from --
-#'                    the exome-testable genes (NOT the expressed set). Candidates
+#' @param universe    Character vector the null pool is drawn from -- the
+#'                    exome-testable genes (NOT the expressed set). Candidates
 #'                    are excluded from the null pool automatically.
 #' @param size_breaks Numeric breakpoints defining pathway size classes, passed
-#'                    to cut() on pathway gene-set size. Default c(0,100,Inf) ->
-#'                    two classes: "small" (<=100) and "large" (>100).
+#'                    to cut() on pathway gene-set size. Default c(0,100,Inf).
 #' @param profile_bins Max bins per size-class count axis when forming matching
-#'                    strata (default 3). Bins are value-based and KEEP TIES
-#'                    TOGETHER, so equal counts share a bin; the realised number
-#'                    of bins may be fewer if counts are highly tied (fine here).
+#'                    strata (default 3). Value-based, ties kept together.
 #' @param pathway_col,p_col Column names in fgsea_res (default "pathway","pval").
-#'                    Use raw "pval" not "padj": padj flooring creates ties at
-#'                    the top that destroy min-p resolution.
+#'                    Use raw "pval" not "padj".
+#' @param size_col   Column in `fgsea_res` giving each pathway's EFFECTIVE size
+#'                    -- the number of set members present in the ranked list,
+#'                    post-intersection, which is what fgsea's minSize/maxSize
+#'                    filtered on (default "size", as fgsea reports it). Using it
+#'                    keeps path_size, size_breaks, and the fgsea size filter on
+#'                    one scale. If absent, the function falls back to the full
+#'                    annotation gene-set length and warns -- that scale differs
+#'                    from fgsea's effective size and can misplace or silently
+#'                    drop pathways in the size profile (e.g. a 312-gene set that
+#'                    fgsea tested at effective size 91).
+#' @param le_col     Column in `fgsea_res` holding each pathway's leading-edge
+#'                    genes, used by the leading_edge test (default
+#'                    "leadingEdge"). Accepts a fgsea list-column (a character
+#'                    vector per pathway) OR a delimited string (",", ";", "|",
+#'                    or whitespace between symbols). If the test is requested
+#'                    but this column is absent, that test is skipped (warning).
+#' @param tests      Which test(s) to run: any of "set","leading_edge"
+#'                    (default both).
 #' @param fgsea_res_g Optional per-candidate leave-one-out enrichment, used ONLY
-#'                    to score the candidate's own min-p (never the null pool,
-#'                    which always uses `fgsea_res`). Accepts either:
-#'                      - a single data.frame (same columns as fgsea_res): the
-#'                        candidate's gene-removed run, applied to every candidate
-#'                        in this call (natural when calling with one candidate);
-#'                      - a named list mapping candidate gene -> its data.frame:
-#'                        each candidate scored on its own run; candidates absent
-#'                        from the list fall back to `fgsea_res` (no correction).
-#'                    The table may be a FULL re-run (all pathways) or a PARTIAL
-#'                    patch (only the pathways whose p changed under leave-one-
-#'                    out); values are overlaid on `fgsea_res`, so both work.
-#'                    The asymmetry is deliberate and essential: candidate min-p
-#'                    on its own gene-removed run, null pool on the original run,
-#'                    so empirical p's stay comparable across candidates. NULL
-#'                    (default) = no leave-one-out (candidate scored on fgsea_res
-#'                    like the null pool).
+#'                    to score the candidate's own min-p (never the null pool).
+#'                    Single data.frame (applied to every candidate) or a named
+#'                    list gene -> data.frame. FULL re-run or PARTIAL patch; the
+#'                    p-values are overlaid on `fgsea_res`. Only p-values are
+#'                    used -- leading-edge membership always comes from the
+#'                    original run (see CIRCULARITY note). NULL = no correction.
 #' @param min_stratum Warn if a candidate's matched null pool is smaller than
-#'                    this (unstable percentile). Default 20.
-#' @param seed        Unused by the core test (matching is deterministic); kept
-#'                    for API parity. Set for reproducibility if you later add
-#'                    stochastic tie-breaking.
+#'                    this. Default 20.
+#' @param seed        Unused by the core test; kept for API parity.
 #'
-#' @return data.frame, one row per candidate: gene, min_p, best_pathway,
-#'   best_pathway_size, n_pathways, size profile counts, stratum, n_null,
-#'   n_null_le (nulls at least as extreme), emp_p, emp_p_bh. Sorted by emp_p.
+#' @return data.frame in LONG form, one row per (candidate x test), with a
+#'   leading `test` column then: gene, min_p, best_pathway, best_pathway_size,
+#'   n_pathways, profile, stratum, n_null, n_null_le, emp_p, emp_p_bh (BH
+#'   computed WITHIN each test as its own family). Sorted by test, then emp_p.
+#'   Split downstream with res[res$test == "leading_edge", ] etc.
 minp_size_matched_test <- function(candidates,
                                    fgsea_res,
                                    pathway_list,
@@ -79,7 +102,10 @@ minp_size_matched_test <- function(candidates,
                                    profile_bins = 3,
                                    pathway_col  = "pathway",
                                    p_col        = "pval",
-                                   fgsea_res_g = NULL,
+                                   le_col       = "leadingEdge",
+                                   size_col     = "size",
+                                   tests        = c("set", "leading_edge"),
+                                   fgsea_res_g  = NULL,
                                    min_stratum  = 20,
                                    seed         = NULL) {
 
@@ -87,39 +113,87 @@ minp_size_matched_test <- function(candidates,
     stopifnot(pathway_col %in% names(fr), p_col %in% names(fr))
     candidates <- unique(as.character(candidates))
     universe   <- unique(as.character(universe))
+    tests <- match.arg(tests, c("set", "leading_edge"), several.ok = TRUE)
 
-    # ---- pathway-level lookups: p-value and size class --------------------
+    # ---- pathway-level lookups: p-value and size class (shared) -----------
     sets <- lapply(pathway_list, function(g) unique(as.character(g)))
-    path_size  <- vapply(sets, length, integer(1))
     path_pval  <- setNames(as.numeric(fr[[p_col]]), fr[[pathway_col]])
-    # size class per pathway (integer 1..K); K = length(size_breaks)-1
+
+    # Pathway SIZE must be the EFFECTIVE size fgsea used -- the count of set
+    # members present in the ranked list (post-intersection), which is what
+    # minSize/maxSize filtered on -- NOT the full annotation size. fgsea reports
+    # it in `size_col`; use that so path_size, size_breaks, and the fgsea filter
+    # all refer to the same quantity. Fall back to annotation length only if the
+    # column is absent (warns: this reintroduces the annotation-vs-effective
+    # mismatch and can misplace/drop pathways in the size profile).
+    if (size_col %in% names(fr)) {
+        path_size <- setNames(as.integer(fr[[size_col]]), fr[[pathway_col]])
+        # pathways in pathway_list but not in fr (untested) have no effective
+        # size; leave NA so they are excluded from size classing consistently.
+        miss <- setdiff(names(sets), names(path_size))
+        if (length(miss)) path_size[miss] <- NA_integer_
+        path_size <- path_size[names(sets)]
+    } else {
+        warning("size_col '", size_col, "' not in fgsea_res; falling back to ",
+                "annotation gene-set length. This can differ from fgsea's ",
+                "effective (post-intersection) size and misplace pathways in ",
+                "the size profile -- pass fgsea's `size` column for consistency.")
+        path_size <- vapply(sets, length, integer(1))
+    }
     size_class <- as.integer(cut(path_size, breaks = size_breaks,
                                  include.lowest = TRUE, labels = FALSE))
     names(size_class) <- names(sets)
     n_class <- length(size_breaks) - 1L
     class_labels <- paste0("nsize", seq_len(n_class))
 
-    # ---- invert to gene -> pathways (restricted to the universe+candidates) -
     keep_genes <- union(universe, candidates)
-    glen <- lengths(sets)
-    long_gene <- unlist(sets, use.names = FALSE)
-    long_path <- rep(names(sets), times = glen)
-    inuniv <- long_gene %in% keep_genes
-    g2p <- split(long_path[inuniv], long_gene[inuniv])
 
-    # ---- per-gene: min_p, best pathway, and size-class profile ------------
-    # per-gene stats. `pvsource` is a named pathway->pval vector: the ORIGINAL
-    # path_pval for null-pool genes, or a candidate's leave-one-out-overlaid
-    # vector for a candidate. Size profile is p-value-independent (from sizes).
-    per_gene <- function(gene, pvsource) {
-        paths <- g2p[[gene]]
+    # ---- invert a membership definition to gene -> pathways ---------------
+    # (restricted to universe+candidates). Used for both bases.
+    build_g2p <- function(memb_sets) {
+        glen <- lengths(memb_sets)
+        long_gene <- unlist(memb_sets, use.names = FALSE)
+        long_path <- rep(names(memb_sets), times = glen)
+        inuniv <- long_gene %in% keep_genes
+        split(long_path[inuniv], long_gene[inuniv])
+    }
+
+    g2p_set <- build_g2p(sets)
+
+    # leading-edge membership map (parsed from le_col), if the test is on
+    g2p_le <- NULL
+    if ("leading_edge" %in% tests) {
+        if (!(le_col %in% names(fr))) {
+            warning(sprintf("leading_edge test requested but column '%s' is not "
+                            , le_col),
+                    "in fgsea_res; skipping the leading_edge test.")
+            tests <- setdiff(tests, "leading_edge")
+        } else {
+            le_raw <- fr[[le_col]]
+            if (is.list(le_raw)) {
+                le <- lapply(le_raw, function(g) unique(as.character(g)))
+            } else {
+                le <- lapply(strsplit(as.character(le_raw), "[,;|[:space:]]+"),
+                             function(g) unique(g[nzchar(g)]))
+            }
+            names(le) <- fr[[pathway_col]]
+            le <- le[names(le) %in% names(sets)]     # size known for these only
+            g2p_le <- build_g2p(le)
+        }
+    }
+    if (length(tests) == 0L)
+        stop("no tests to run (leading_edge requested but ", le_col,
+             " absent, and 'set' not selected).")
+
+    # ---- per-gene statistic under a given gene->pathway map ---------------
+    per_gene <- function(gene, g2p_x, pvsource) {
+        paths <- g2p_x[[gene]]
         if (is.null(paths) || length(paths) == 0) {
             prof <- setNames(integer(n_class), class_labels)
             return(list(min_p = NA_real_, best = NA_character_,
                         best_size = NA_integer_, npath = 0L, prof = prof))
         }
         pv <- pvsource[paths]
-        # size-class profile counts
         sc <- size_class[paths]
         prof <- setNames(tabulate(sc, nbins = n_class), class_labels)
         ok <- !is.na(pv)
@@ -135,8 +209,8 @@ minp_size_matched_test <- function(candidates,
              prof  = prof)
     }
 
-    # p-value source for a candidate: original path_pval, with the candidate's
-    # leave-one-out run overlaid where provided (full re-run or partial patch).
+    # p-value source for a candidate: original path_pval with its leave-one-out
+    # run overlaid where provided (full re-run or partial patch). p-values only.
     get_cand_pvsource <- function(gene) {
         if (is.null(fgsea_res_g)) return(path_pval)
         tab <- if (is.data.frame(fgsea_res_g)) {
@@ -153,89 +227,94 @@ minp_size_matched_test <- function(candidates,
         src
     }
 
-    # compute for the whole universe (null pool) -- always the ORIGINAL run
-    univ_genes <- names(g2p)
-    univ_genes <- univ_genes[univ_genes %in% universe]
-    up <- lapply(univ_genes, per_gene, pvsource = path_pval)
-    univ <- data.frame(
-        gene  = univ_genes,
-        min_p = vapply(up, `[[`, numeric(1), "min_p"),
-        npath = vapply(up, `[[`, integer(1), "npath"),
-        stringsAsFactors = FALSE
-    )
-    prof_mat <- do.call(rbind, lapply(up, `[[`, "prof"))
-    colnames(prof_mat) <- class_labels
-    univ <- cbind(univ, prof_mat)
-
-    # ---- build matching strata from size-class counts (ties kept together) -
-    # value-based bins per axis: equal counts always share a bin.
-    make_axis_bin <- function(x, b) {
-        br <- unique(stats::quantile(x, probs = seq(0, 1, length.out = b + 1),
-                                     na.rm = TRUE))
-        if (length(br) < 2) return(rep(1L, length(x)))
-        as.integer(cut(x, breaks = br, include.lowest = TRUE, labels = FALSE))
-    }
-    axis_bins <- lapply(class_labels, function(cl) make_axis_bin(univ[[cl]], profile_bins))
-    names(axis_bins) <- class_labels
-    # also need bin assignment as a FUNCTION of a count, to place candidates in
-    # the same scheme; recover per-axis breakpoints and reuse.
-    axis_breaks <- lapply(class_labels, function(cl) {
-        br <- unique(stats::quantile(univ[[cl]], probs = seq(0, 1, length.out = profile_bins + 1),
-                                     na.rm = TRUE))
-        if (length(br) < 2) NULL else br
-    })
-    names(axis_breaks) <- class_labels
-    assign_axis_bin <- function(value, cl) {
-        br <- axis_breaks[[cl]]
-        if (is.null(br)) return(1L)
-        b <- as.integer(cut(value, breaks = br, include.lowest = TRUE, labels = FALSE))
-        if (is.na(b)) b <- if (value <= br[1]) 1L else (length(br) - 1L)  # clamp
-        b
-    }
-    univ$stratum <- do.call(paste, c(lapply(class_labels, function(cl) axis_bins[[cl]]), sep = "|"))
-
-    # exclude candidates from the null pool, and drop genes with undefined min_p
-    null_pool <- univ[!(univ$gene %in% candidates) & !is.na(univ$min_p), , drop = FALSE]
-
-    # ---- score each candidate ---------------------------------------------
-    out <- vector("list", length(candidates))
-    for (i in seq_along(candidates)) {
-        g <- candidates[i]
-        pg <- per_gene(g, pvsource = get_cand_pvsource(g))
-
-        # candidate's matching stratum, using the same per-axis binning
-        cand_bins <- vapply(class_labels, function(cl)
-            assign_axis_bin(pg$prof[[cl]], cl), integer(1))
-        cand_stratum <- paste(cand_bins, collapse = "|")
-
-        pool <- null_pool[null_pool$stratum == cand_stratum, , drop = FALSE]
-        n_null <- nrow(pool)
-        prof_str <- paste(sprintf("%s=%d", class_labels, pg$prof), collapse = ", ")
-
-        if (is.na(pg$min_p)) {
-            emp_p <- NA_real_; n_le <- NA_integer_
-        } else {
-            n_le  <- sum(pool$min_p <= pg$min_p)
-            emp_p <- (1 + n_le) / (1 + n_null)
-        }
-
-        row <- data.frame(
-            gene = g, min_p = pg$min_p, best_pathway = pg$best,
-            best_pathway_size = pg$best_size, n_pathways = pg$npath,
-            profile = prof_str, stratum = cand_stratum,
-            n_null = n_null, n_null_le = n_le, emp_p = emp_p,
+    # ---- score all candidates under one membership basis ------------------
+    score_membership <- function(g2p_x, label) {
+        # null-pool per-gene stats -- ALWAYS the original run
+        univ_genes <- names(g2p_x)
+        univ_genes <- univ_genes[univ_genes %in% universe]
+        up <- lapply(univ_genes, per_gene, g2p_x = g2p_x, pvsource = path_pval)
+        univ <- data.frame(
+            gene  = univ_genes,
+            min_p = vapply(up, `[[`, numeric(1), "min_p"),
+            npath = vapply(up, `[[`, integer(1), "npath"),
             stringsAsFactors = FALSE
         )
-        if (!is.na(emp_p) && n_null < min_stratum) {
-            warning(sprintf("candidate %s: matched null pool = %d (< min_stratum=%d); "
-                            , g, n_null, min_stratum),
-                    "empirical p may be unstable -- consider coarser size_breaks/profile_bins.")
+        prof_mat <- do.call(rbind, lapply(up, `[[`, "prof"))
+        colnames(prof_mat) <- class_labels
+        univ <- cbind(univ, prof_mat)
+
+        # matching strata from size-class counts (ties together), THIS basis
+        make_axis_bin <- function(x, b) {
+            br <- unique(stats::quantile(x, probs = seq(0, 1, length.out = b + 1),
+                                         na.rm = TRUE))
+            if (length(br) < 2) return(rep(1L, length(x)))
+            as.integer(cut(x, breaks = br, include.lowest = TRUE, labels = FALSE))
         }
-        out[[i]] <- row
+        axis_bins <- lapply(class_labels, function(cl) make_axis_bin(univ[[cl]], profile_bins))
+        names(axis_bins) <- class_labels
+        axis_breaks <- lapply(class_labels, function(cl) {
+            br <- unique(stats::quantile(univ[[cl]], probs = seq(0, 1, length.out = profile_bins + 1),
+                                         na.rm = TRUE))
+            if (length(br) < 2) NULL else br
+        })
+        names(axis_breaks) <- class_labels
+        assign_axis_bin <- function(value, cl) {
+            br <- axis_breaks[[cl]]
+            if (is.null(br)) return(1L)
+            b <- as.integer(cut(value, breaks = br, include.lowest = TRUE, labels = FALSE))
+            if (is.na(b)) b <- if (value <= br[1]) 1L else (length(br) - 1L)
+            b
+        }
+        univ$stratum <- do.call(paste, c(lapply(class_labels, function(cl) axis_bins[[cl]]), sep = "|"))
+
+        null_pool <- univ[!(univ$gene %in% candidates) & !is.na(univ$min_p), , drop = FALSE]
+
+        out <- vector("list", length(candidates))
+        for (i in seq_along(candidates)) {
+            g <- candidates[i]
+            pg <- per_gene(g, g2p_x = g2p_x, pvsource = get_cand_pvsource(g))
+
+            cand_bins <- vapply(class_labels, function(cl)
+                assign_axis_bin(pg$prof[[cl]], cl), integer(1))
+            cand_stratum <- paste(cand_bins, collapse = "|")
+
+            pool <- null_pool[null_pool$stratum == cand_stratum, , drop = FALSE]
+            n_null <- nrow(pool)
+            prof_str <- paste(sprintf("%s=%d", class_labels, pg$prof), collapse = ", ")
+
+            if (is.na(pg$min_p)) {
+                emp_p <- NA_real_; n_le <- NA_integer_
+            } else {
+                n_le  <- sum(pool$min_p <= pg$min_p)
+                emp_p <- (1 + n_le) / (1 + n_null)
+            }
+
+            row <- data.frame(
+                test = label, gene = g, min_p = pg$min_p, best_pathway = pg$best,
+                best_pathway_size = pg$best_size, n_pathways = pg$npath,
+                profile = prof_str, stratum = cand_stratum,
+                n_null = n_null, n_null_le = n_le, emp_p = emp_p,
+                stringsAsFactors = FALSE
+            )
+            if (!is.na(emp_p) && n_null < min_stratum) {
+                warning(sprintf("[%s] candidate %s: matched null pool = %d (< min_stratum=%d); "
+                                , label, g, n_null, min_stratum),
+                        "empirical p may be unstable -- consider coarser size_breaks/profile_bins.")
+            }
+            out[[i]] <- row
+        }
+        res <- do.call(rbind, out)
+        res$emp_p_bh <- p.adjust(res$emp_p, method = "BH")   # BH within this test
+        res
     }
-    res <- do.call(rbind, out)
-    res$emp_p_bh <- p.adjust(res$emp_p, method = "BH")
-    res <- res[order(res$emp_p, na.last = TRUE), , drop = FALSE]
+
+    # ---- run the requested tests and stack them ---------------------------
+    parts <- list()
+    if ("set" %in% tests)          parts[["set"]]          <- score_membership(g2p_set, "set")
+    if ("leading_edge" %in% tests) parts[["leading_edge"]] <- score_membership(g2p_le, "leading_edge")
+
+    res <- do.call(rbind, parts)
+    res <- res[order(res$test, res$emp_p, na.last = TRUE), , drop = FALSE]
     rownames(res) <- NULL
     res
 }
