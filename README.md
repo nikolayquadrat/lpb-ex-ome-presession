@@ -530,7 +530,7 @@ cibersortx/fractions --username xxxxx@xxx --token xxxxxxxx \
 
 **r09_deconv_all** (aggregator) — A no-output target listing all the stage's outputs, so the rule `r09_deconv_all` builds the whole deconvolution stage. Resolves to nothing when the stage is disabled.
 
-**Cell composition assessment for donor samples using output of the rules r08/r09**
+**Cell composition assessment for donor samples using output of the rules r08/r09**<br>
 *scripts/lpb-post-drop-cell-type-assessment.R*<br> Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
 <img src="images/cell_type.png" alt="Cell types by samples" width="35%"><br>
 
@@ -555,15 +555,24 @@ flowchart LR
 	E["Exome data\nVCF"]
 	R["Individual RNA-seq data\nBAM"]
 	GTEx["External RNA-seq data\ncount matrix"]
-	OUTRIDER["OUTRIDER\nAberrant Expression"]
-	FRASER["FRASER\nAberrant Splicing"]
-	MAE["MAE\nMono-allelic expression"]
+
+	subgraph BLOCK["DROP modules"]
+        direction TB
+        MAE["MAE<br/>Mono-allelic expression"]
+        FRASER["FRASER<br/>Aberrant Splicing"]
+        OUTRIDER["OUTRIDER<br/>Aberrant Expression"]
+    end
 	
 	R --> OUTRIDER
 	GTEx --> OUTRIDER
 	R --> FRASER
 	R --> MAE
 	E --> MAE
+
+	classDef box fill:#222,stroke:#999,color:#fff;
+    class E,R,GTEx,MAE,FRASER,OUTRIDER box;
+
+    style BLOCK fill:none,stroke:#4783c5ff,stroke-width:4px,color:#4783c5ff;
 ```
 
 Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andrade, Leonhard Wachutka, Laure Frésard, Mirjana Gusic, et al. 2021.
@@ -604,16 +613,17 @@ Helpful notes:
 - for the external counts matrix, set "geneID" as a gene identifier name.
 
 ## IV. System analysis on top of the OUTRIDER results
+OUTRIDER’s results can be used to look into which biological processes tend to contain unusually expressed genes in a particular sample similar to how it is usually done by measuring how differential expression effects of individual genes concentrate in defined biological pathways.
 
 ### First pass
 *scripts/lpb-post-drop-outrider-1st-pass.R*<br>
 Initial GSEA of the OUTRIDER results.<br>
 
 Helper functions:<br>
-*scripts/lpb-post-drop-fgsea-emap.R* -- similar to `enrichplot::emapplot`.<br>
+*scripts/lpb-post-drop-fgsea-emap.R* -- similar to the `emapplot()` function from (`enrichplot`)[https://doi.org/10.18129/B9.bioc.enrichplot].<br>
 <img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="35%"><br>
 
-*scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* -- similar to `fgsea::plotGseaTable` that prints GSEA results table with tier-gene highlights.<br>
+*scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* -- similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
 <img src="images/ba9_gtex_SZ07_gsea_hallmark_plot.png" alt="Compact GSEA visualisation" width="35%"><br>
 
 ### Second pass
@@ -626,11 +636,10 @@ The empirical significance of each candidate is computed as the fraction of stra
 
 To prevent circularity, whereby a gene that drives its own pathways' enrichment would vouch for itself, the enrichment analysis used to score each candidate is recomputed with that gene removed from the ranking (leave-one-out), while the background pool is scored on the original analysis (*this leave-one-out procedure is the key difference from the first-pass analysis*); gene-set membership is left intact throughout.
 
-Helper function:
 *scripts/lpb-post-drop-minp-size-matched-test.R*<br> The core function of the analysis.
 
 ### Third pass
-Tests whether cell-type-independent GSEA enrichment is present in a specific donor.
+Tests whether cell-type-independent GSEA enrichment is present in a specific donor.<br>
 *scripts/lpb-post-drop-outrider-3rd-pass.R*<br>
 Helper function:
 *scripts/lpb-post-drop-donor-specificity-table.R*. Displays the top enriched GSEA pathways with the largest NES differences between a specific donor and the other donors. Pathways are grouped into categories.<br>

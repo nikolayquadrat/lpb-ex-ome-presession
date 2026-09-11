@@ -444,7 +444,7 @@ SEX_XIST_CPM_MIN = 10.0
 SEX_Y_CPM_MIN    = 20.0
 
 # -----------------------------------------------------------------------------
-# Cell-composition marker scoring (RNA-seq)
+# Cell-composition marker scoring (RNA-seq) / r08 rules
 # -----------------------------------------------------------------------------
 # Purpose: a cheap, reference-free check on whether a sample's neuron:glia
 # balance is an outlier. This is the first-pass answer to "is an apparent
@@ -456,33 +456,31 @@ SEX_Y_CPM_MIN    = 20.0
 # METHOD. Per gene: CPM from unique reads over the gene span -> log2(CPM+1) ->
 # z-score ACROSS SAMPLES WITHIN A REGION. Per cell type: mean of its markers' z.
 #
-# CIRCULARITY -- the key design point. The canonical neuronal markers
-# (SNAP25, SYT1, SYN1, STMN2) are MEMBERS of the synaptic GO terms under test.
-# Scoring neurons with them would re-measure the enriched signal and could not
-# distinguish composition from biology. So:
-#   - the neuron panel below is deliberately NON-SYNAPTIC (nuclear,
-#     cytoskeletal, metabolic);
-#   - the GLIAL panels are the clean evidence: none of these genes appear in
-#     the enriched synaptic sets, so a low glial score is independent support
-#     for the composition explanation.
 # NB: SOX10 is a canonical OPC/oligodendrocyte marker but is ALSO a VUS
 # candidate gene in this study. It is deliberately omitted so the
 # composition check stays independent of candidate evaluation.
 
+# delete the 04_qc/cellcomp folder after applying any changes
+
 CELL_MARKER_GENES = {
-    # non-synaptic neuronal markers:
-    "neuron":          ["RBFOX3", "MAP2", "NEFL", "NEFM", "NEFH", "TUBB3", "ENO2", "INA"],
-    # glial markers: 
-    "astrocyte":       ["GFAP", "AQP4", "SLC1A2", "SLC1A3", "ALDH1L1", "SOX9", "S100B"],
-    "oligodendrocyte": ["MBP", "PLP1", "MOG", "MAG", "CNP", "MOBP", "CLDN11"],
-    "opc":             ["PDGFRA", "CSPG4", "OLIG1", "OLIG2"],
-    "microglia":       ["CSF1R", "AIF1", "P2RY12", "CX3CR1", "C1QA", "C1QB", "TMEM119"],
-    "endothelial":     ["CLDN5", "FLT1", "PECAM1", "VWF"],
+    # neuronal markers:
+    "neuron": ["RBFOX3", "MAP2", "NEFL", "NEFM", "NEFH", "INA", "ELAVL3", "ELAVL4"], # non-synaptic
+
+    # non-neuronal markers: 
+    "astrocyte":       ["GFAP", "AQP4", "SLC1A2", "SLC1A3", "ALDH1L1", "GJA1", "GLUL"],
+    "oligodendroglial": ["OLIG1", "OLIG2", "PLP1", "CNP", "MBP", "MOG", "MAG", "MOBP", "CLDN11"], # mature + OPC
+    "endothelial":     ["CLDN5", "FLT1", "PECAM1", "VWF", "CDH5", "PTPRB"],
+    "mural":           ["RGS5", "PDGFRB", "KCNJ8", "ABCC9", "HIGD1B", "NOTCH3", "MYH11"], # pericytes, VSMC
+    "fibroblast":      ["DCN", "LUM", "COL1A1", "COL1A2", "COL3A1", "COL5A1", "COL5A2", "COL15A1"], # brain/perivascular fibroblasts
+    "microglia":       ["P2RY12", "TMEM119", "SALL1", "GPR34", "HEXB"],
+    "ependymal":       ["FOXJ1","PIFO", "TPPP3", "RSPH1", "FAM183A", "CCDC153", "SNTN"],
+    "bam_macrophage":  ["MRC1", "CD163", "LYVE1", "F13A1", "MS4A7", "STAB1"],
+    "choroid_plexus":  ["TTR", "FOLR1", "OTX2", "CLIC6", "KRT18", "AQP1"],
+
     # additional markers:
     "ruzicka24_down": ["BSN", "SHANK2", "RASGRF1", "NEURL1", "PSEN1", "BCR"],
     "fromer16_up":    ["TACR3", "HGF", "C3orf52", "MC4R", "ADCYAP1", "MST1L", "BEND4", "SCN9A", "TMEM26", "BIRC3"],
     "fromer16_down":  ["IGF2", "RERGL", "HPSE2", "SLCO2A1", "CLEC3B", "RAMP2", "ITIH2", "COL5A3", "SELPLG", "ALDH1A1"],
-    "synaptic_readout": ["SNAP25", "SYT1", "SYN1", "DLG4", "STMN2"],
     "bowen19_type2_up": ["BAG3", "MT1X", "ANGPTL4", "F3", "PDK4", "EMP1", "ADM", "YBX3",
         "IFITM3", "EFEMP1", "CEBPD", "APOLD1", "IFITM2", "DDIT4", "CD44", "FGF2", "SOX9",
         "PLPP3", "SLC16A9", "MT2A", "BMPR1B", "NTRK2", "PLSCR4", "RANBP3L" ],
@@ -491,6 +489,20 @@ CELL_MARKER_GENES = {
         "MAP1B", "AP1S1", "VGF", "TRIM23", "ACAT2", "PGAM1", "OPN3"],
     "lanz19_dlpfc_neuronal_down": ["GAD1","PVALB","SST","CXCL12","ATP6V1A","RGS4","CNTNAP2"],
     "cytokine_response_genes": ["IL6", "STAT3", "SOCS3", "IL1RL1","SHC1", "AKT2"],
+    "microglia_activated": ["SPP1", "GPNMB", "LPL", "CST7", "LGALS3", "ITGAX", "CLEC7A", "AXL", "CD68", "CTSB", "CTSD"],
+    "sz07_vascular_depleted": ["VWF", "CD34", "CLEC14A", "ESAM", "NOS3", "ABCB1", "ABCG2", "HSPA12B", "GATA2", "ARHGEF15"],
+    "sz07_neuronal_enriched": ["RTN4R", "FABP3"],
+    "synaptic_readout": [
+        "SYP", "SYN1", "SNAP25", "STX1A", "VAMP2", "SYT1", "SV2A", "BSN", "PCLO", "RIMS1", # presynaptic
+        "DLG4", "HOMER1", "SHANK1", "SHANK2" # postsynaptic
+    ],
+    "fibroblast_core": ["DCN", "LUM", "APOD", "COL15A1", "FBLN1"],
+    "endothelial_core": ["CLDN5", "PECAM1", "CDH5", "PTPRB", "FLT1"],
+    "endothelial_activation": ["ICAM1","VCAM1","SELE","SELP","ANGPT2","MCAM"],
+    "bbb_transport": ["ABCB1", "ABCG2", "MFSD2A","SLC2A1", "SLC7A5"],
+    "fibrotic_ecm": ["COL1A1","COL1A2","COL3A1","COL5A1","COL5A2","COL6A1", "COL6A2"],
+    "endmt": ["FN1","VIM","SNAI1","SNAI2","TWIST1","ZEB1","ZEB2"],
+    "fibromyocyte": ["CCL19", "IGFBP5", "KCNT2"],
 }
 
 # =============================================================================
@@ -624,14 +636,14 @@ rule all:
         "/tmp/data/04_qc/00_inferred_sex.tsv",
         "/tmp/data/04_qc/00_cell_marker_expression.tsv",
         "/tmp/data/04_qc/00_expression_summary.xlsx",
-        ((expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
-          + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
-                   ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [])
-        + ((expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/refsample.txt",
-                   ref=DECONV_REFERENCES)
-            + expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/mixture.txt",
-                     ref=DECONV_REFERENCES))
-           if (DECONV_ACTIVE and DECONV_CIBERSORTX) else []),
+        # ((expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
+        #   + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
+        #            ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [])
+        # + ((expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/refsample.txt",
+        #            ref=DECONV_REFERENCES)
+        #     + expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/mixture.txt",
+        #              ref=DECONV_REFERENCES))
+        #    if (DECONV_ACTIVE and DECONV_CIBERSORTX) else []),
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
