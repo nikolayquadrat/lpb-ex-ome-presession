@@ -36,11 +36,12 @@ signed_consensus <- function(z) {
     if (all(z == 0))
         return(0)
     
-    min_effect <- min(abs(z))
+    effect <- min(abs(z))
+    
     net_effect <- sum(z)
     concordance <- abs(net_effect) / sum(abs(z))
     
-    sign(net_effect) * min_effect * concordance
+    sign(net_effect) * effect * concordance
 }
 # "Size-matching" bins function ======== 
 source(sprintf("%s/scripts/lpb-post-drop-minp-size-matched-test.R", git_folder))
