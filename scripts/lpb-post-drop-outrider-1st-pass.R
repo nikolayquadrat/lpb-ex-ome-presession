@@ -30,15 +30,36 @@ exome_name <- "e1-19"
 
 # Functions ========
 # **** ranking function -----------
-signed_min_abs <- function(x, shrink_discordant = TRUE) {
-    x <- x[!is.na(x)]
-    if (length(x) == 0) return(NA_real_)
-    val <- x[which.min(abs(x))]
-    if (shrink_discordant && length(unique(sign(x[x != 0]))) > 1) {
-        # strong symmetric discordance -> damp toward zero by the disagreement
-        val <- val * (1 - min(abs(x)) / max(abs(x)))
-    }
-    val
+signed_consensus <- function(z) {
+    z <- z[!is.na(z)]
+    
+    if (length(z) == 0)
+        return(NA_real_)
+    
+    if (all(z == 0))
+        return(0)
+    
+    effect <- min(abs(z))
+    
+    net_effect <- sum(z)
+    concordance <- abs(net_effect) / sum(abs(z))
+    
+    sign(net_effect) * effect * concordance
+}
+
+signed_geometric_score <- function(z) { # alternative (not used here) for different n comparison but less conservative
+    z <- z[!is.na(z)]
+    
+    if (length(z) == 0)
+        return(NA_real_)
+    
+    if (any(z == 0))
+        return(0)
+    
+    magnitude <- exp(mean(log(abs(z))))
+    concordance <- sum(z) / sum(abs(z))
+    
+    magnitude * concordance
 }
 
 # **** custom GSEA plotting functions -------
@@ -111,7 +132,7 @@ for(exp in names(experiments)) {
                 numeric(nrow(donor_z))
             )
         }
-        donor_combined <- apply(donor_z, 1, signed_min_abs)
+        donor_combined <- apply(donor_z, 1, signed_consensus)
         gene_ranks <- data.frame(
             ensembl_id = rownames(donor_z),
             hgnc       = ensg_to_hgnc[sub("\\..*$", "", rownames(donor_z))],

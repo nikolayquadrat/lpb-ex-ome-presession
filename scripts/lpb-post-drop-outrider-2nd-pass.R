@@ -27,15 +27,20 @@ exome_name <- "e1-19"
 
 # Functions ========
 # **** ranking function -----------
-signed_min_abs <- function(x, shrink_discordant = TRUE) {
-    x <- x[!is.na(x)]
-    if (length(x) == 0) return(NA_real_)
-    val <- x[which.min(abs(x))]
-    if (shrink_discordant && length(unique(sign(x[x != 0]))) > 1) {
-        # strong symmetric discordance -> damp toward zero by the disagreement
-        val <- val * (1 - min(abs(x)) / max(abs(x)))
-    }
-    val
+signed_consensus <- function(z) {
+    z <- z[!is.na(z)]
+    
+    if (length(z) == 0)
+        return(NA_real_)
+    
+    if (all(z == 0))
+        return(0)
+    
+    min_effect <- min(abs(z))
+    net_effect <- sum(z)
+    concordance <- abs(net_effect) / sum(abs(z))
+    
+    sign(net_effect) * min_effect * concordance
 }
 # "Size-matching" bins function ======== 
 source(sprintf("%s/scripts/lpb-post-drop-minp-size-matched-test.R", git_folder))
@@ -111,7 +116,7 @@ for (tier_gene in tier_genes) {
         for (donor in names(list_of_samples)) {
             # donor <- "SZ07"
             donor_z <- zScore(ods)[, list_of_samples[[donor]], drop = FALSE]
-            donor_combined <- apply(donor_z, 1, signed_min_abs)
+            donor_combined <- apply(donor_z, 1, signed_consensus)
             gene_ranks <- data.frame(
                 ensembl_id = rownames(donor_z),
                 hgnc       = ensg_to_hgnc[sub("\\..*$", "", rownames(donor_z))],
