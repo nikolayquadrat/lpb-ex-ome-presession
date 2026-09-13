@@ -78,6 +78,23 @@
 #'                    but this column is absent, that test is skipped (warning).
 #' @param tests      Which test(s) to run: any of "set","leading_edge"
 #'                    (default both).
+#' @param le_sig_col Column in `fgsea_res` used to gate which pathways may
+#'                    contribute LEADING-EDGE membership, so that only ENRICHED
+#'                    pathways count (default "padj"). A leading edge from a
+#'                    non-enriched pathway (p ~ 1) is meaningless; because the
+#'                    FULL fgsea table is passed for effective sizes, it also
+#'                    holds such pathways, and without this gate a candidate
+#'                    would be scored as "driving" them. Pathways with
+#'                    le_sig_col <= le_sig_threshold contribute leading edges;
+#'                    others are dropped from the leading-edge map only (they
+#'                    remain in the size profile). Set NULL to disable the gate
+#'                    (not recommended; warns). Affects the leading_edge test
+#'                    only; the set test is unchanged.
+#' @param le_sig_threshold Cutoff applied to le_sig_col (default 0.05).
+#' @param le_direction Restrict leading-edge pathways by enrichment sign, using
+#'                    the NES (or ES) column: "any" (default), "pos" (only
+#'                    positively-enriched), or "neg". Use when your ranking is
+#'                    signed and you only want drivers of one tail.
 #' @param fgsea_res_g Optional per-candidate leave-one-out enrichment, used ONLY
 #'                    to score the candidate's own min-p (never the null pool).
 #'                    Single data.frame (applied to every candidate) or a named
@@ -103,6 +120,9 @@ minp_size_matched_test <- function(candidates,
                                    pathway_col  = "pathway",
                                    p_col        = "pval",
                                    le_col       = "leadingEdge",
+                                   le_sig_col       = "padj",
+                                   le_sig_threshold = 0.05,
+                                   le_direction     = "any",
                                    size_col     = "size",
                                    tests        = c("set", "leading_edge"),
                                    fgsea_res_g  = NULL,
@@ -169,16 +189,59 @@ minp_size_matched_test <- function(candidates,
                     "in fgsea_res; skipping the leading_edge test.")
             tests <- setdiff(tests, "leading_edge")
         } else {
-            le_raw <- fr[[le_col]]
+            # A leading edge is only meaningful for an ENRICHED pathway. When the
+            # full fgsea table is passed (needed for effective sizes), it also
+            # contains non-enriched pathways (p ~ 1) whose "leading edge" is
+            # noise -- a candidate must NOT be counted as driving those. Gate the
+            # pathways that contribute leading-edge membership to the enriched
+            # set: significance (le_sig_col <= le_sig_threshold) and, optionally,
+            # NES direction. Pathways failing the gate are dropped from g2p_le
+            # (but remain in the size profile via g2p_set / path_size).
+            enr <- rep(TRUE, nrow(fr))
+            if (!is.null(le_sig_col)) {
+                if (le_sig_col %in% names(fr)) {
+                    enr <- enr & !is.na(fr[[le_sig_col]]) &
+                        as.numeric(fr[[le_sig_col]]) <= le_sig_threshold
+                } else {
+                    warning("le_sig_col '", le_sig_col, "' not in fgsea_res; ",
+                            "leading-edge membership will NOT be significance-",
+                            "filtered -- non-enriched pathways may contribute ",
+                            "spurious leading edges. Pass the significant-",
+                            "pathway p/padj column, or set le_sig_col=NULL to ",
+                            "silence this.")
+                }
+            }
+            if (!is.null(le_direction) && le_direction != "any") {
+                nes_col <- if ("NES" %in% names(fr)) "NES" else
+                           if ("ES" %in% names(fr)) "ES" else NA_character_
+                if (is.na(nes_col)) {
+                    warning("le_direction='", le_direction, "' requested but no ",
+                            "NES/ES column in fgsea_res; ignoring direction.")
+                } else {
+                    v <- as.numeric(fr[[nes_col]])
+                    enr <- enr & !is.na(v) &
+                        (if (le_direction == "pos") v > 0 else v < 0)
+                }
+            }
+
+            le_raw <- fr[[le_col]][enr]
+            le_paths <- fr[[pathway_col]][enr]
             if (is.list(le_raw)) {
                 le <- lapply(le_raw, function(g) unique(as.character(g)))
             } else {
                 le <- lapply(strsplit(as.character(le_raw), "[,;|[:space:]]+"),
                              function(g) unique(g[nzchar(g)]))
             }
-            names(le) <- fr[[pathway_col]]
+            names(le) <- le_paths
             le <- le[names(le) %in% names(sets)]     # size known for these only
             g2p_le <- build_g2p(le)
+            message(sprintf("[minp] leading_edge test: %d of %d pathways pass the "
+                            , sum(enr), nrow(fr)),
+                    sprintf("enrichment gate (%s<=%.3g%s) and contribute leading edges.",
+                            if (is.null(le_sig_col)) "none" else le_sig_col,
+                            le_sig_threshold,
+                            if (!is.null(le_direction) && le_direction != "any")
+                                paste0(", NES ", le_direction) else ""))
         }
     }
     if (length(tests) == 0L)
