@@ -200,17 +200,19 @@ for (tier_gene in tier_genes) {
                            output_folder, exp, donor),
                    emapplot_collapsed, width = 12, height = 9, dpi = 150, bg = "white")
             
-
+            # the workhorse for the analysis
             empirical_p_results <- minp_size_matched_test(
                 candidates   = tier_gene,
-                fgsea_res    = pass1_pathways[, c("pathway", "pval", "size", "leadingEdge")],
+                fgsea_res    = pass1_pathways[, c("pathway", "pval", "padj", "size", "NES", "leadingEdge")],
                 fgsea_res_g  = fgsea_res_sig_uncorrected[, c("pathway", "pval", "size")],  # size optional here
                 pathway_list = pathway_list_unfiltered,
                 universe     = exome_callable_genes_df$gene[exome_callable_genes_df$callable == "yes"],
                 size_breaks  = c(20, 50, 100, 200),
-                profile_bins = 4
+                profile_bins = 4,
+                le_sig_col   = "padj", le_sig_threshold = 0.05,
+                le_direction = "any" # or "pos"/"neg" for one tail's drivers
             )
-            
+
             writexl::write_xlsx(
                 list(
                     "fgsea_res_sig_uncorrected" = fgsea_res_sig_uncorrected[padj < 0.05] %>% mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", ")))),
