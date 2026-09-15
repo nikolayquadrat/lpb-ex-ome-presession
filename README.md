@@ -688,7 +688,7 @@ Helps classify pathways into categories for the figure.<br>
 Third pass with [GSVA](https://doi.org/10.1186/1471-2105-14-7) (a common ssPA method):
 *scripts\lpb-post-drop-gsva-3rd-pass.R*
 
-GSEA with OUTRIDER looks much better than GSVA since OUTRIDER's autoencoder seems to correct for cell composition.
+GSEA with OUTRIDER looks much better than GSVA since OUTRIDER's autoencoder seems to correct for cell composition.<br>
 <img src="images/spec_vs_score_by_method.png" alt="GSVA-vs-OUTRIDER correlations with neuronality" width="35%"><br>
 
 ## AI usage disclosure
