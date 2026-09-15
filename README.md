@@ -630,18 +630,18 @@ It seems that the one that fits all four doesn't exist.<br>
 
 This simple concordance-weighted minimum z-metric for GSEA violates the third condition, but it could be used when the comparison with other cohort members is not necessarily (the first and the second passes):<br>
 
-$$
+```math
 S_{\mathrm{consensus}}(\mathbf z)
 =
 \min_{1\le i\le n}|z_i|
 \;
 \frac{\sum_{i=1}^{n}z_i}
 {\sum_{i=1}^{n}|z_i|}
-$$
+```
 
 Where the cohort comparison is required the concordance-weighted geometric z-metric could be used, but it is worse in terms of the first condition:<br>
 
-$$
+```math
 S_{\mathrm{consensus}}(\mathbf z)
 =
 \left(
@@ -650,7 +650,7 @@ S_{\mathrm{consensus}}(\mathbf z)
 \;
 \frac{\sum_{i=1}^{n}z_i}
 {\sum_{i=1}^{n}|z_i|}
-$$
+```
 
 Since many of my RNA-seq samples were singletons, I just used median for the cohort-based comparison (pass 3).
 
