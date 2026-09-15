@@ -267,7 +267,7 @@ panel2_blocks <- list(
     "BA22p - up (top 5)"  = list(region = "BA22p", dir = "up",   n = 5),
     "BA22p - down (top 5)"= list(region = "BA22p", dir = "down", n = 5))
 
-# **** figure --------
+# **** S5 figure --------
 fig <- plot_gsva_multiregion_table(
     scores_list        = scores_list,
     panel1_pathways    = panel1_pathways,
@@ -277,7 +277,8 @@ fig <- plot_gsva_multiregion_table(
     panel2_blocks      = panel2_blocks,
     panel1_title       = "OUTRIDER significant pathways (replication across regions)",
     panel2_title       = "Region-specific extremes (top 5 up/down by robust z)",
-    deemph_regions     = "BA4",          # n=4, shown but de-emphasised
+    # deemph_regions     = "BA4", # n=4, shown but de-emphasised
+    deemph_regions     = character(0),
     label_fn           = strip_msigdb_prefix,
     label_truncate     = 46,
     render             = TRUE)
@@ -290,20 +291,29 @@ utils::write.csv(fig$data,
                  row.names = FALSE)
 
 # Reconciliation ============
-common <- intersect(gsva_res$pathway[!is.na(gsva_res$pathway_neuronal_score)], # 6190
+outrider <- read_xlsx(sprintf("%s/data/post-drop/trd-pass/ba9_gtex_SZ07_fgsea_results.xlsx", git_folder))
+
+common <- intersect(res_ba9$pathway[!is.na(res_ba9$pathway_neuronal_score)], # 6190
                     outrider$pathway[!is.na(as.numeric(sapply(outrider$pathway, function(x) {pathway_neuronal_score$neuronality[pathway_neuronal_score$pathway == x]})))]
                     )
-cor(gsva_res$pathway_neuronal_score[match(common, gsva_res$pathway)],
-    gsva_res$sz07_score[match(common, gsva_res$pathway)],
+cor(res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
+    res_ba9$sz07_score[match(common, res_ba9$pathway)],
     method="spearman")   # GSVA on common set
 cor(as.numeric(sapply(outrider$pathway[match(common, outrider$pathway)],
                       function(x) {pathway_neuronal_score$neuronality[pathway_neuronal_score$pathway == x]})),
     outrider$NES[match(common, outrider$pathway)],
     method = "spearman")
+cor(res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
+    res_ba9$sz07_score[match(common, res_ba9$pathway)],
+    method="pearson")   # GSVA on common set
+cor(as.numeric(sapply(outrider$pathway[match(common, outrider$pathway)],
+                      function(x) {pathway_neuronal_score$neuronality[pathway_neuronal_score$pathway == x]})),
+    outrider$NES[match(common, outrider$pathway)],
+    method = "pearson")
 # formal test: does the spec-score slope differ between methods?
 long <- rbind(
-    data.frame(spec = gsva_res$pathway_neuronal_score[match(common, gsva_res$pathway)],
-               score = scale(gsva_res$sz07_score[match(common, gsva_res$pathway)]),
+    data.frame(spec = res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
+               score = scale(res_ba9$sz07_score[match(common, res_ba9$pathway)]),
                method = "GSVA"),
     data.frame(spec = as.numeric(sapply(outrider$pathway[match(common, outrider$pathway)],
                                         function(x) {pathway_neuronal_score$neuronality[pathway_neuronal_score$pathway == x]})),
@@ -323,14 +333,21 @@ tapply(outr$spec, outr$band, median)           # median specificity per band
 # -0.3826330 -0.4011843 
 # per-method Spearman rho for panel annotations
 
-# **** Picture ---------
+# **** cor picture (2E) ---------
 outrider_results <- read_xlsx(sprintf("%s/data/post-drop/trd-pass/trd_pass_significant_pathways_fgsea_results.xlsx", git_folder))
+
+long$method <- factor(long$method, levels = c("GSVA", "OUTRIDER"))
+rho <- tapply(seq_len(nrow(long)), long$method, function(i)
+    cor(long$spec[i], long$score[i], method = "spearman", use = "complete.obs"))
+lab <- data.frame(
+    method = factor(names(rho), levels = c("GSVA", "OUTRIDER")),
+    rho    = sprintf("rho == %.2f", rho))
 
 long <- rbind( # unscaled for the figure
     data.frame(
-        pathway =  gsva_res$pathway[match(common, gsva_res$pathway)],
-        spec = gsva_res$pathway_neuronal_score[match(common, gsva_res$pathway)],
-               score = gsva_res$sz07_score[match(common, gsva_res$pathway)],
+        pathway =  res_ba9$pathway[match(common, res_ba9$pathway)],
+        spec = res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
+               score = res_ba9$sz07_score[match(common, res_ba9$pathway)],
                method = "GSVA"),
     data.frame(
         pathway =  outrider$pathway[match(common, outrider$pathway)],
@@ -339,27 +356,20 @@ long <- rbind( # unscaled for the figure
         score = outrider$NES[match(common, outrider$pathway)],
         method = "OUTRIDER")) %>% 
     mutate(outrider_synaptic = case_when(
-        pathway %in% outrider_results$pathway[outrider_results$pathway_group == "Synaptic"] ~ 1,
-        TRUE ~ 0
+        pathway %in% outrider_results$pathway[outrider_results$pathway_group == "Synaptic"] ~ "Synaptic",
+        pathway %in% outrider_results$pathway[outrider_results$pathway_group == "Neurodevelopment & Axonal Repair"] ~ "Neurodevelopment & Axonal Repair",
+        TRUE ~ "Other"
     ))
-
-long$method <- factor(long$method, levels = c("GSVA", "OUTRIDER"))
-
-rho <- tapply(seq_len(nrow(long)), long$method, function(i)
-    cor(long$spec[i], long$score[i], method = "spearman", use = "complete.obs"))
-lab <- data.frame(
-    method = factor(names(rho), levels = c("GSVA", "OUTRIDER")),
-    rho    = sprintf("rho == %.2f", rho))
 
 p_outr <- ggplot(long[long$method == "OUTRIDER",],
             aes(spec, score))+
     geom_hline(yintercept = 0, colour = "grey85", linewidth = 0.3) +
     geom_vline(xintercept = 0, colour = "grey85", linewidth = 0.3) +
     geom_point(alpha = 0.25, size = 0.6, show.legend = FALSE, colour = "grey55") +
-    geom_point(data = long[long$method == "OUTRIDER" & long$outrider_synaptic == 1,],
+    geom_point(data = long[long$method == "OUTRIDER" & long$outrider_synaptic == "Synaptic",],
                aes(spec, score), colour = "#d62728")+
     geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
-                colour = "black", linewidth = 0.8)+
+                colour = "blue", linewidth = 0.8)+
     geom_text(data = lab[lab$method == "OUTRIDER",], aes(label = rho), parse = TRUE,
               x = -Inf, y = Inf, hjust = -0.25, vjust = 1.6, size = 4)+
     labs(
@@ -375,10 +385,10 @@ p_gsva <- ggplot(long[long$method == "GSVA",],
     geom_hline(yintercept = 0, colour = "grey85", linewidth = 0.3) +
     geom_vline(xintercept = 0, colour = "grey85", linewidth = 0.3) +
     geom_point(alpha = 0.25, size = 0.6, show.legend = FALSE, colour = "grey55") +
-    geom_point(data = long[long$method == "GSVA" & long$outrider_synaptic == 1,],
+    geom_point(data = long[long$method == "GSVA" & long$outrider_synaptic == "Synaptic",],
                aes(spec, score), colour = "#d62728")+
     geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
-                colour = "black", linewidth = 0.8)+
+                colour = "blue", linewidth = 0.8)+
     geom_text(data = lab[lab$method == "GSVA",], aes(label = rho), parse = TRUE,
               x = -Inf, y = Inf, hjust = -0.5, vjust = 1.6, size = 4)+
     labs(
@@ -390,8 +400,10 @@ p_gsva <- ggplot(long[long$method == "GSVA",],
     theme(plot.title = element_text(hjust = 0.5))
 
 ggarrange(plotlist = list(p_gsva, p_outr))
-
 ggsave(sprintf("%s/data/post-drop/trd-pass-gsva/spec_vs_score_by_method.png", git_folder),
        width = 8, height = 4, dpi = 300, bg = "white")
+ggarrange(plotlist = list(p_gsva, p_outr), nrow = 2)
+ggsave(sprintf("%s/data/post-drop/trd-pass-gsva/spec_vs_score_by_method_vertical.png", git_folder),
+       width = 3.5, height = 6.5, dpi = 300, bg = "white")
 
 
