@@ -287,7 +287,7 @@ cib_siletti_export <- cib_siletti %>%
     filter(Mixture %in% drop_inner$RNA_ID) %>% 
     left_join(m[, c("sample", "donor", "region")] %>% distinct(),
               by = c("Mixture"="sample")) %>% 
-    select(donor, region, everything()) %>% 
+    dplyr::select(donor, region, everything()) %>% 
     mutate(group = case_when(
         donor == "SZ07" ~ "SZ07",
         grepl("SZ", donor) ~ "SZ",
@@ -296,8 +296,8 @@ cib_siletti_export <- cib_siletti %>%
     )) %>% 
     mutate(group = factor(group, levels = c("SZ07", "SZ", "HC"))) %>% 
     arrange(group, region, donor, Mixture) %>% 
-    rename(Donor=donor, `Brodmann area`=region) %>% 
-    select(-group)
+    dplyr::rename(Donor=donor, `Brodmann area`=region) %>% 
+    dplyr::select(-group)
 writexl::write_xlsx(cib_siletti_export, sprintf("%s/data/rnaseq-pipe/09_deconv/_cibersortx/siletti_cortex/results/CIBERSORTx_Adjusted.xlsx", git_folder))
 
 cib_siletti <- cib_siletti %>% 
@@ -339,7 +339,7 @@ cib_siletti_glia_plus_export <- cib_siletti_glia_plus %>%
     filter(Mixture %in% drop_inner$RNA_ID) %>% 
     left_join(m[, c("sample", "donor", "region")] %>% distinct(),
               by = c("Mixture"="sample")) %>% 
-    select(donor, region, everything()) %>% 
+    dplyr::select(donor, region, everything()) %>% 
     mutate(group = case_when(
         donor == "SZ07" ~ "SZ07",
         grepl("SZ", donor) ~ "SZ",
@@ -348,13 +348,13 @@ cib_siletti_glia_plus_export <- cib_siletti_glia_plus %>%
     )) %>% 
     mutate(group = factor(group, levels = c("SZ07", "SZ", "HC"))) %>% 
     arrange(group, region, donor, Mixture) %>% 
-    rename(Donor=donor, `Brodmann area`=region) %>% 
-    select(-group)
+    dplyr::rename(Donor=donor, `Brodmann area`=region) %>% 
+    dplyr::select(-group)
 writexl::write_xlsx(cib_siletti_glia_plus_export, sprintf("%s/data/rnaseq-pipe/09_deconv/_cibersortx/siletti_glia_plus_supercluster/results/CIBERSORTx_Adjusted.xlsx", git_folder))
 
 cib_siletti_glia_plus <- cib_siletti_glia_plus %>% 
     filter(Mixture %in% drop_inner$RNA_ID) %>% 
-    rename(
+    dplyr::rename(
         COP=Committed.oligodendrocyte.precursor,
         `Bergmann glia` = Bergmann.glia,
         OPC = Oligodendrocyte.precursor,
@@ -363,7 +363,7 @@ cib_siletti_glia_plus <- cib_siletti_glia_plus %>%
     mutate(donor = sub("^(KH\\d+_|)*([^_]+)_.*$", "\\2", Mixture)) %>% 
     mutate(region = sub("^.*_(.*)_.*", "\\1", Mixture)) %>% 
     mutate(OPC=OPC+COP) %>% 
-    select(-COP, -P.value, -Correlation, -RMSE) %>% 
+    dplyr::select(-COP, -P.value, -Correlation, -RMSE) %>% 
     pivot_longer(-c(Mixture, donor, region), names_to = "cell_type", values_to = "prop") %>% 
     group_by(donor, region, cell_type) %>% 
     summarise(
@@ -416,7 +416,7 @@ ggpubr::ggarrange(plotlist = list(markers_plot, grid::nullGrob(), deconv_plot),
                   heights = c(1, 0.085, 0.75),
                   common.legend = TRUE, legend = "right")
 ggsave(sprintf("%s/data/post-drop/cell-type-assessment/cell_type.png", git_folder),
-       width = 12, height = 7, dpi = 300, bg = "white")
+       width = 7, height = 5, dpi = 300, bg = "white")
 
 # individual markers --------
 tpm <- readxl::read_xlsx(sprintf("%s/data/rnaseq-pipe/04_qc/00_expression_summary.xlsx", git_folder))
