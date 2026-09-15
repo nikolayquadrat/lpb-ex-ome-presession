@@ -116,6 +116,26 @@ strip_msigdb_prefix <- function(x) {
 #' @return Invisibly, a list with $grob (the gtable) and $data (the plotted
 #'   rows incl. functional group, gap, z, rank, n_more_extreme and the
 #'   donors-p<SZ07 fraction), so the numbers behind the figure can be reported.
+truncate_words <- function(x, width = 80, min_keep = 3) {
+    vapply(x, function(s) {
+        if (is.na(s) || nchar(s) <= width) return(s)
+        w <- strsplit(s, " ", fixed = TRUE)[[1]]
+        # Fully compress the longest word to its stem + "." , then the next
+        # longest, until the label fits. Compressing one word all the way (rather
+        # than nibbling every word by one char) fits the target with the FEWEST
+        # words touched, so most of the name -- including its tail -- stays intact.
+        repeat {
+            if (nchar(paste(w, collapse = " ")) <= width) break
+            len  <- nchar(w)
+            elig <- which(len > (min_keep + 1) & !grepl("\\.$", w))  # not-yet-stemmed long words
+            if (!length(elig)) break                                  # nothing left to shrink
+            j <- elig[which.max(len[elig])]                           # longest remaining word
+            w[j] <- paste0(substr(w[j], 1, min_keep), ".")            # stem it fully: KEEP+"."
+        }
+        paste(w, collapse = " ")
+    }, character(1), USE.NAMES = FALSE)
+}
+
 plot_donor_specificity_table <- function(
         res,
         donor_ids,
@@ -176,6 +196,7 @@ plot_donor_specificity_table <- function(
         header_lineheight = 0.9,  # <1 tightens the gap between 2-line headers
         header_height     = 1.5,  # height of the header row (raise if top clips)
         label_fn        = NULL,
+        label_truncate  = NULL,
         label_wrap      = NULL,
         label_size      = 7.5,
         shorten_names   = 44,
@@ -435,12 +456,14 @@ plot_donor_specificity_table <- function(
             if (!is.function(label_fn)) stop("label_fn must be a function")
             s <- label_fn(s)
         }
-        if (!is.null(label_wrap)) {
-            # keep the whole label, break it over lines
+        # word-truncation (keeps the name's END visible) takes precedence over
+        # wrapping / end-shortening; the three are mutually-exclusive strategies.
+        if (!is.null(label_truncate))
+            return(truncate_words(s, width = label_truncate))
+        if (!is.null(label_wrap))
             return(vapply(s, function(x)
                 paste(strwrap(x, width = label_wrap), collapse = "\n"),
                 character(1), USE.NAMES = FALSE))
-        }
         if (!is.null(shorten_names))
             s <- ifelse(nchar(s) > shorten_names,
                         paste0(substr(s, 1, shorten_names - 1), "\u2026"), s)

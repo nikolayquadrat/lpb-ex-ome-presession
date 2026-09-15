@@ -46,6 +46,7 @@ source(sprintf("%s/scripts/lpb-post-drop-fgsea-emap.R", git_folder))
 source(sprintf("%s/scripts/lpb-post-drop-outrider-plot-gsea-highlighted.R", git_folder))
 source(sprintf("%s/scripts/lpb-post-drop-donor-specificity-table.R", git_folder))
 source(sprintf("%s/scripts/lpb-post-drop-pathway-composition-correlation.R", git_folder))
+source(sprintf("%s/scripts/lpb-post-drop-classify-pathways.R", git_folder))
 
 # ENSG --> HGNC dictionary ==========
 constraint <- fread(sprintf("%s/data/exome-pipe/data/gnomad_v4.1_constraint_metrics.tsv", git_folder))
@@ -169,13 +170,13 @@ for(exp in names(experiments)) {
                                            edge_source = "gene_sets", color_by = "NES", edge_cutoff = 0.05)
         ggsave(sprintf("%s/data/post-drop/trd-pass/%s_%s_emapplot_all.png",
                        git_folder, exp, donor),
-               emapplot_uncorrected, width = 12, height = 9, dpi = 150, bg = "white")
+               emapplot_uncorrected, width = 15, height = 9, dpi = 300, bg = "white")
         
         emapplot_collapsed   <- fgsea_emap(fgsea_res_sig, pathway_list = pathway_list,
                                            edge_source = "gene_sets", color_by = "NES", edge_cutoff = 0.05)
         ggsave(sprintf("%s/data/post-drop/trd-pass/%s_%s_emapplot_collapsed.png",
                        git_folder, exp, donor),
-               emapplot_collapsed, width = 12, height = 9, dpi = 150, bg = "white")
+               emapplot_collapsed, width = 15, height = 9, dpi = 300, bg = "white")
         
         
         # **** **** tiered genes ----------
@@ -397,16 +398,6 @@ significant_pathways <- significant_pathways %>%
     mutate(across(where(is.list), ~ purrr::map_chr(.x, ~ paste(.x, collapse = ", ")))) %>% 
     arrange(desc(NES_gap))
 
-classify <- function(p) {
-    P <- toupper(p)
-    if (grepl("SYNAP|NEUREXIN|NMDA|POSTSYN|PRESYN|LEARNING|NEUROTRANSMITTER|VESICLE|EXOCYT|IQGAP|PATHWAY_OF_L1|DOPAMINE", P)) return("Synaptic")
-    if (grepl("NEURON_PROJECTION|NERVOUS_SYSTEM_DEVELOPMENT|AXON_GUIDANCE|SPINAL", P)) return("Neurodevelopment & Axonal Repair")
-    if (grepl("RRNA|PRERIBOSOME|RNA_3_END|MRNA_3_END|RIBOSOM|CLEAVAGE_INVOLVED", P)) return("RNA / Ribosome Biogenesis")
-    if (grepl("CALCIUM|ION_TRANSPORT|CHANNEL", P)) return("Calcium")
-    if (grepl("TNFA|INFLAMM|TOLL_LIKE|MYD88|INTERLEUKIN", P)) return("TLR & Cytokine Signalling")
-    if (grepl("COMPLEMENT|TOXINS|HUMORAL_IMMUNE|OXIDATIVE_DAMAGE", P)) return("Humoral/Complement Immunity")
-    "Other"
-}
 pg <- setNames(vapply(significant_pathways$pathway, classify, character(1)), significant_pathways$pathway)
 significant_pathways$pathway_group <- as.vector(pg)
 
@@ -424,7 +415,7 @@ ct <- pathway_composition_correlation(
 writexl::write_xlsx(significant_pathways %>% 
                         dplyr::select(pathway, pathway_group, everything()) %>% 
                         mutate(pathway_group = factor(pathway_group, levels = c(
-                            "Synaptic", "RNA / Ribosome Biogenesis", "Calcium", "TLR & Cytokine Signalling", "Humoral/Complement Immunity", "Neurodevelopment & Axonal Repair", "Other"
+                            "Synaptic", "RNA / Ribosome Biogenesis", "Calcium / Ion Transport", "TLR & Cytokine Signalling", "Humoral/Complement Immunity", "Neurodevelopment & Axonal Repair", "Other"
                         ))) %>% 
                         arrange(pathway_group, desc(NES_gap)),
                     sprintf("%s/data/post-drop/trd-pass/trd_pass_significant_pathways_fgsea_results.xlsx",
@@ -435,12 +426,13 @@ plot_donor_specificity <- plot_donor_specificity_table(
     donor_ids       = names(experiments[[exp]][["samples"]])[names(experiments[[exp]][["samples"]]) != "SZ07"],  # POSITIONAL — see caveat below
     donor_groups    = ifelse(grepl("SZ",names(experiments[[exp]][["samples"]])[names(experiments[[exp]][["samples"]]) != "SZ07"]), "SZ", "HC"), # same order
     pathway_groups  = pg,
-    group_order     = c("Synaptic", "RNA / Ribosome Biogenesis", "Calcium", "TLR & Cytokine Signalling", "Humoral/Complement Immunity", "Neurodevelopment & Axonal Repair", "Other"),
+    group_order     = c("Synaptic", "RNA / Ribosome Biogenesis", "Calcium / Ion Transport", "TLR & Cytokine Signalling", "Humoral/Complement Immunity", "Neurodevelopment & Axonal Repair", "Other"),
     top_n_per_group = c(6, 5, 5, 7, 5, 3, 3),
     rank_by         = "gap", # or "z" / "padj"
     label_fn        = strip_msigdb_prefix,
-    label_wrap      = 80, # keeps the WHOLE name
-    colwidths       = c(9, 1.2, 1.0, 1.3, 5.5),
+    label_truncate = 40,  # compress long labels to <=80 chars
+    label_wrap     = NULL, 
+    colwidths       = c(4.5, 1.2, 1.0, 1.3, 5.5),
     spec_le  = significant_pathways$leading_edge_neuronal_score,   # mean delta_log2 over leading-edge genes
     spec_all = significant_pathways$pathway_neuronal_score,        # mean delta_log2 over whole pathway
     # resid_z  = setNames(ct$sz07_residual_z, ct$pathway), # basically, telling that the SZ07 is an outlier
@@ -448,4 +440,4 @@ plot_donor_specificity <- plot_donor_specificity_table(
 )
 ggplot2::ggsave(sprintf("%s/data/post-drop/trd-pass/plot_donor_specificity_table.png", git_folder),
                 plot = plot_donor_specificity$grob,
-                width = 10, height = 6, dpi = 300)
+                width = 8.5, height = 7, dpi = 300)
