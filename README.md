@@ -628,7 +628,8 @@ Initial GSEA based on the OUTRIDER results. Here you can use a variety of zScore
 
 It seems that the one that fits all four doesn't exist.<br>
 
-This simple concordance-weighted minimum z-metric for GSEA violates the third condition, but it could be used when the comparison with other cohort members is not necessarily (the first and the second passes):
+This simple concordance-weighted minimum z-metric for GSEA violates the third condition, but it could be used when the comparison with other cohort members is not necessarily (the first and the second passes):<br>
+
 $$
 S_{\mathrm{consensus}}(\mathbf z)
 =
@@ -638,7 +639,8 @@ S_{\mathrm{consensus}}(\mathbf z)
 {\sum_{i=1}^{n}|z_i|}
 $$
 
-Where the cohort comparison is required the concordance-weighted geometric z-metric could be used, but it is worse in terms of the first condition:
+Where the cohort comparison is required the concordance-weighted geometric z-metric could be used, but it is worse in terms of the first condition:<br>
+
 $$
 S_{\mathrm{consensus}}(\mathbf z)
 =
