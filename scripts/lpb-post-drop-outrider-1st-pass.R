@@ -74,7 +74,7 @@ ensg_to_hgnc <- setNames(constraint$gene, sub("\\..*$", "", constraint$gene_id))
 # Candidate mutations ======
 tier_mutations <- read.delim(sprintf("%s/data/exome-pipe/fastq/12_tiered/%s-combined_master.tsv", git_folder, exome_name)) %>% 
     filter(tier %in% c("A","B","C"))
-tier_genes <- names(table(tier_mutations$SYMBOL))
+tier_genes <- names(table(tier_mutations$SYMBOL)) # here used only got visualisation
 
 # GSEA signatures ===========
 hallmark <- msigdbr(species="Homo sapiens", category="H")
