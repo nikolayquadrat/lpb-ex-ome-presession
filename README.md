@@ -33,8 +33,8 @@ Download Ensembl VEP cache release 112 from ftp.ensembl.org. VEP plugin source c
 - **LOFTEE** ([Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) to be obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Used for Tier A classification (see below, Ib, section 10).
 - **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)). Single-nucleotide-variant scores to be downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Used for Tier A classification.
 - **SpliceAI indel scores** to be obtained *manually* due to licensing constraints via the Illumina BaseSpace CLI (project 66029966, academic use). Used for Tier A classification.
-- **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz) to be obtained from the DeepMind public bucket and tabix-indexed. Source of information for the tier B variants.
-- **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)** to be downloaded *manually* from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data is used under a non-commercial research license. Source of information for the tier B variants.
+- **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz) to be obtained from the DeepMind public bucket and tabix-indexed. Used for Tier B classification.
+- **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)** to be downloaded *manually* from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data is used under a non-commercial research license. Used for Tier B classification.
 - **CADD** v1.7 SNV and indel scores ([Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)) to be retrieved from the University of Washington's CADD non-commercial license distribution.
 - **dbNSFP** v5.3.1a (academic-use branch) ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. The collection to be supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).
 
@@ -51,14 +51,14 @@ ClinVar GRCh38 is to be retrieved from a dated NCBI archive snapshot (archive_2.
 *all need to be downloaded manually*<br>
 - **SureSelectXT Human All Exon V8 capture-kit BED file** (S33266436_Regions.bed & S33266436_Regions.padded100.interval_list). The capture-kit BED file is supplied externally from [the wet-laboratory provider](https://earray.chem.agilent.com/suredesign/search/entity.htm).
 - **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results are to be obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results should be joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering (tier C).
-- **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel is to be retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion.
+- **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel is to be retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion. Used for Tier C classification.
 
 #### 7. (optional) scRNA-seq reference for deconvolution
 run the script with the BUILD_DECONV_REFERENCE flag set:
 ```sh
 sudo env BUILD_DECONV_REFERENCE=1 DECONV_REFERENCES="siletti_cortex" bash ./lpb-exome-prioritisation-collect-data.sh
 ```
-This section 10 is an optional stage (off by default; enabled with `BUILD_DECONV_REFERENCE=1`) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. Unlike other parts of the script, it is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
+This section 10 is an optional stage (off by default) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. Unlike other parts of the script, it is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
 
 **Architecture**. The section is a thin *driver*. The actual recipes live in a sibling folder, `scripts_to_make_deconv_reference/`, one self-contained Python script per reference and the common part in *scripts/scripts_to_make_deconv_reference/_deconv_common.py*. The driver discovers every `*.py` there (skipping `_`-prefixed library modules), optionally restricts to a subset via `DECONV_REFERENCES`, and runs each one. Adding a new reference means dropping in a new script; the driver never changes. Before running any builder, the driver ensures an isolated Python venv at `$DECONV_DIR/venv` and installs `anndata h5py scipy pandas numpy` into it. The venv is created and populated once and reused on subsequent runs; every builder is invoked with the venv's interpreter so the dependencies propagate to all of them.
 
@@ -77,7 +77,7 @@ cd .../rnaseq-drop/00_additional_files/deconv/source
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
 The section produces reference data in its own folder under `$DECONV_OUT_ROOT`:
-- `siletti_cortex` — adult human neocortex, neuronal vs non-neuronal, for the SZ07 composition analysis from the [Siletti et al (2023)](https://doi.org/10.1126/science.add7046) dataset.
+- `siletti_cortex.py` — adult human neocortex, neuronal vs non-neuronal, for the SZ07 composition analysis from the [Siletti et al (2023)](https://doi.org/10.1126/science.add7046) dataset.
 - `siletti_glia_plus.py` — same, but for non-neuronal (super)clusters separately. For cluster codes, [consult Table S3 from the original study](https://www.science.org/doi/10.1126/science.add7046#supplementary-materials).
 
 #### 8. Validation
@@ -495,27 +495,30 @@ python scripts/lpb-post-drop-izumo4_neomorph_pipeline.py --null-with-blastp --pe
 Genetic sex is inferred from marker-gene expression in the STAR-aligned, duplicate-marked BAMs. Uniquely mapped reads (MAPQ ≥ 30, excluding secondary, supplementary, and duplicate alignments) are counted over the gene spans of *XIST* (a female / inactive-X marker) and a panel of Y-linked genes (*RPS4Y1, DDX3Y, UTY, USP9Y, KDM5D, EIF1AY, ZFY, TXLNGY, NLGN4Y*), with gene coordinates extracted from the GENCODE v47 annotation. The unique-read filter is applied specifically to prevent cross-mapping between the Y-linked genes and their homologous X paralogs. Counts are normalised to library size (counts per million) using total mapped reads, and samples are called XX (*XIST* ≥ 10 CPM, Y-panel < 20 CPM) or XY (*XIST* < 10 CPM, Y-panel ≥ 20 CPM). Samples expressing both markers are flagged as possible XXY (consistent with an inactivated X plus a Y chromosome) and samples expressing neither as low-signal; both categories are reserved for manual review. As in the exome workflow, inferred genetic sex is compared against clinical annotation as a sample-identity check. The summary table is stored in `../04_qc/00_inferred_sex.tsv`.
 
 #### 8. Cell-composition markers
-A reference-free marker-expression readout is used for cell-composition QC to test whether an apparent neuronal/synaptic expression signature reflects grey-matter content or dissection variability rather than biology. Panels are defined in the CELL_MARKER_GENES config dictionary. Adding or editing a panel requires no rule changes.
+A reference-free marker-expression readout is used for cell-composition QC. Panels are defined in the CELL_MARKER_GENES config dictionary. Adding or editing a panel requires no rule changes, just delete the `../04_qc/cellcomp` folder.
 
-Marker panels:
-- "neuron": *RBFOX3, MAP2, NEFL, NEFM, NEFH, TUBB3, ENO2, INA*;
-- "astrocyte": *GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, SOX9, S100B*;
-- "oligodendrocyte": *MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*;
-- "opc": *PDGFRA, CSPG4, OLIG1, OLIG2*;
-- "microglia": *CSF1R, AIF1, P2RY12, CX3CR1, C1QA, C1QB, TMEM119*;
-- "endothelial": *CLDN5, FLT1, PECAM1, VWF*
+Main marker panels specified in the pipe script:
+- "neuron": *RBFOX3, MAP2, NEFL, NEFM, NEFH, ELAVL3, ELAVL4, INA*;
+- "astrocyte": *GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, GJA1, GLUL*;
+- "oligodendroglial": *OLIG1, OLIG2, MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*; # mature + OPC
+- "microglia": *SALL1, GPR34, P2RY12, TMEM119, HEXB*;
+- "endothelial": *CLDN5, FLT1, PECAM1, VWF, CDH5, PTPRB*;
+- "mural": *RGS5, PDGFRB, KCNJ8, ABCC9, HIGD1B, NOTCH3, MYH11*; # pericytes, VSMC
+- "fibroblast": *DCN, LUM, COL1A1, COL1A2, COL3A1, COL5A1, COL5A2, COL15A1*;
 
 NB: *SOX10* is a canonical OPC/oligodendrocyte marker gene, but it is also a VUS candidate gene in the study. It is deliberately omitted so the composition check stays independent of candidate evaluation.
 
 Output: long-format columns `sample`, `gene`, `cell_type`, `count`, `lib_size`, `cpm`, and `log2cpm`. Measurements are computed independently for each sample, so adding or removing samples does not alter another sample's values.
 
 #### 9. Deconvolution (optional)
+hspe ([Hunt & Gagnon-Bartsch 2021](https://doi.org/10.1214/20-aoas1395)) + makes files for CIBERSORTx ([Steen et al. 2020](https://doi.org/10.1007/978-1-0716-0301-7_7)). Though both are not ideal for neuronal cell type composition, I found the last worked better in my case. 
+
 Activated via `-e DECONV_ENABLED=1` at container start (with `DECONV_CIBERSORTX=1` separately enabling r09e, expect several hundred megabytes per reference).<br>
 **r09a_mixture** (once, shared) — Reads every sample's STAR `ReadsPerGene.out.tab`, selects the strand column, maps versioned GENCODE v47 gene IDs to gene symbols via the GTF, sums duplicate symbols, and writes a symbol-space CPM matrix (`_mixture/mixture_symbol_cpm.tsv.gz`). This bridges the bulk counts (Ensembl IDs) into the symbol space the single-cell references use, and is computed once for all references.<br>
 **r09b_reference** (per reference, cached) — Loads a canonical single-cell reference (`matrix.mtx.gz` / `features.tsv.gz` / `cells.tsv.gz`), collapses it to pseudobulk profiles per subject × class, restricts to genes shared with the mixture, and saves an hspe-ready reference object plus a marker-QC table. All matrix operations are sparse, so the large glia references never densify. Runs once per reference and caches.<br>
-**r09c_run_hspe** (per reference × sample) — Deconvolves one bulk sample against one prepared reference with hspe ([Hunt & Gagnon-Bartsch 2021](https://doi.org/10.1214/20-aoas1395)), on log-scale expression, letting hspe select markers internally. Writes `09_deconv/{ref}/{sample}/proportions.tsv` (and the full hspe result) — the per-sample, per-reference estimate.<br>
+**r09c_run_hspe** (per reference × sample) — Deconvolves one bulk sample against one prepared reference with hspe, on log-scale expression, letting hspe select markers internally. Writes `09_deconv/{ref}/{sample}/proportions.tsv` (and the full hspe result) — the per-sample, per-reference estimate.<br>
 **r09d_summary** (per reference) — Collates every sample's proportions for a reference into a wide `09_deconv/{ref}.tsv` (samples × classes), filling absent classes with zero. The logic is inlined as a `run:` block.<br>
-**r09e_cibersortx_prep** (per reference, optional) — Emits the two files a manual CIBERSORTx ([Steen et al. 2020](https://doi.org/10.1007/978-1-0716-0301-7_7)) run needs into `09_deconv/_cibersortx/{ref}/`: a single-cell `refsample.txt` (genes × cells, cell-type labels as headers) and a `mixture.txt` (the same bulk matrix, reformatted). It only prepares the inputs — you run CIBERSORTx yourself — enabling a second, independent deconvolution method for cross-checking.<br>
+**r09e_cibersortx_prep** (per reference, optional) — Emits the two files a manual CIBERSORTx run needs into `09_deconv/_cibersortx/{ref}/`: a single-cell `refsample.txt` (genes × cells, cell-type labels as headers) and a `mixture.txt` (the same bulk matrix, reformatted). It only prepares the inputs enabling a second deconvolution method for cross-checking.<br>
 
 Run CIBERSORTx as follows:
 ```sh
@@ -613,18 +616,48 @@ Helpful notes:
 - for the external counts matrix, set "geneID" as a gene identifier name.
 
 ## IV. System analysis on top of the OUTRIDER results
-OUTRIDER results provide an opportunity to investigate whether genes with unusually high or low expression in a sample are enriched in specific biological processes by applying gene set enrichment analysis (GSEA) to OUTRIDER-derived z-scores, analogous to the application of GSEA to gene-level statistics from differential expression analyses.
+OUTRIDER results allow to investigate whether genes with unusually high or low expression in a sample are enriched in specific biological processes by applying gene set enrichment analysis (GSEA) to OUTRIDER-derived z-scores, analogous to the application of GSEA to gene-level statistics from differential expression analyses. It has advantages over other ssPA methods since the ranking metric removes confounders far more thoroughly (OUTRIDER autoencoder vs simple standardization) and preserves signals from sample-level outliers, which is exactly what we need for VUSs interrogation.
 
 ### First pass
 *scripts/lpb-post-drop-outrider-1st-pass.R*<br>
-Initial GSEA of the OUTRIDER results.<br>
+Initial GSEA based on the OUTRIDER results. Here you can use a variety of zScore-based metrics, but one that makes sense:
+1. should be conservative is a sense that it prioritises weak effects,
+2. should penalise sign discordance,
+3. does not introduce bias when using different sample sizes, and
+4. does not introduce additional hyperparameters.
+
+It seems that the one that fits all four doesn't exist.<br>
+
+This simple concordance-weighted minimum z-metric for GSEA violates the third condition, but it could be used when the comparison with other cohort members is not necessarily (the first and the second passes):
+$$
+S_{\mathrm{consensus}}(\mathbf z)
+=
+\min_{1\le i\le n}|z_i|
+\;
+\frac{\sum_{i=1}^{n}z_i}
+{\sum_{i=1}^{n}|z_i|}
+$$
+
+Where the cohort comparison is required the concordance-weighted geometric z-metric could be used, but it is worse in terms of the first condition:
+$$
+S_{\mathrm{consensus}}(\mathbf z)
+=
+\left(
+\prod_{i=1}^{n}|z_i|
+\right)^{1/n}
+\;
+\frac{\sum_{i=1}^{n}z_i}
+{\sum_{i=1}^{n}|z_i|}
+$$
+
+Since many of my RNA-seq samples were singletons, I just used median for the cohort-based comparison (pass 3).
 
 Helper functions:<br>
-*scripts/lpb-post-drop-fgsea-emap.R* -- similar to the `emapplot()` function from [`enrichplot`](https://doi.org/10.18129/B9.bioc.enrichplot).<br>
+*scripts/lpb-post-drop-fgsea-emap.R* — analagous to the `emapplot()` function from [`enrichplot`](https://doi.org/10.18129/B9.bioc.enrichplot).<br>
 <img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="35%"><br>
 
-*scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* -- similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
-<img src="images/ba9_gtex_SZ07_gsea_hallmark_plot.png" alt="Compact GSEA visualisation" width="35%"><br>
+*scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* — similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
+<img src="images/ba9_gtex_SZ07_gsea_kegg_plot.png" alt="Compact GSEA visualisation" width="35%"><br>
 
 ### Second pass
 *scripts/lpb-post-drop-outrider-2nd-pass.R*<br>
@@ -632,22 +665,31 @@ To assess whether a candidate gene's (g) transcriptomic pathway neighbourhood is
 
 Significance is assessed against a matched empirical null (P). Membership is evaluated under two definitions, each constituting a separate test. Under set membership, g belongs to P if it is annotated to the pathway's gene set. Under leading-edge membership, g belongs to P only if it lies within P's GSEA leading edge — the subset of genes that drive the enrichment signal. Because the leading edge is a strict subset of the gene set, the leading-edge statistic is defined over fewer pathways and is systematically more conservative; it distinguishes genes that actively drive enrichment from those merely annotated to enriched sets. Both tests are computed for every candidate and reported jointly.
 
-The null pool comprises all genes of a predefined universe — here, the exome-callable gene set — with the candidates excluded. Each null gene is scored by the identical min-p statistic under the same membership definition as the candidate; the membership basis of the null is switched together with that of the candidate, because the two definitions induce different min-p distributions and scoring the candidate on leading-edge pathways while scoring the null on set membership would bias the empirical p-value. Consequently the null pool and its matching strata are constructed separately for each test.
+The null pool comprises all genes of a predefined universe (the exome-callable gene set with the candidates excluded). Each null gene is scored by the identical min-p statistic under the same membership definition as the candidate; the membership basis of the null is switched together with that of the candidate, because the two definitions induce different min-p distributions and scoring the candidate on leading-edge pathways while scoring the null on set membership would bias the empirical p-value. Consequently the null pool and its matching strata are constructed separately for each test.
 
-For each gene, its statistic as the minimum enrichment p-value (min-p) is defined across all gene sets containing it, taken from a single GSEA analysis of the individual's per-gene outlier ranking; min-p thus reflects the strength of the gene's most strongly enriched pathway. Because heavily annotated genes belong to more, and to more varied, gene sets and therefore have more opportunities to attain a low min-p, each candidate is calibrated against an empirical null of genes matched on pathway-size profile: each gene is summarised by the number of its pathways falling in defined size classes (e.g. specific vs broad), and candidates are compared only to genes sharing the same size-class stratum. Matching on the size profile rather than on total pathway membership avoids the saturation that arises when all candidates are near-maximal hubs, while controlling both the number and the size distribution of a gene's pathways—the joint determinant of the min-p null, since large gene sets attain small p-values through aggregation of diffuse signal and small sets through concentrated signal.
+For each gene, its statistic as the minimum enrichment p-value (min-p) is defined across all gene sets containing it, taken from a single GSEA analysis of the individual's per-gene outlier ranking (effective size). Thus min-p reflects the strength of the gene's most strongly enriched pathway. Because heavily annotated genes belong to more, and to more varied, gene sets and therefore have more opportunities to attain a low min-p, each candidate is calibrated against an empirical null of genes matched on pathway-size profile: each gene is summarised by the number of its pathways falling in defined size classes (e.g. specific vs broad), and candidates are compared only to genes sharing the same size-class stratum. Matching on the size profile rather than on total pathway membership avoids the saturation that arises when all candidates are near-maximal hubs, while controlling both the number and the size distribution of a gene's pathways—the joint determinant of the min-p null, since large gene sets attain small p-values through aggregation of diffuse signal and small sets through concentrated signal.
 
 The empirical significance of each candidate is computed as the fraction of stratum-matched background genes (drawn from the exome-testable gene universe) whose min-p is at least as extreme as the candidate's, and p-values are adjusted across candidates by the Benjamini–Hochberg procedure.
 
-To prevent circularity, whereby a gene that drives its own pathways' enrichment would vouch for itself, the enrichment analysis used to score each candidate is recomputed with that gene removed from the ranking (leave-one-out), while the background pool is scored on the original analysis (*this leave-one-out procedure is the key difference from the first-pass analysis*); gene-set membership is left intact throughout.
+To prevent circularity, whereby a gene that drives its own pathways' enrichment would vouch for itself, the enrichment analysis used to score each candidate is recomputed with that gene removed from the ranking (leave-one-out), while the background pool is scored on the original analysis (*this leave-one-out procedure is the key difference from the first-pass analysis*).
 
 *scripts/lpb-post-drop-minp-size-matched-test.R*<br> The core function of the analysis.
 
 ### Third pass
-Tests whether cell-type-independent GSEA enrichment is present in a specific donor.<br>
 *scripts/lpb-post-drop-outrider-3rd-pass.R*<br>
-Helper function:
-*scripts/lpb-post-drop-donor-specificity-table.R*. Displays the top enriched GSEA pathways with the largest NES differences between a specific donor and the other donors. Pathways are grouped into categories.<br>
+Tests whether cell-type-independent GSEA enrichment is present in a specific donor with a median-based z-score metric.<br>
+
+Helper functions:
+*scripts/lpb-post-drop-donor-specificity-table.R*. Displays the top enriched GSEA pathways with the largest NES differences between a specific donor and the other donors.
+*lpb-post-drop-classify-pathways.R*
+Helps classify pathways into categories for the figure.<br>
 <img src="images/plot_donor_specificity_table.png" alt="Main post-OUTRIDER figure" width="35%"><br>
+
+Third pass with [GSVA](https://doi.org/10.1186/1471-2105-14-7) (a common ssPA method):
+*scripts\lpb-post-drop-gsva-3rd-pass.R*
+
+GSEA with OUTRIDER looks much better than GSVA since OUTRIDER's autoencoder seems to correct for cell composition.
+<img src="images/spec_vs_score_by_method.png" alt="GSVA-vs-OUTRIDER correlations with neuronality" width="35%"><br>
 
 ## AI usage disclosure
 The scripts were developed with assistance from Claude Opus 4.7 / 4.8
