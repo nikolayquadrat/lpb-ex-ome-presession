@@ -17,10 +17,12 @@ A bash pipeline designed to assemble all reference and annotation resources requ
 
 Usage:
 ```sh
-sudo chmod +x lpb-exome-prioritisation-collect-data.sh
-sudo env BUILD_DECONV_REFERENCE=1 bash lpb-exome-prioritisation-collect-data.sh # or w/o 'env BUILD_DECONV_REFERENCE=1' if not needed
+sudo chmod +x lpb-exome-prioritisation-collect-data.sh 
+sudo lpb-exome-prioritisation-collect-data.sh # collects data into the script's directory by default 
+sudo lpb-exome-prioritisation-collect-data.sh --root /mnt/bigdisk/exome_pipe # collects to a different directory
+sudo env BUILD_DECONV_REFERENCE=1 bash lpb-exome-prioritisation-collect-data.sh  --deconv-dir /rnaseq_pipe_path/00_additional_files/deconv # also collects data for deconvolution, requires data recipes and the deconv driver to be stored at /<collection_script_location>/scripts_to_make_deconv_reference
 ```
-The disk space requirement: ~350GB for the reference data (without scRNA-seq for deconvolution, expect ~40GB per dataset) + ~12GB per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
+The disk space requirement: ~350GB for the reference data (without scRNA-seq for deconvolution, expect ~40GB per sc dataset) + ~12GB per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
 
 ### Under the hood
 #### 1. Reference genome and known-sites VCFs
@@ -76,7 +78,7 @@ cd .../rnaseq-drop/00_additional_files/deconv/source
 
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
-The section produces reference data in its own folder under `$DECONV_OUT_ROOT`:
+The section produces reference data in its own folder under `$DECONV_OUT_ROOT` (e.g. `.../<rnaseq folder>/00_additional_files/deconv/reference_canonical`):
 - `siletti_cortex.py` — adult human neocortex, neuronal vs non-neuronal, for the SZ07 composition analysis from the [Siletti et al (2023)](https://doi.org/10.1126/science.add7046) dataset.
 - `siletti_glia_plus.py` — same, but for non-neuronal (super)clusters separately. For cluster codes, [consult Table S3 from the original study](https://www.science.org/doi/10.1126/science.add7046#supplementary-materials).
 
@@ -534,7 +536,8 @@ cibersortx/fractions --username xxxxx@xxx --token xxxxxxxx \
 **r09_deconv_all** (aggregator) — A no-output target listing all the stage's outputs, so the rule `r09_deconv_all` builds the whole deconvolution stage. Resolves to nothing when the stage is disabled.
 
 **Cell composition assessment for donor samples using output of the rules r08/r09**<br>
-*scripts/lpb-post-drop-cell-type-assessment.R*<br> Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
+*scripts/lpb-post-drop-cell-type-assessment.R*<br>
+Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
 <img src="images/cell_type.png" alt="Cell types by samples" width="35%"><br>
 
 #### 10. Pipeline outputs
@@ -617,6 +620,8 @@ Helpful notes:
 
 ## IV. System analysis on top of the OUTRIDER results
 OUTRIDER results allow to investigate whether genes with unusually high or low expression in a sample are enriched in specific biological processes by applying gene set enrichment analysis (GSEA) to OUTRIDER-derived z-scores, analogous to the application of GSEA to gene-level statistics from differential expression analyses. It has advantages over other ssPA methods since the ranking metric removes confounders far more thoroughly (OUTRIDER autoencoder vs simple standardization) and preserves signals from sample-level outliers, which is exactly what we need for VUSs interrogation.
+
+The analysis is organised into three passes (P1: discovery, P2: gene-specific, trying find support for VUS, P3: cohort-level comparison).
 
 ### First pass
 *scripts/lpb-post-drop-outrider-1st-pass.R*<br>
