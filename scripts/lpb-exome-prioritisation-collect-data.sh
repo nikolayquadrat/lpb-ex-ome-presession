@@ -113,20 +113,59 @@ GENCODE_VERSION="47"              # GENCODE gene model (GRCh38, chr-prefixed);
                                   # gene-testable universe (matched-sampling null)
 
 # -----------------------------------------------------------------------------
-# Layout - keep in sync with paths in the Snakefile
+# Root directory: everything is collected UNDER THIS SCRIPT'S OWN DIRECTORY, so
+# the tree is self-contained and portable (no hard-coded /mnt/data/exome). ROOT
+# is resolved from the SCRIPT PATH, not $PWD, so the script works no matter where
+# it is invoked from. Override with --root DIR or $DATA_ROOT if the data must
+# live elsewhere; the deconvolution RECIPES, however, always stay next to this
+# script (they are code, not data - see DECONV_SCRIPTS_DIR below).
 # -----------------------------------------------------------------------------
-GENOME_DIR=/mnt/data/exome/genome/genome_for_exome_pipe
-VARIATION_DIR=/mnt/data/exome/variation/vcf_for_exome_pipe
-VEP_CACHE=/mnt/data/exome/annotation/vep/cache_grch38
-VEP_PLUGINS=/mnt/data/exome/annotation/vep/plugins
-VEP_PLUGIN_DATA=/mnt/data/exome/annotation/vep/plugin_data
-VEP_CUSTOM=/mnt/data/exome/annotation/vep/custom
-DATA_DIR=/mnt/data/exome/data
-CAPTURE_DIR=/mnt/data/exome/annotation/agilent # or whatever
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")" && pwd -P)"
+ROOT="${DATA_ROOT:-$SCRIPT_DIR}"
+
+# --- CLI. The ONE path worth passing explicitly is the deconvolution DATA dir:
+#     its built references feed the SEPARATE RNA-seq hspe pipeline, so they
+#     usually live outside this tree. Everything else is rooted at $ROOT.
+DECONV_DIR_ARG=""
+while (( $# )); do
+    case "$1" in
+        --deconv-dir)   DECONV_DIR_ARG="${2:?--deconv-dir needs a path}"; shift 2 ;;
+        --deconv-dir=*) DECONV_DIR_ARG="${1#*=}"; shift ;;
+        --root)         ROOT="${2:?--root needs a path}"; shift 2 ;;
+        --root=*)       ROOT="${1#*=}"; shift ;;
+        -h|--help)
+            cat <<USAGE
+Usage: $(basename "$0") [--deconv-dir DIR] [--root DIR]
+  --deconv-dir DIR   deconvolution DATA dir (h5ad source download + built
+                     references). Default: \$ROOT/deconv. Env \$DECONV_DIR also
+                     honored. Only used with BUILD_DECONV_REFERENCE=1.
+  --root DIR         root under which ALL resources are collected.
+                     Default: this script's own directory
+                     ($SCRIPT_DIR).
+Everything else is configured via environment variables (see the header and
+the *_SKIP_* / BUILD_* / NO_INSTALL toggles).
+USAGE
+            exit 0 ;;
+        *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
+    esac
+done
+
+# -----------------------------------------------------------------------------
+# Layout - all UNDER $ROOT. Keep the SUBpaths in sync with the Snakefile, which
+# sees them through its bind-mount (e.g. $ROOT mounted at /tmp inside snakemake).
+# -----------------------------------------------------------------------------
+GENOME_DIR="$ROOT/genome/genome_for_exome_pipe"
+VARIATION_DIR="$ROOT/variation/vcf_for_exome_pipe"
+VEP_CACHE="$ROOT/annotation/vep/cache_grch38"
+VEP_PLUGINS="$ROOT/annotation/vep/plugins"
+VEP_PLUGIN_DATA="$ROOT/annotation/vep/plugin_data"
+VEP_CUSTOM="$ROOT/annotation/vep/custom"
+DATA_DIR="$ROOT/data"
+CAPTURE_DIR="$ROOT/annotation/agilent" # or whatever
 CAPTURE_INTERVAL_LIST="$CAPTURE_DIR/S33266436_Regions.padded100.interval_list" # Agilent SureSelect: register at https://earray.chem.agilent.com/suredesign/
 CAPTURE_BED="$CAPTURE_DIR/S33266436_Regions.padded100.bed"   # derived below
-GENE_MODEL_DIR=/mnt/data/exome/annotation/gene_models
-GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
+GENE_MODEL_DIR="$ROOT/annotation/gene_models"
+GNOMAD_HELPER="$ROOT/scripts/gnomad_strip_concat.sh"
 
 # --- OPTIONAL: snRNA-seq deconvolution references (feed the RNA-seq hspe
 #     deconvolution, not the exome pipeline). Off by default; enable with
@@ -140,10 +179,15 @@ GNOMAD_HELPER=/mnt/data/exome/scripts/gnomad_strip_concat.sh
 #
 #     Large shared source download (~37 GB for the two Siletti h5ad, + HNOCA);
 #     see the section 10 header and the summary disk note before enabling.
-DECONV_DIR=/mnt/data/exome/RNASEQ/rnaseq-drop/00_additional_files/deconv # change this ugliness later
+#     The deconv DATA dir (source + built references) is the one path you may
+#     point elsewhere (--deconv-dir / $DECONV_DIR), because the built references
+#     feed the SEPARATE RNA-seq hspe pipeline. The deconv RECIPES, in contrast,
+#     live next to THIS script ($SCRIPT_DIR) and are the ONLY pre-existing input
+#     the script requires.
+DECONV_DIR="${DECONV_DIR_ARG:-${DECONV_DIR:-$ROOT/deconv}}"  # --deconv-dir > $DECONV_DIR > default
 DECONV_SOURCE_DIR="$DECONV_DIR/source"                # shared big vendor h5ad
 DECONV_OUT_ROOT="$DECONV_DIR/reference_canonical"     # one subdir per reference
-DECONV_SCRIPTS_DIR=/mnt/data/exome/scripts/scripts_to_make_deconv_reference
+DECONV_SCRIPTS_DIR="$SCRIPT_DIR/scripts_to_make_deconv_reference"  # recipes: next to THIS script (code, not data)
 # Optional subset: space-separated script basenames (no .py) to build; empty =
 # all scripts in the folder. e.g. DECONV_REFERENCES="siletti_cortex"
 DECONV_REFERENCES="${DECONV_REFERENCES:-}"
@@ -156,7 +200,7 @@ DECONV_REFERENCES="${DECONV_REFERENCES:-}"
 # live here). The VEP+samtools image is built locally so it ships with the
 # samtools binary that LOFTEE needs at runtime - the upstream ensembl-vep
 # image does NOT include samtools, which silently disables LOFTEE.
-SIMG_DIR=/mnt/data/exome/repo/sing
+SIMG_DIR="$ROOT/repo/sing"
 VEP_LOFTEE_SIMG_NAME="ensembl-vep-loftee-${VEP_CACHE_RELEASE}.simg"
 VEP_LOFTEE_SIMG="$SIMG_DIR/$VEP_LOFTEE_SIMG_NAME"
 VEP_LOFTEE_BASE_IMAGE="${VEP_LOFTEE_BASE_IMAGE:-ensemblorg/ensembl-vep:release_${VEP_CACHE_RELEASE}.0}"
@@ -173,7 +217,7 @@ if [[ "${BUILD_DECONV_REFERENCE:-0}" == "1" ]]; then
 fi
 
 # Manifest file: TSV with one row per managed file
-MANIFEST_FILE="${MANIFEST_FILE:-/mnt/data/exome/MANIFEST.tsv}"
+MANIFEST_FILE="${MANIFEST_FILE:-$ROOT/MANIFEST.tsv}"
 
 # TLS opt-out allowlist: hosts where cert validation can be skipped if needed.
 # Default: empty (TLS validated for all hosts). To allow a host explicitly,
@@ -263,6 +307,52 @@ verify_checksum() {
         return 2
     fi
 
+    # --- Fast path: skip the (potentially many-GB) rehash if a previous run
+    #     already verified THIS exact file. The manifest caches a per-file
+    #     sha256 keyed on path+size+mtime; if the file is byte-for-byte the
+    #     same (size and mtime unchanged) AND its last recorded status was a
+    #     pass ('verified_ok'/'validated'/'manual_provided'/'downloaded'/'skipped'),
+    #     the on-disk content cannot have changed, so re-checking the upstream
+    #     sum would recompute an identical hash. Force a real re-check by
+    #     deleting the manifest row (or `touch`ing the file so mtime changes),
+    #     or set VERIFY_CHECKSUMS_ALWAYS=1 to disable this shortcut entirely.
+    if [[ "${VERIFY_CHECKSUMS_ALWAYS:-0}" != "1" && -f "$MANIFEST_FILE" ]]; then
+        local rp size mtime prev_status prev_sha
+        rp=$(realpath "$file" 2>/dev/null || echo "$file")
+        size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+        mtime=$(stat -c%Y "$file" 2>/dev/null || echo 0)
+        # pull status(col2) + sha256(col6) for the row matching path+size+mtime
+        read -r prev_status prev_sha < <(awk -F'\t' \
+            -v p="$rp" -v s="$size" -v m="$mtime" \
+            '$1==p && $4==s && $5==m {print $2"\t"$6; exit}' "$MANIFEST_FILE")
+        prev_status="${prev_status:-}"; prev_sha="${prev_sha:-}"
+        if [[ -n "$prev_sha" ]]; then
+            # The manifest sha256 is a SHA-256 of the current bytes. If the
+            # upstream sumfile is ALSO sha256, we can fully re-validate without
+            # re-reading the file: just compare the cached hash to the expected
+            # one. This catches a changed upstream .sha256 too.
+            if [[ "$algo" == "sha256" ]]; then
+                if [[ "${expected,,}" == "${prev_sha,,}" ]]; then
+                    log INFO "  sha256 OK (cached; file unchanged since a prior run)"
+                    return 0
+                fi
+                # cached hash disagrees with expected -> fall through and rehash
+                # (covers a swapped-in new .sha256 against unchanged bytes).
+            else
+                # Upstream sum is md5 (as for dbNSFP), not directly comparable to
+                # the sha256 cache; but an unchanged file that PASSED before
+                # cannot have changed, so skip the rehash on a prior pass status.
+                case "$prev_status" in
+                    verified_ok|validated|manual_provided|downloaded|skipped)
+                        log INFO "  $algo verify SKIPPED (unchanged since a prior verified run;"
+                        log INFO "    size=$size mtime=$mtime, manifest status=$prev_status)."
+                        log INFO "    set VERIFY_CHECKSUMS_ALWAYS=1 to force re-checking."
+                        return 0 ;;
+                esac
+            fi
+        fi
+    fi
+
     local actual
     case "$algo" in
         md5)    actual=$(md5sum    "$file" | awk '{print $1}') ;;
@@ -272,6 +362,9 @@ verify_checksum() {
 
     if [[ "$expected" == "$actual" ]]; then
         log INFO "  $algo OK ($actual)"
+        # Stamp the manifest so subsequent runs can take the fast path above.
+        manifest_record "$(realpath "$file" 2>/dev/null || echo "$file")" \
+            "verified_ok" "" 2>/dev/null || true
         return 0
     else
         log ERROR "  $algo MISMATCH for $file"
@@ -412,7 +505,7 @@ if (( SKIP_VEP_LOFTEE_SIMG_BUILD == 0 )); then
 fi
 
 # Set TMPDIR onto the data volume (cloud VMs commonly have tiny /tmp)
-DEFAULT_TMP=/mnt/data/exome_tmp
+DEFAULT_TMP="$ROOT/tmp"
 if [[ "${TMPDIR:-}" == "" ]]; then
     mkdir -p "$DEFAULT_TMP"
     export TMPDIR="$DEFAULT_TMP"
@@ -1185,7 +1278,7 @@ elif [[ ! -f "$GNOMAD_HELPER" ]]; then
 
 set -euo pipefail
 
-CUSTOM_DIR=/mnt/data/exome/annotation/vep/custom
+CUSTOM_DIR="$VEP_CUSTOM"
 cd "\$CUSTOM_DIR"
 
 # AF columns the pipeline uses (matches the VEP --custom field list)
@@ -2175,7 +2268,7 @@ H. VEP+samtools Singularity image (for the VEP annotation rule)
      rule r11_vep_annotate_cohort:
          ...
          singularity: "/tmp/repo/sing/$VEP_LOFTEE_SIMG_NAME"
-   (Assumes /mnt/data/exome is bind-mounted as /tmp inside snakemake.)
+   (Assumes $ROOT is bind-mounted as /tmp inside snakemake.)
    The image is rebuilt only if missing; set SKIP_VEP_LOFTEE_SIMG_BUILD=1
    to skip even when the .simg is missing (e.g., on a machine without
    docker). Override the base image via VEP_LOFTEE_BASE_IMAGE.
