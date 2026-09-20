@@ -636,14 +636,14 @@ rule all:
         "/tmp/data/04_qc/00_inferred_sex.tsv",
         "/tmp/data/04_qc/00_cell_marker_expression.tsv",
         "/tmp/data/04_qc/00_expression_summary.xlsx",
-        # ((expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
-        #   + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
-        #            ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [])
-        # + ((expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/refsample.txt",
-        #            ref=DECONV_REFERENCES)
-        #     + expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/mixture.txt",
-        #              ref=DECONV_REFERENCES))
-        #    if (DECONV_ACTIVE and DECONV_CIBERSORTX) else []),
+        ((expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
+          + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
+                   ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [])
+        + ((expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/refsample.txt",
+                   ref=DECONV_REFERENCES)
+            + expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/mixture.txt",
+                     ref=DECONV_REFERENCES))
+           if (DECONV_ACTIVE and DECONV_CIBERSORTX) else []),
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
