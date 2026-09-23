@@ -18,14 +18,94 @@ Install:
 """
 
 import io
+import os
 import re
+import sys
+import json
 import math
 import time
 import random
 import tempfile
+import datetime
 import subprocess
 import argparse
 from collections import defaultdict
+
+
+# ---------------------------------------------------------------------------
+# Output plumbing: mirror everything printed to a run log in --out-dir, so every
+# mode leaves an on-disk record without touching the ~50 print() call sites.
+# ---------------------------------------------------------------------------
+class _Tee:
+    """Duplicate a stream to a file. Used to capture stdout into the out-dir."""
+    def __init__(self, stream, fh):
+        self._stream = stream
+        self._fh = fh
+
+    def write(self, data):
+        self._stream.write(data)
+        self._fh.write(data)
+        return len(data)
+
+    def flush(self):
+        self._stream.flush()
+        self._fh.flush()
+
+
+def _out_path(name):
+    """Resolve a filename inside the active output dir (set by main); when no
+    out-dir is configured, fall back to the current directory."""
+    return os.path.join(OUTPUT_DIR or ".", name)
+
+
+def _dump_parameters(args, mode):
+    """Print every run parameter (CLI args + resolved config constants) so the
+    log is a self-contained record. Goes to stdout, which is tee'd to the log."""
+    line = "=" * 72
+    print(line)
+    print("RUN PARAMETERS")
+    print(line)
+    print(f"  timestamp        : {datetime.datetime.now().isoformat(timespec='seconds')}")
+    print(f"  mode             : {mode}")
+    print(f"  output_dir       : {OUTPUT_DIR}")
+    print("  --- CLI arguments ---")
+    for k in sorted(vars(args)):
+        print(f"    {k:18}= {getattr(args, k)!r}")
+    print("  --- resolved config (effective values this run) ---")
+    cfg = [
+        ("NEOMORPH_PEPTIDE", NEOMORPH_PEPTIDE),
+        ("ARCAS_CLASS_I", ARCAS_CLASS_I),
+        ("ARCAS_CLASS_II", ARCAS_CLASS_II),
+        ("KMER_LENGTHS_I", KMER_LENGTHS_I),
+        ("CLASS_II_WINDOW", CLASS_II_WINDOW),
+        ("STRONG_RANK_I", STRONG_RANK_I),
+        ("STRONG_RANK_II", STRONG_RANK_II),
+        ("BLAST_DB", BLAST_DB),
+        ("BLAST_TAXA", BLAST_TAXA),
+        ("BLAST_LOCAL_DBS", BLAST_LOCAL_DBS),
+        ("BLAST_MATRIX", BLAST_MATRIX),
+        ("BLAST_GAPCOSTS", BLAST_GAPCOSTS),
+        ("BLAST_EVALUE", BLAST_EVALUE),
+        ("BLAST_WORD_SIZE", BLAST_WORD_SIZE),
+        ("BLAST_THRESHOLD", BLAST_THRESHOLD),
+        ("BLAST_PAUSE_S", BLAST_PAUSE_S),
+        ("MAX_MISMATCH", MAX_MISMATCH),
+        ("MIN_POSITIVE_FRAC", MIN_POSITIVE_FRAC),
+        ("ANCHOR_POSITIONS", ANCHOR_POSITIONS),
+        ("REQUIRE_ANCHOR_CONSERVED", REQUIRE_ANCHOR_CONSERVED),
+        ("ALLOW_GAPS", ALLOW_GAPS),
+        ("PRIORITY_ORGANISMS", PRIORITY_ORGANISMS),
+        ("CLADE_TERMS", CLADE_TERMS),
+        ("SPECIES_FILE", SPECIES_FILE),
+        ("EMAIL", EMAIL),
+        ("NETMHCIIPAN_BIN", NETMHCIIPAN_BIN),
+    ]
+    for k, v in cfg:
+        s = repr(v)
+        if len(s) > 300:
+            s = s[:300] + " ...(truncated)"
+        print(f"    {k:24}= {s}")
+    print(line)
 
 # ---------------------------------------------------------------------------
 # CONFIG  -- edit these
@@ -47,6 +127,7 @@ ARCAS_CLASS_I = [
 
 # (3b) CLASS II alleles from arcasHLA. Give each gene's diploid calls;
 #  the converter builds NetMHCIIpan names (DR = beta only; DQ/DP = all a x b pairs).
+# DOESN'T WORK ON WINDOWS 
 ARCAS_CLASS_II = {
     "DRB1": ["DRB1*01:01"],
     "DQA1": ["DQA1*01:01"],
@@ -60,7 +141,7 @@ KMER_LENGTHS_I = (8, 9, 10, 11)      # class I peptide lengths
 CLASS_II_WINDOW = 15                 # class II peptide length NetMHCIIpan slides
 
 # (4) strong-binder thresholds
-STRONG_RANK_I = 0.5                  # class I: %Rank (<=0.5 strong), matches online NetMHCpan
+STRONG_RANK_I = 0.5                  # class I: %Rank (<=0.5 matches online NetMHCpan)
 STRONG_RANK_II = 2.0                 # class II: %Rank_EL (<=2 strong, NetMHCIIpan conv.)
 
 # (5/6) BLAST: search BOTH bacteria and viruses; each hit is tagged by taxon.
@@ -71,11 +152,11 @@ BLAST_DB = "nr"
 # BLAST_TAXA = {"all": None}
 BLAST_TAXA = {"all": "bacteria[organism] OR viruses[organism]"}
 BLAST_LOCAL_DBS = {"all": "nr"}      # local: name of your combined protein DB
-BLAST_MATRIX = "PAM70"               # looser than PAM30 for short peptides (was PAM30)
-BLAST_GAPCOSTS = "10 1"              # matches PAM70 (PAM30 wants "9 1")
+BLAST_MATRIX = "PAM30"               # looser than PAM30 for short peptides (was PAM30)
+BLAST_GAPCOSTS = "9 1"               # matches PAM70 (PAM30 wants "9 1")
 BLAST_EVALUE = 200000
 BLAST_WORD_SIZE = 2
-BLAST_THRESHOLD = 9                  # neighborhood word threshold; lower = more sensitive
+BLAST_THRESHOLD = 16                 # neighborhood word threshold; lower = more sensitive (does not working properly?)
 BLAST_PAUSE_S = 12                   # >=10 s: NCBI throttles anonymous heavy use
 
 # --- near-match / conservative-substitution acceptance (loosened from exact-only) ---
@@ -106,12 +187,17 @@ MIN_POSITIVE_FRAC = 1.0              # every position must be identical OR a con
 ANCHOR_POSITIONS = (2, -1)           # 1-based; -1 = C-terminus. Typical class I anchors (P2, PΩ).
 REQUIRE_ANCHOR_CONSERVED = True      # anchors must be identity/positive (set False to disable)
 ALLOW_GAPS = False                   # gapped near-matches are non-physiological for a short core
-# EMAIL = "nikolay.quadrat@gmail.com"
-EMAIL = "kondratyev@rncpz.ru"
+# NCBI contact e-mail for remote BLAST. Intentionally empty here -- pass it at
+# run time with --ncbi-email (NCBI wants a real address on programmatic jobs and
+# uses it to warn rather than block). Remote BLAST refuses to run without it.
+EMAIL = ""
+# Output directory for run logs + result files. Set from --out-dir at startup;
+# None means "current directory" (see _out_path).
+OUTPUT_DIR = None
 # organisms to FLAG in the output because of independent evidence for them
 # (a pre-specified prior beats anything the broad scan turns up by chance).
 PRIORITY_ORGANISMS = ["Homo"]
-NETMHCIIPAN_BIN = "netMHCIIpan"      # path to the executable
+NETMHCIIPAN_BIN = "netMHCIIpan" # path to the executable
 # Human proteome amino-acid frequencies (UniProt/Swiss-Prot, approx %). Used by the
 # natural-aa null. Weights need not sum to 100 (random.choices normalizes).
 AA_FREQ = {
@@ -309,11 +395,18 @@ def blast_remote(peptide, entrez, db=BLAST_DB):
     from Bio.Blast import NCBIWWW, NCBIXML
     kw = {} if entrez is None else {"entrez_query": entrez}
     handle = NCBIWWW.qblast(
-        "blastp", db, peptide,
-        matrix_name=BLAST_MATRIX, expect=BLAST_EVALUE,
-        word_size=BLAST_WORD_SIZE, hitlist_size=50,
-        gapcosts=BLAST_GAPCOSTS, threshold=BLAST_THRESHOLD,
-        composition_based_statistics="0", **kw)
+        "blastp",
+        db,
+        peptide,
+        matrix_name=BLAST_MATRIX,
+        expect=BLAST_EVALUE,
+        word_size=BLAST_WORD_SIZE,
+        hitlist_size=250,
+        gapcosts=BLAST_GAPCOSTS,
+        composition_based_statistics="0",
+        threshold=BLAST_THRESHOLD,
+        short_query=True, # not sure if it does anything
+        **kw)
     return NCBIXML.read(handle)
 
 
@@ -387,6 +480,42 @@ def _combine_entrez(base, extra):
     return " OR ".join(parts) if parts else None
 
 
+def blast_test(peptide, organism, use_local_blast=False):
+    """DIAGNOSTIC: BLAST one peptide against a SINGLE organism and print the raw
+    outcome. Restricting to one organism shrinks the search to seconds, so this
+    isolates 'does BLAST work / is my e-mail+network+params ok' from the slow
+    all-genomes search. Prints timing, the exact entrez query, hit count, and the
+    first few alignments (or the raw XML head on a parse surprise)."""
+    print(f"[test] BLASTing {peptide} vs organism='{organism}'  "
+          f"({'local' if use_local_blast else 'remote'})")
+    entrez = f'"{organism}"[organism]'
+    print(f"[test] entrez_query = {entrez}")
+    t0 = time.time()
+    try:
+        hits = _blast_group([peptide], use_local_blast=use_local_blast,
+                            entrez=entrez)
+    except SystemExit as ex:
+        print(f"[test] BLAST refused: {ex}")
+        return
+    except Exception as ex:
+        print(f"[test] BLAST raised {type(ex).__name__}: {ex}")
+        print("[test] -> if this is a timeout, the CODE/CONNECTION is fine but the "
+              "public queue is busy; retry, run off-peak, or use --local-blast.")
+        return
+    dt = time.time() - t0
+    total, exact, taxa = hits.get(peptide, (0, 0, set()))
+    print(f"[test] returned in {dt:.1f}s: {total} full-length hit(s) "
+          f"({exact} exact) across {len(taxa)} taxon label(s)")
+    if taxa:
+        for org in sorted(taxa):
+            print(f"[test]    hit organism: {org}")
+    if total == 0:
+        print("[test] zero hits is a VALID result (BLAST worked; this peptide simply "
+              "has no full-length match in that organism at these settings). The "
+              "round-trip succeeded, so the pipeline's BLAST plumbing is working.")
+    print(f"[test] SUCCESS: BLAST round-trip completed against '{organism}'.")
+
+
 def blast_batch_remote(sequences, classmap, entrez=None, db=BLAST_DB):
     """Submit ALL binder sequences in ONE multi-FASTA qblast job (API-safe: one
     job, not N). Records return in submission order; we zip them to the input
@@ -394,18 +523,29 @@ def blast_batch_remote(sequences, classmap, entrez=None, db=BLAST_DB):
     class + organism.
     """
     from Bio.Blast import NCBIWWW, NCBIXML
+    if not EMAIL or not str(EMAIL).strip():
+        raise SystemExit(
+            "[error] remote BLAST needs an NCBI contact e-mail. Pass "
+            "--ncbi-email you@example.org (or use --local-blast for a local DB).")
     NCBIWWW.email = EMAIL                      # identify yourself to NCBI
     NCBIWWW.tool = "izumo4_neomorph_pipeline"
 
     fasta = "".join(f">q{i}\n{s}\n" for i, s in enumerate(sequences))
     kw = {} if entrez is None else {"entrez_query": entrez}
     handle = NCBIWWW.qblast(
-        "blastp", db, fasta,
-        matrix_name=BLAST_MATRIX, expect=BLAST_EVALUE,
-        word_size=BLAST_WORD_SIZE, hitlist_size=50,
-        gapcosts=BLAST_GAPCOSTS, threshold=BLAST_THRESHOLD,
-        composition_based_statistics="0", **kw)
-    time.sleep(BLAST_PAUSE_S)                  # polite settle before parsing
+        "blastp",
+        db,
+        fasta,
+        matrix_name=BLAST_MATRIX,
+        expect=BLAST_EVALUE,
+        word_size=BLAST_WORD_SIZE,
+        hitlist_size=250,
+        gapcosts=BLAST_GAPCOSTS,
+        threshold=BLAST_THRESHOLD,
+        composition_based_statistics="0",
+        short_query=True,
+        **kw)
+    time.sleep(BLAST_PAUSE_S) # polite settle before parsing
 
     records = list(NCBIXML.parse(handle))
     if len(records) != len(sequences):
@@ -414,11 +554,53 @@ def blast_batch_remote(sequences, classmap, entrez=None, db=BLAST_DB):
     out = []
     for seq, rec in zip(sequences, records):
         ql = getattr(rec, "query_letters", len(seq))
+
         if ql not in (len(seq), 0):
             print(f"      [warn] length mismatch: {seq} (record={ql})")
-        for h in similar_hits(rec, seq):
-            h.update({"query": seq, "class": classmap.get(seq, "?"),
-                      "organism": parse_organism(h["subject"])})
+
+        # ---------------------------------------------------------
+        # DEBUG: what did NCBI BLAST actually return?
+        # ---------------------------------------------------------
+        raw_hsps = [
+            hsp
+            for aln in rec.alignments
+            for hsp in aln.hsps
+        ]
+
+        print(
+            f"[BLAST DEBUG] {seq}: "
+            f"{len(rec.alignments)} raw alignment(s), "
+            f"{len(raw_hsps)} raw HSP(s)"
+        )
+
+        # Show a few raw BLAST alignments BEFORE similar_hits()
+        for aln in rec.alignments[:10]:
+            for hsp in aln.hsps[:3]:
+                print(
+                    f"    RAW: {aln.accession} "
+                    f"align_len={hsp.align_length} "
+                    f"id={hsp.identities} "
+                    f"pos={getattr(hsp, 'positives', '?')} "
+                    f"gaps={getattr(hsp, 'gaps', '?')} "
+                    f"E={hsp.expect}"
+                )
+
+        # ---------------------------------------------------------
+        # Your existing downstream filter
+        # ---------------------------------------------------------
+        accepted = similar_hits(rec, seq)
+
+        print(
+            f"[BLAST DEBUG] {seq}: "
+            f"{len(accepted)} hit(s) survive similar_hits()"
+        )
+
+        for h in accepted:
+            h.update({
+                "query": seq,
+                "class": classmap.get(seq, "?"),
+                "organism": parse_organism(h["subject"]),
+            })
             out.append(h)
     return out
 
@@ -448,12 +630,22 @@ def exact_hits(record, query):
 
 def _anchor_ok(hsp, qlen):
     """Check the MHC anchor positions are identity or conservative (positive) in the
-    alignment. Uses hsp.match: ' '=mismatch, '+'=conservative, letter=identity."""
+    alignment. Uses hsp.match: ' '=mismatch, '+'=conservative, letter=identity.
+
+    If the match line is missing or not the query length (which happens for some
+    BLAST XML, especially remote multi-query jobs), we CANNOT verify the anchors
+    from it -- so fall back to the numeric evidence: a hit that already passed the
+    identity/positives budget in similar_hits is accepted here rather than
+    silently dropped. Set REQUIRE_ANCHOR_CONSERVED=False to skip anchor checks
+    entirely."""
     if not REQUIRE_ANCHOR_CONSERVED:
         return True
     match = getattr(hsp, "match", "") or ""
-    if len(match) != qlen:            # gapped/odd alignment -> can't map anchors cleanly
-        return not ALLOW_GAPS is False  # be conservative: reject if we can't verify
+    if len(match) != qlen:
+        # Can't map anchors onto positions without a full-length match line.
+        # Don't reject on that alone -- the caller already enforced the
+        # identity/positives thresholds; accept and let those govern.
+        return True
     for a in ANCHOR_POSITIONS:
         idx = (qlen + a) if a < 0 else (a - 1)   # -1 -> last; 1-based -> 0-based
         if not (0 <= idx < qlen):
@@ -582,6 +774,27 @@ def run(peptide=NEOMORPH_PEPTIDE, use_local_blast=False):
           "expected background. Run --null on the SAME settings, and for any PRIORITY "
           "or low-%Rank_Pathogen hit, check anchor + TCR-face conservation on SZ07's "
           "actual allele before concluding.")
+
+    # ---- write structured results into the output dir ----------------------
+    binders_tsv = _out_path("binders.tsv")
+    with open(binders_tsv, "w") as fh:
+        fh.write("class\tblast_seq\tallele\tscore\toffset\n")
+        for b in binders:
+            fh.write(f"{b['class']}\t{b['blast_seq']}\t{b['allele']}\t{b['score']}\t"
+                     f"{'' if b['offset'] is None else b['offset']}\n")
+    hits_tsv = _out_path("blast_hits.tsv")
+    with open(hits_tsv, "w") as fh:
+        fh.write("organism\tclass\ttier\tquery\taccession\tidentity\tpositives\t"
+                 "subject\tis_self\tis_priority\n")
+        for h in all_exact:
+            org = h["organism"]
+            is_self = "1" if org == "Homo sapiens" else "0"
+            is_prio = "1" if any(p.lower() in org.lower() for p in PRIORITY_ORGANISMS) else "0"
+            fh.write(f"{org}\t{h['class']}\t{h.get('tier','?')}\t{h['query']}\t"
+                     f"{h.get('accession','')}\t{h.get('identity','')}\t"
+                     f"{h.get('positives','')}\t{h.get('subject','')}\t{is_self}\t{is_prio}\n")
+    print(f"[out] wrote {binders_tsv} ({len(binders)} binders) and "
+          f"{hits_tsv} ({len(all_exact)} hits)")
     return binders, all_exact
 
 
@@ -912,11 +1125,45 @@ if __name__ == "__main__":
                          "OR-list may exceed NCBI's entrez limit; prefer --add-clades if so.")
     ap.add_argument("--species-file", default=SPECIES_FILE,
                     help=f"path to the contamination species list (default: {SPECIES_FILE})")
+    ap.add_argument("--out-dir", "-o", default=".",
+                    help="directory for the run log and result files (created if "
+                         "missing). Every mode writes a timestamped run_<mode>_*.log "
+                         "here; the full pipeline also writes binders.tsv + "
+                         "blast_hits.tsv. Default: current directory.")
+    ap.add_argument("--ncbi-email", default=EMAIL,
+                    help="e-mail address sent to NCBI with remote BLAST jobs (NCBI "
+                         "uses it to warn rather than block on heavy use). Default: "
+                         "the EMAIL set in the script.")
+    ap.add_argument("--test-organism", default=None, metavar="ORGANISM",
+                    help="DIAGNOSTIC: BLAST a single peptide against ONLY this "
+                         "organism (e.g. --test-organism 'Escherichia coli'), print "
+                         "the raw result, and exit. Restricting to one organism makes "
+                         "the search return in seconds, so this is a quick end-to-end "
+                         "check that remote (or --local-blast) BLAST works at all, "
+                         "separate from the slow all-genomes default.")
+    ap.add_argument("--test-peptide", default="RQRDPGAGR", metavar="SEQ",
+                    help="peptide used by --test-organism (default: RQRDPGAGR).")
     a = ap.parse_args()
 
+    # --- output dir + email (module globals every call site reads at call time) ---
+    OUTPUT_DIR = os.path.abspath(a.out_dir)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    EMAIL = a.ncbi_email
+    SPECIES_FILE = a.species_file
+
+    _mode = ("test_organism" if a.test_organism else
+             "null_with_blastp" if a.null_with_blastp else
+             "null_natural_aa" if a.null_natural_aa else
+             "null" if a.null else "full")
+    _stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    _log_path = os.path.join(OUTPUT_DIR, f"run_{_mode}_{_stamp}.log")
+    _log_fh = open(_log_path, "w")
+    sys.stdout = _Tee(sys.stdout, _log_fh)
+    sys.stderr = _Tee(sys.stderr, _log_fh)
+    print(f"[out] output dir: {OUTPUT_DIR}")
+    print(f"[out] run log:    {_log_path}")
+
     # optional: OR the pre-specified pathogen universe onto BLAST_TAXA (keeps the
-    # body value; every remote call site reads BLAST_TAXA['all'] at call time).
-    # optional: OR a pre-specified pathogen universe onto BLAST_TAXA (keeps the
     # body value; every remote call site reads BLAST_TAXA['all'] at call time).
     # --add-clades (few broad taxon terms, NCBI-safe) and/or --add-species (exact
     # ~48-species list). Broad bacteria/viruses are prepended only if the body
@@ -944,16 +1191,29 @@ if __name__ == "__main__":
             print(f"[universe] effective entrez: {eff[:120]}"
                   f"{'...' if len(eff) > 120 else ''}")
 
-    if a.null_with_blastp:
-        # here --peptide should be a SINGLE binder k-mer, e.g. RQRDPGAGR
-        null_model_blast(a.peptide, n_shuffles=a.n_shuffles,
-                         use_local_blast=a.local_blast, batch_size=a.batch_size)
-    elif a.null_natural_aa:
-        # --peptide defaults to the saved NEOMORPH region (novel C-term)
-        null_model_natural(a.peptide, length=a.neomorph_length, n_draws=a.n_draws,
-                           with_blastp=a.blastp, use_local_blast=a.local_blast,
-                           max_blast=a.max_blast)
-    elif a.null:
-        null_model(a.peptide)
-    else:
-        run(a.peptide, use_local_blast=a.local_blast)
+    # full parameter dump (after the universe is resolved, so BLAST_TAXA shows
+    # its EFFECTIVE value) -> terminal + log.
+    _dump_parameters(a, _mode)
+
+    try:
+        if a.test_organism:
+            blast_test(a.test_peptide, a.test_organism,
+                       use_local_blast=a.local_blast)
+        elif a.null_with_blastp:
+            # here --peptide should be a SINGLE binder k-mer, e.g. RQRDPGAGR
+            null_model_blast(a.peptide, n_shuffles=a.n_shuffles,
+                             use_local_blast=a.local_blast, batch_size=a.batch_size)
+        elif a.null_natural_aa:
+            # --peptide defaults to the saved NEOMORPH region (novel C-term)
+            null_model_natural(a.peptide, length=a.neomorph_length, n_draws=a.n_draws,
+                               with_blastp=a.blastp, use_local_blast=a.local_blast,
+                               max_blast=a.max_blast)
+        elif a.null:
+            null_model(a.peptide)
+        else:
+            run(a.peptide, use_local_blast=a.local_blast)
+    finally:
+        print(f"[out] done; log saved to {_log_path}")
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        _log_fh.close()
