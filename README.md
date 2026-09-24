@@ -1,10 +1,10 @@
-# Joint Exome/Transcriptome Mutation Prioritisation in a Low-SZ-PRS Brain
+# Joint Exome/Transcriptome Mutation Prioritisation
 ## The original study
 <img src="images/prs-comparison.png" alt="SZ-PGS distribution with SZ07 highlighted as the red dot" width="15%">
 
-*Future Link to the study*
+Link to the study: TBA
 
-Although the study was motivated by the availability of transcriptome data for this low-SZ-PRS brain, this repository focuses on exome mutation prioritisation and the joint use of RNA-seq and exome data in the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). Brain-specific context appears throughout the workflow but is not required.
+Although the study was motivated by the availability of transcriptome data for a low SZ-PRS brain, this repository focuses on exome mutation prioritisation and the joint use of RNA-seq and exome data in the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). Brain-specific context appears throughout the workflow but is not required.
 
 ## Overview
 This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on **single-case (n=1) analysis against cohort and reference data**.
@@ -18,9 +18,13 @@ A bash pipeline designed to assemble all reference and annotation resources requ
 Usage:
 ```sh
 sudo chmod +x lpb-exome-prioritisation-collect-data.sh 
-sudo lpb-exome-prioritisation-collect-data.sh # collects data into the script's directory by default 
-sudo lpb-exome-prioritisation-collect-data.sh --root /mnt/bigdisk/exome_pipe # collects to a different directory
-sudo env BUILD_DECONV_REFERENCE=1 bash lpb-exome-prioritisation-collect-data.sh  --deconv-dir /rnaseq_pipe_path/00_additional_files/deconv # also collects data for deconvolution, requires data recipes and the deconv driver to be stored at /<collection_script_location>/scripts_to_make_deconv_reference
+# the script collects data into the script's directory by default
+sudo lpb-exome-prioritisation-collect-data.sh
+# collects to a different directory
+sudo lpb-exome-prioritisation-collect-data.sh --root /mnt/bigdisk/exome_pipe
+# also collects data for deconvolution, requires data recipes and the deconv driver to be
+# stored at /<collection_script_location>/scripts_to_make_deconv_reference
+sudo env BUILD_DECONV_REFERENCE=1 bash lpb-exome-prioritisation-collect-data.sh --deconv-dir /rnaseq_pipe_path/00_additional_files/deconv
 ```
 The disk space requirement: ~350GB for the reference data (without scRNA-seq for deconvolution, expect ~40GB per sc dataset) + ~12GB per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
 
@@ -58,13 +62,13 @@ ClinVar GRCh38 is to be retrieved from a dated NCBI archive snapshot (archive_2.
 #### 7. (optional) scRNA-seq reference for deconvolution
 run the script with the BUILD_DECONV_REFERENCE flag set:
 ```sh
-sudo env BUILD_DECONV_REFERENCE=1 DECONV_REFERENCES="siletti_cortex" bash ./lpb-exome-prioritisation-collect-data.sh
+sudo env BUILD_DECONV_REFERENCE=1 DECONV_REFERENCES="siletti_cortex" bash ./lpb-exome-prioritisation-collect-data.sh --deconv-dir /rnaseq_pipe_path/00_additional_files/deconv
 ```
 This section 10 is an optional stage (off by default) that produces single-cell reference panels for the RNA-seq pipeline's cell-type deconvolution step. Unlike other parts of the script, it is unrelated to the exome work and lives in this script only because this is the project's central data-provisioning script.
 
 **Architecture**. The section is a thin *driver*. The actual recipes live in a sibling folder, `scripts_to_make_deconv_reference/`, one self-contained Python script per reference and the common part in *scripts/scripts_to_make_deconv_reference/_deconv_common.py*. The driver discovers every `*.py` there (skipping `_`-prefixed library modules), optionally restricts to a subset via `DECONV_REFERENCES`, and runs each one. Adding a new reference means dropping in a new script; the driver never changes. Before running any builder, the driver ensures an isolated Python venv at `$DECONV_DIR/venv` and installs `anndata h5py scipy pandas numpy` into it. The venv is created and populated once and reused on subsequent runs; every builder is invoked with the venv's interpreter so the dependencies propagate to all of them.
 
-The same venv could be used later for the cell-specificity requests:
+The same venv could be used later for gene-level requests:<br>
 ```sh
 cd .../rnaseq-drop/00_additional_files/deconv/source
 .../rnaseq-drop/00_additional_files/deconv/venv/bin/python3 \
@@ -75,6 +79,8 @@ cd .../rnaseq-drop/00_additional_files/deconv/source
     --min-cells 50 \
     --out izumo4_by_celltype.tsv
 ```
+Visualisation if the obtatined gene-level information:<br>
+<img src="images/izumo4_siletti_bubbles.png" alt="slightly overtuned" width="15%">
 
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
@@ -471,7 +477,7 @@ Build the arcasHLA reference data on the host filesystem with the script *lpb-rn
 sudo chmod +x lpb-rnaseq-set-up-arcashla.sh
 sudo bash lpb-rnaseq-set-up-arcashla.sh
 ```
-The bioconda biocontainer for arcasHLA (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it attempts to do so. The script performs the following four-step setup once on the host:
+The bioconda biocontainer for arcasHLA (`quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2`) ships only a partial reference: it includes the small JSON lookup tables (cDNA.json, allele_groups.json, hla_transcripts.json) but lacks both the IMGTHLA database itself (tested with the 3.64.0 release) and the derived files that arcasHLA requires at runtime (Kallisto pseudo-alignment indices and parsed nomenclature tables). Because the container's filesystem is read-only, arcasHLA cannot generate these missing files at run-time even though it attempts to do so. The script performs the following four-step setup once on the host:
 - git clone --depth 1 of the ANHIG/IMGTHLA repository (IPD-IMGT/HLA database release 3.64.0, ~1.2 GB at depth 1),
 - unzip of hla.dat.zip and other compressed archives inside the IMGTHLA repo (the uncompressed hla.dat is too large for git so the repo ships it compressed),
 - seeding the host dat/info and dat/ref directories with the small JSON tables bundled inside the biocontainer (copied out via apptainer exec with a bind mount), and
@@ -480,17 +486,35 @@ Total disk usage is approximately 3 GB (1.2 GB IMGTHLA + 1.9 GB Kallisto indices
 
 **arcasHLA 0.6.0** ([Orenbuch et al. 2020](https://doi.org/10.1093/bioinformatics/btz474)) runs in two stages, both using the same biocontainer (quay.io/biocontainers/arcas-hla:0.6.0--hdfd78af_2) and the host-built reference (IPD-IMGT/HLA release 3.64.0 + Kallisto 0.50.1 indices) bind-mounted from `../data/arcashla_ref/dat`. Rule r06a_arcashla_extract takes the coordinate-sorted markdup BAM and pulls reads from the HLA region (chr6:28-34 Mb) into paired-end FASTQs at `../06_hla/arcashla/{sample}/{sample}.extracted.{1,2}.fq.gz`. The rule symlinks the BAM under a canonical {sample}.bam name beforehand so arcasHLA's output filenames don't carry the .markdup suffix. Rule `r06b_arcashla_genotype` then runs arcasHLA genotype `-g A,B,C` (MHC class I) and rule `r06d_arcashla_genotype_classII` runs `-g DRB1,DQA1,DQB1,DPA1,DPB1` (MHC class II) on the extracted FASTQs, which pseudo-aligns reads to the IPD-IMGT/HLA reference with Kallisto and runs an expectation-maximization step to call the most likely diploid genotype. Output is a JSON at `../06_hla/arcashla/{sample}/{sample}.genotype.json` with the called alleles per gene.
 
-The established HLA alleles are used in the frameshift neomorphs check with [NetMHCpan v4.2](https://services.healthtech.dtu.dk/services/NetMHCpan-4.2/) (class I) [Nilsson et al. 2025](https://doi.org/10.3389/fimmu.2025.1616113)) /[NetMHCIIpan v4.3](https://services.healthtech.dtu.dk/services/NetMHCIIpan-4.3/) (class II) ([Nilsson et al. 2023](https://doi.org/10.1126/sciadv.adj6367)) followed by BLASTP or with MHCflurry/NetMHCIIpan with the provided script *lpb-post-drop-izumo4_neomorph_pipeline.py*:
-```powershell
+The established HLA alleles are used in the frameshift neomorphs check with [NetMHCpan v4.2](https://services.healthtech.dtu.dk/services/NetMHCpan-4.2/) (class I) [Nilsson et al. 2025](https://doi.org/10.3389/fimmu.2025.1616113)) /[NetMHCIIpan v4.3](https://services.healthtech.dtu.dk/services/NetMHCIIpan-4.3/) (class II) ([Nilsson et al. 2023](https://doi.org/10.1126/sciadv.adj6367)) followed by BLASTP.
+
+The alternative is to use MHCflurry/NetMHCIIpan with the provided script *lpb-post-drop-izumo4_neomorph_pipeline.py*, but the BLASTP for short sequences stopped working as before:
+```sh
 py -3.10 -m venv mhc-env
 .\mhc-env\Scripts\Activate.ps1
 python --version # should read 3.10.x
 pip install --upgrade pip
 pip install mhcflurry biopython
 mhcflurry-downloads fetch
-python scripts/lpb-post-drop-izumo4_neomorph_pipeline.py # full pipeline (bind + BLAST)
-python scripts/lpb-post-drop-izumo4_neomorph_pipeline.py --null-natural-aa --n-draws N_DRAWS --blastp --max-blast 100
-python scripts/lpb-post-drop-izumo4_neomorph_pipeline.py --null-with-blastp --peptide RQRDPGAGR --n-shuffles 100 --batch-size 5 --add-clades
+
+# test run, should return ~50 hits
+python scripts/lpb-post-drop-neomorph-mhc-blastp-pipeline.py \
+--test-organism "Escherichia coli" --test-peptide MAAKDVKFG \
+--ncbi-email you@lab.org -o ./results
+
+# full pipeline -> log + binders.tsv + blast_hits.tsv in results/
+python scripts/lpb-post-drop-neomorph-mhc-blastp-pipeline.py -o results/ --ncbi-email you@lab.org
+
+# mimicry null, own out-dir + species list
+python scripts/lpb-post-drop-neomorph-mhc-blastp-pipeline.py \
+    -o results/null_rqr/ --ncbi-email you@lab.org \
+    --null-with-blastp --peptide RQRDPGAGR \
+    --add-clades --species-file /path/to/species.txt # could be the same as in Section 5, better for the combinatorial null
+```
+
+If the script doesn't work the *scripts\lpb-post-drop-neomorph-filter-blast-hits.py* script filters the online BLASTP XML output taking into account the MHC-I canonical P1/PΩ positions.
+```sh
+python scripts\lpb-post-drop-neomorph-filter-blast-hits.py blastp-results.xml --out blastp-results-filtered.tsv --peptide AQSRLPRQR
 ```
 
 #### 7. Sex inference
@@ -527,7 +551,7 @@ Run CIBERSORTx as follows:
 docker container run --rm --privileged \
 -v .../09_deconv/_cibersortx/siletti_cortex:/src/data \
 -v .../09_deconv/_cibersortx/siletti_cortex/results:/src/outdir \
-cibersortx/fractions --username xxxxx@xxx --token xxxxxxxx \
+cibersortx/fractions --username you@lab.org --token xxxxxxxx \
 --refsample refsample.txt --mixture mixture.txt \
 --single_cell TRUE --rmbatchSmode TRUE --QN FALSE \
 --verbose TRUE --perm 1000
