@@ -1,6 +1,8 @@
 # Joint Exome/Transcriptome Mutation Prioritisation
 ## The original study
-<img src="images/prs-comparison.png" alt="SZ-PGS distribution with SZ07 highlighted as the red dot" width="15%">
+<img src="images/fig1.png" alt="SZ-PGS distribution with SZ07 highlighted as the red dot + method" width="45%"><br>
+
+This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on single-case (n-of-1) analysis against cohort and reference data.
 
 Link to the study: TBA
 
@@ -80,7 +82,7 @@ cd .../rnaseq-drop/00_additional_files/deconv/source
     --out izumo4_by_celltype.tsv
 ```
 Visualisation if the obtatined gene-level information:<br>
-<img src="images/izumo4_siletti_bubbles.png" alt="slightly overtuned" width="15%">
+<img src="images/izumo4_siletti_bubbles.png" alt="slightly overtuned" width="45%">
 
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
@@ -562,7 +564,7 @@ cibersortx/fractions --username you@lab.org --token xxxxxxxx \
 **Cell composition assessment for donor samples using output of the rules r08/r09**<br>
 *scripts/lpb-post-drop-cell-type-assessment.R*<br>
 Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
-<img src="images/cell_type.png" alt="Cell types by samples" width="35%"><br>
+<img src="images/cell_type.png" alt="Cell types by samples" width="45%"><br>
 
 #### 10. Pipeline outputs
 Per sample:
@@ -685,24 +687,29 @@ Since many of my RNA-seq samples were singletons, I just used median for the coh
 
 Helper functions:<br>
 *scripts/lpb-post-drop-fgsea-emap.R* — analagous to the `emapplot()` function from [`enrichplot`](https://doi.org/10.18129/B9.bioc.enrichplot).<br>
-<img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="35%"><br>
+<img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="45%"><br>
 
 *scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* — similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
-<img src="images/ba9_gtex_SZ07_gsea_kegg_plot.png" alt="Compact GSEA visualisation" width="35%"><br>
+<img src="images/ba9_gtex_SZ07_gsea_kegg_plot.png" alt="Compact GSEA visualisation" width="45%"><br>
 
 ### Second pass
 *scripts/lpb-post-drop-outrider-2nd-pass.R*<br>
-To assess whether a candidate gene's (g) transcriptomic pathway neighbourhood is enriched in an individual's expression outlier profile beyond chance, a matched-sampling procedure is implemented.
+For candidate-gene prioritisation, pathway and leading-edge membership were first defined from the pass 1 GSEA performed on the complete ranked gene list. To prevent circular support arising from a candidate's own expression statistic, GSEA was then repeated separately for each candidate after removing that gene from both the ranked list and the corresponding pathway gene sets (*this leave-one-out procedure is the key difference from the first-pass analysis*). Candidate–pathway relationships, including leading-edge membership, were retained from the original analysis, whereas pathway enrichment used to evaluate functional convergence was taken from the leave-one-gene-out analysis.
 
-Significance is assessed against a matched empirical null (P). Membership is evaluated under two definitions, each constituting a separate test. Under set membership, g belongs to P if it is annotated to the pathway's gene set. Under leading-edge membership, g belongs to P only if it lies within P's GSEA leading edge — the subset of genes that drive the enrichment signal. Because the leading edge is a strict subset of the gene set, the leading-edge statistic is defined over fewer pathways and is systematically more conservative; it distinguishes genes that actively drive enrichment from those merely annotated to enriched sets. Both tests are computed for every candidate and reported jointly.
+Candidate significance was assessed against an empirical null distribution of exome-testable genes matched for pathway-annotation profile. For each gene, this profile was defined by the number of associated pathways falling within predefined effective pathway-size classes, thereby accounting jointly for pathway annotation burden and the distribution of specific versus broad pathways. Two definitions of candidate–pathway association were evaluated independently. Under set membership, a candidate was associated with all tested pathways containing that gene; under leading-edge membership, it was associated only with significantly enriched pathways in which the gene occurred in the pass 1 GSEA leading edge. For each candidate, the minimum leave-one-gene-out enrichment p-value across the relevant pathways was used as the test statistic and compared with the corresponding minimum-p distribution among background genes matched on pathway-size profile. Separate null distributions and matching strata were constructed for the set-membership and leading-edge analyses.
 
-The null pool comprises all genes of a predefined universe (the exome-callable gene set with the candidates excluded). Each null gene is scored by the identical min-p statistic under the same membership definition as the candidate; the membership basis of the null is switched together with that of the candidate, because the two definitions induce different min-p distributions and scoring the candidate on leading-edge pathways while scoring the null on set membership would bias the empirical p-value. Consequently the null pool and its matching strata are constructed separately for each test.
-
-For each gene, its statistic as the minimum enrichment p-value (min-p) is defined across all gene sets containing it, taken from a single GSEA analysis of the individual's per-gene outlier ranking (effective size). Thus min-p reflects the strength of the gene's most strongly enriched pathway. Because heavily annotated genes belong to more, and to more varied, gene sets and therefore have more opportunities to attain a low min-p, each candidate is calibrated against an empirical null of genes matched on pathway-size profile: each gene is summarised by the number of its pathways falling in defined size classes (e.g. specific vs broad), and candidates are compared only to genes sharing the same size-class stratum. Matching on the size profile rather than on total pathway membership avoids the saturation that arises when all candidates are near-maximal hubs, while controlling both the number and the size distribution of a gene's pathways—the joint determinant of the min-p null, since large gene sets attain small p-values through aggregation of diffuse signal and small sets through concentrated signal.
-
-The empirical significance of each candidate is computed as the fraction of stratum-matched background genes (drawn from the exome-testable gene universe) whose min-p is at least as extreme as the candidate's, and p-values are adjusted across candidates by the Benjamini–Hochberg procedure.
-
-To prevent circularity, whereby a gene that drives its own pathways' enrichment would vouch for itself, the enrichment analysis used to score each candidate is recomputed with that gene removed from the ranking (leave-one-out), while the background pool is scored on the original analysis (*this leave-one-out procedure is the key difference from the first-pass analysis*).
+Empirical p-values were calculated with a +1 correction as
+```math
+p_{\mathrm{emp}}
+=
+\frac{
+1+\sum_{i=1}^{n_{\mathrm{null}}}
+\mathbf{1}\!\left(T_{\mathrm{null},i}\leq T_{\mathrm{cand}}\right)
+}{
+1+n_{\mathrm{null}}
+}
+```
+and were Benjamini–Hochberg adjusted separately within the two test classes.
 
 *scripts/lpb-post-drop-minp-size-matched-test.R*<br> The core function of the analysis.
 
@@ -714,13 +721,13 @@ Helper functions:
 *scripts/lpb-post-drop-donor-specificity-table.R*. Displays the top enriched GSEA pathways with the largest NES differences between a specific donor and the other donors.
 *lpb-post-drop-classify-pathways.R*
 Helps classify pathways into categories for the figure.<br>
-<img src="images/plot_donor_specificity_table.png" alt="Main post-OUTRIDER figure" width="35%"><br>
+<img src="images/plot_donor_specificity_table.png" alt="Main post-OUTRIDER figure" width="45%"><br>
 
 Third pass with [GSVA](https://doi.org/10.1186/1471-2105-14-7) (a common ssPA method):
 *scripts\lpb-post-drop-gsva-3rd-pass.R*
 
 GSEA with OUTRIDER looks much better than GSVA since OUTRIDER's autoencoder seems to correct for cell composition.<br>
-<img src="images/spec_vs_score_by_method.png" alt="GSVA-vs-OUTRIDER correlations with neuronality" width="35%"><br>
+<img src="images/spec_vs_score_by_method.png" alt="GSVA-vs-OUTRIDER correlations with neuronality" width="45%"><br>
 
 ## AI usage disclosure
 The scripts were developed with assistance from Claude Opus 4.7 / 4.8
