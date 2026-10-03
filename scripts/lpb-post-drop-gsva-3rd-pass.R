@@ -296,20 +296,21 @@ outrider <- read_xlsx(sprintf("%s/data/post-drop/trd-pass/ba9_gtex_SZ07_fgsea_re
 common <- intersect(res_ba9$pathway[!is.na(res_ba9$pathway_neuronal_score)], # 6190
                     outrider$pathway[!is.na(as.numeric(sapply(outrider$pathway, function(x) {pathway_neuronal_score$neuronality[pathway_neuronal_score$pathway == x]})))]
                     )
-cor(res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
+cor.test(res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
     res_ba9$sz07_score[match(common, res_ba9$pathway)],
     method="spearman")   # GSVA on common set
-cor(as.numeric(sapply(outrider$pathway[match(common, outrider$pathway)],
+cor.test(as.numeric(sapply(outrider$pathway[match(common, outrider$pathway)],
                       function(x) {pathway_neuronal_score$neuronality[pathway_neuronal_score$pathway == x]})),
     outrider$NES[match(common, outrider$pathway)],
     method = "spearman")
-cor(res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
+cor.test(res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
     res_ba9$sz07_score[match(common, res_ba9$pathway)],
     method="pearson")   # GSVA on common set
-cor(as.numeric(sapply(outrider$pathway[match(common, outrider$pathway)],
+cor.test(as.numeric(sapply(outrider$pathway[match(common, outrider$pathway)],
                       function(x) {pathway_neuronal_score$neuronality[pathway_neuronal_score$pathway == x]})),
     outrider$NES[match(common, outrider$pathway)],
     method = "pearson")
+
 # formal test: does the spec-score slope differ between methods?
 long <- rbind(
     data.frame(spec = res_ba9$pathway_neuronal_score[match(common, res_ba9$pathway)],
