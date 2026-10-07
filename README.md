@@ -1,6 +1,6 @@
 # Joint Exome/Transcriptome Mutation Prioritisation
 ## The original study
-<img src="images/fig1.png" alt="SZ-PGS distribution with SZ07 highlighted as the red dot + method" width="45%"><br>
+<img src="images/fig1.png" alt="SZ-PGS distribution with SZ07 highlighted as the red dot + method" width="65%"><br>
 
 This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on single-case (n-of-1) analysis against cohort and reference data.
 
@@ -82,7 +82,7 @@ cd .../rnaseq-drop/00_additional_files/deconv/source
     --out izumo4_by_celltype.tsv
 ```
 Visualisation if the obtatined gene-level information:<br>
-<img src="images/izumo4_siletti_bubbles.png" alt="slightly overtuned" width="45%">
+<img src="images/izumo4_siletti_bubbles.png" alt="slightly overtuned" width="65%">
 
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
@@ -214,7 +214,7 @@ The cohort VCF is left-aligned and multiallelics are split using `bcftools norm 
 
 #### 6. Internal artifact filtering
 *this step requires an exome panel, at least a couple dozen samples*<br>
-Four r09 rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) with autosome restriction and MAF/genotype-rate filters (`--maf 0.05 --geno 0.05 --hwe 1e-6`) produced a BED file from the cohort VCF (`r09b_make_plink_bed`); KING-format kinship coefficients are computed via `--make-king-table` (`r09c_kinship_table`). A custom Python helper (*scripts/lpb-exome-prioritisation-pick-family-representatives.py*) performed connected-component analysis on related-pair edges (KING kinship ≥ 0.0442, the third-degree-relative threshold), retaining one lexicographically-first representative per family (`r09d_pick_representatives`). The cohort VCF is then subset to representatives and re-tagged with bcftools +fill-tags AC,AN; sites with AC ≥ 2 among representatives that are absent or rare (AF < 0.001) in gnomAD v4.1 are flagged as artifact-suspect tuples (`r09e_artifact_blacklist`). This procedure removes recurrent batch / mapping / sample-prep artifacts that gnomAD-AF filtering alone cannot detect, while avoiding false positives from variants shared across related samples.
+Four r09 rules implement relatedness-aware artifact filtering. PLINK2 (v2.00a5.10) with autosome restriction and MAF/genotype-rate filters (`--maf 0.05 --geno 0.05 --hwe 1e-6`) produces a BED file from the cohort VCF (`r09b_make_plink_bed`); KING-format kinship coefficients are computed via `--make-king-table` (`r09c_kinship_table`). A custom Python helper (*scripts/lpb-exome-prioritisation-pick-family-representatives.py*) performes connected-component analysis on related-pair edges (KING kinship ≥ 0.0442, the third-degree-relative threshold), retaining one lexicographically-first representative per family (`r09d_pick_representatives`). The cohort VCF is then subset to representatives and re-tagged with bcftools +fill-tags AC,AN; sites with AC ≥ 2 among representatives that are absent or rare (AF < 0.001) in gnomAD v4.1 are flagged as artifact-suspect tuples (`r09e_artifact_blacklist`). This procedure removes recurrent batch / mapping / sample-prep artifacts that gnomAD-AF filtering alone cannot detect, while avoiding false positives from variants shared across related samples.
 
 #### 7. Per-sample VCF extraction and annotation
 The cohort VCF is demultiplexed into per-sample VCFs by bcftools 1.19 with private-variant retention (`r10_per_sample_vcf`).
@@ -229,7 +229,7 @@ Genetic sex is inferred from sequencing coverage over the capture targets of the
 
 #### 10. Tier classification
 *scripts/lpb-exome-prioritisation-tier-candidates.py*<br>
-A Python script classifies per-sample variants into three tiers (rule r12_tier_candidates). Common variants (gnomAD popmax AF ≥ 0.001) and internal artifact sites are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
+A Python script classifies per-sample variants into three tiers (rule `r12_tier_candidates`). Common variants (gnomAD popmax AF ≥ 0.001) and internal artifact sites are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
 - **Tier A** captures DROP-testable predicted loss-of-function and splice-disrupting variants (LOFTEE high-confidence LoF, or SpliceAI max delta ≥ 0.20).
 - **Tier B** captures rank-only damaging missense candidates in constrained genes (gnomAD LOEUF < 0.6, from gnomAD v4.0+ (2024) paper) by AlphaMissense likely-pathogenic class (score ≥ 0.564) or ClinGen-endorsed REVEL ≥ 0.773 ([Pejaver et al. 2022](https://doi.org/10.1016/j.ajhg.2022.10.013)).
 - **Tier C** captures any rare protein-altering variant in a curated gene set (SCHEMA at FDR ≤ 0.25, ASC at FDR ≤ 0.25, or DDG2P confidence ≥ 2). Per-panel boolean membership flags and panel-specific annotation columns (e.g., SCHEMA Q meta, OR for protein-truncating variants; DDG2P mode-of-inheritance and aggregated phenotypes) are appended to all output tables. BipEx burden statistics are reported as annotation only and do not define Tier C panel membership.
@@ -564,7 +564,7 @@ cibersortx/fractions --username you@lab.org --token xxxxxxxx \
 **Cell composition assessment for donor samples using output of the rules r08/r09**<br>
 *scripts/lpb-post-drop-cell-type-assessment.R*<br>
 Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
-<img src="images/cell_type.png" alt="Cell types by samples" width="45%"><br>
+<img src="images/cell_type.png" alt="Cell types by samples" width="65%"><br>
 
 #### 10. Pipeline outputs
 Per sample:
@@ -687,10 +687,10 @@ Since many of my RNA-seq samples were singletons, I just used median for the coh
 
 Helper functions:<br>
 *scripts/lpb-post-drop-fgsea-emap.R* — analagous to the `emapplot()` function from [`enrichplot`](https://doi.org/10.18129/B9.bioc.enrichplot).<br>
-<img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="45%"><br>
+<img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="65%"><br>
 
 *scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* — similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
-<img src="images/ba9_gtex_SZ07_gsea_kegg_plot.png" alt="Compact GSEA visualisation" width="45%"><br>
+<img src="images/ba9_gtex_SZ07_gsea_kegg_plot.png" alt="Compact GSEA visualisation" width="65%"><br>
 
 ### Second pass
 *scripts/lpb-post-drop-outrider-2nd-pass.R*<br>
@@ -721,13 +721,13 @@ Helper functions:
 *scripts/lpb-post-drop-donor-specificity-table.R*. Displays the top enriched GSEA pathways with the largest NES differences between a specific donor and the other donors.
 *lpb-post-drop-classify-pathways.R*
 Helps classify pathways into categories for the figure.<br>
-<img src="images/plot_donor_specificity_table.png" alt="Main post-OUTRIDER figure" width="45%"><br>
+<img src="images/plot_donor_specificity_table.png" alt="Main post-OUTRIDER figure" width="65%"><br>
 
 Third pass with [GSVA](https://doi.org/10.1186/1471-2105-14-7) (a common ssPA method):
 *scripts\lpb-post-drop-gsva-3rd-pass.R*
 
 GSEA with OUTRIDER looks much better than GSVA since OUTRIDER's autoencoder seems to correct for cell composition.<br>
-<img src="images/spec_vs_score_by_method.png" alt="GSVA-vs-OUTRIDER correlations with neuronality" width="45%"><br>
+<img src="images/spec_vs_score_by_method.png" alt="GSVA-vs-OUTRIDER correlations with neuronality" width="65%"><br>
 
 ## AI usage disclosure
 The scripts were developed with assistance from Claude Opus 4.7 / 4.8
