@@ -39,11 +39,6 @@ import sys
 # To check: zcat your_R1.fq.gz | head -2 | tail -1 | wc -c   (subtract 1 for newline)
 READ_LENGTH = int(os.environ.get("READ_LENGTH", "150")) # 150 bp is the default
 SJDB_OVERHANG = READ_LENGTH - 1
-if not 25 <= READ_LENGTH <= 500:
-    sys.exit(f"[ERR] READ_LENGTH={READ_LENGTH} is implausible for Illumina "
-             "RNA-seq; expected ~50-250 (per mate, not the sum of both mates)")
-print(f"[config] READ_LENGTH={READ_LENGTH}  -> sjdbOverhang={SJDB_OVERHANG}, "
-      f"index={STAR_INDEX}", flush=True)
 
 # Sample table
 # columns: name, path, dataset1, dataset2, extension, include_in_analysis
@@ -81,7 +76,6 @@ if (~_present_mask).any():
 samples = sample_data["name"].tolist()
 print(f"Aligning {len(samples)} samples")
 
-
 # Reference paths.
 # IMPORTANT: download these files to the indicated locations before running.
 # See "Reference download instructions" at the bottom of this file.
@@ -90,6 +84,12 @@ GENOME_FA   = REF_DIR + "/Homo_sapiens_assembly38_noALT_noHLA_noDecoy.fasta"
 GTF         = REF_DIR + "/gencode.v47.GRCh38.annotation.gtf"
 STAR_INDEX  = REF_DIR + f"/star_index_oh{SJDB_OVERHANG}"
 RSEM_INDEX  = REF_DIR + "/rsem_reference"
+
+if not 25 <= READ_LENGTH <= 500:
+    sys.exit(f"[ERR] READ_LENGTH={READ_LENGTH} is implausible for Illumina "
+             "RNA-seq; expected ~50-250 (per mate, not the sum of both mates)")
+print(f"[config] READ_LENGTH={READ_LENGTH}  -> sjdbOverhang={SJDB_OVERHANG}, "
+      f"index={STAR_INDEX}", flush=True)
 
 # Container versions (matching GTEx V11 release where possible)
 STAR_CONTAINER   = "docker://quay.io/biocontainers/star:2.7.11b--h43eeafb_0"
