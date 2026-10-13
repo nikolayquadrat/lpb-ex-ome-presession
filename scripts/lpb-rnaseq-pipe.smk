@@ -37,8 +37,13 @@ import sys
 # Read length in your FASTQs. CRITICAL: STAR's --sjdbOverhang must be
 # (read_length - 1). GTEx itself uses 75 because their reads are 2x76bp.
 # To check: zcat your_R1.fq.gz | head -2 | tail -1 | wc -c   (subtract 1 for newline)
-READ_LENGTH = 150   # <-- ADJUST TO ACTUAL READ LENGTH
+READ_LENGTH = int(os.environ.get("READ_LENGTH", "150")) # 150 bp is the default
 SJDB_OVERHANG = READ_LENGTH - 1
+if not 25 <= READ_LENGTH <= 500:
+    sys.exit(f"[ERR] READ_LENGTH={READ_LENGTH} is implausible for Illumina "
+             "RNA-seq; expected ~50-250 (per mate, not the sum of both mates)")
+print(f"[config] READ_LENGTH={READ_LENGTH}  -> sjdbOverhang={SJDB_OVERHANG}, "
+      f"index={STAR_INDEX}", flush=True)
 
 # Sample table
 # columns: name, path, dataset1, dataset2, extension, include_in_analysis
