@@ -597,6 +597,377 @@ if not DECONV_ACTIVE:
         _reason = "disabled (set -e DECONV_ENABLED=1 at container start to turn on)"
     print(f"[r09] deconvolution stage inactive: {_reason}")
 
+# =============================================================================
+# 11. RNA-seq genotype extraction, chip concordance and kinship  (r11a .. r11n)
+# =============================================================================
+# Produce a PLINK fileset of CONFIDENT genotypes called from the RNA-seq BAMs,
+# in the SAME BUILD and with the SAME VARIANT IDs as an existing SNP-array
+# (chip) fileset, then use it for (a) identity / swap checking and (b) kinship.
+#
+# -----------------------------------------------------------------------------
+# THE CENTRAL INVARIANT
+# -----------------------------------------------------------------------------
+#   The output fileset is always in the CHIP's coordinate system, carrying the
+#   CHIP's variant IDs (rsIDs where the manifest has them).
+#
+# The BAMs are hg38 (GENOME_FA is the TOPMed hg38 reference, GENCODE v47), but
+# the chip is typically hg19. So coordinates travel in both directions:
+#
+#   chip .bim (hg19)  --liftOver-->  hg38 positions  -->  pileup / call in hg38
+#        ^                                                        |
+#        +------------- crosswalk maps calls back ----------------+
+#
+# Only the SITE LIST is lifted over -- never a VCF, never genotypes. Because we
+# genotype at known array sites only, the liftover is a 1 bp-per-row BED job,
+# and every mapped site keeps its hg19 coordinates and rsID alongside, which is
+# exactly the crosswalk needed to write the result back out in hg19.
+#
+# Liftover artefacts are handled rather than ignored:
+#   * sites that fail to lift are dropped and counted
+#   * sites that lift to more than one hg38 location are dropped (ambiguous)
+#   * sites that lift to an inverted region come back strand-flipped. These are
+#     detected in r11e (neither chip allele matches the hg38 reference base, but
+#     the complement does), counted, and the alleles are complemented back to
+#     the chip's orientation in r11i. This is only safe because A/T and C/G
+#     sites were already excluded, where a flip is indistinguishable from a
+#     genotype swap.
+#
+# -----------------------------------------------------------------------------
+# DESIGN DECISION -- targeted, not de novo
+# -----------------------------------------------------------------------------
+# We do NOT discover variants in the RNA. We genotype ONLY at the sites the chip
+# already assays, with bcftools call -C alleles constraining each site to the
+# chip's own REF/ALT pair. Reasons:
+#   1. Concordance only ever uses the intersection; calling elsewhere is waste.
+#   2. Identical alleles at identical positions means the filesets merge with no
+#      post-hoc allele reconciliation.
+#   3. It sidesteps de novo RNA calling problems entirely: splice-junction
+#      mapping artefacts, ADAR A-to-I editing read as A>G, allele-specific
+#      expression. The residual issue is LOSS of hets, which degrades
+#      concordance gracefully -- it never manufactures false identity.
+#
+# -----------------------------------------------------------------------------
+# WHAT "CONFIDENT" MEANS (all tunable, see ENV VARS)
+# -----------------------------------------------------------------------------
+#   site:  single-letter ACGT alleles only (indel/CNV/multi-base probes dropped);
+#          biallelic; NOT strand-ambiguous (A/T and C/G excluded); lifts
+#          uniquely to hg38; falls inside a union-exon interval (transcribed)
+#   reads: MAPQ >= 255 (STAR unique -- see NOTE), base quality >= 20,
+#          unmapped/secondary/QC-fail/duplicate excluded, BAQ off, indels off
+#   call:  DP >= 10 and GQ >= 20, else set MISSING (not dropped)
+#   site kept if non-missing in >= 50% of samples
+#
+# NOTE ON MAPQ 255 -- this pipeline's "patched.md.bam" is patched in NAME ONLY
+# (see the comment above r03f_markduplicates: bamsync/MAPQ patching is skipped
+# because we start from FASTQ). STAR's native convention is therefore intact:
+# 255 = unique, 3 = 2 loci, 1 = 3-4 loci, 0 = >=5. So -q 255 is the correct
+# unique-only filter. If a GTEx-style MAPQ 255->60 patch is ever added upstream,
+# set GENOCHECK_MIN_MQ=60 or this stage silently returns zero coverage.
+#
+# -----------------------------------------------------------------------------
+# INPUTS  (/tmp/data/00_additional_files/genetics/)   -- basenames are free-form
+# -----------------------------------------------------------------------------
+#   <anything>.bim              REQUIRED. The .bim is the anchor: it is found by
+#                               glob, so the fileset can be called whatever you
+#                               like. Several .bim files in the directory means
+#                               GENOCHECK_CHIP_PREFIX must say which to use.
+#   <same>.bed / <same>.fam     OPTIONAL. Present -> the IDENTITY tier runs
+#                               (merge + kinship + similarity report). Absent ->
+#                               SITES tier: the .bim still supplies the site
+#                               list, so RNA genotypes, the PLINK deliverable
+#                               and RNA-vs-RNA kinship are produced, but no
+#                               identity check is possible.
+#   hg19ToHg38.over.chain.gz    REQUIRED when the array is hg19. Found by that
+#                               name, or as the single *.chain.gz in the dir.
+#   sample_map.tsv  OPTIONAL    2 cols, no header: rna_sample  array_id
+#                               A HYPOTHESIS TO TEST, never an assumption --
+#                               matching is always done from the genotypes, and
+#                               r11q reports agreement or disagreement with it.
+#   donor_map.tsv   OPTIONAL    2 cols, no header: rna_sample  donor_id
+#                               Lets r11l flag expected same-donor RNA pairs.
+#
+# -----------------------------------------------------------------------------
+# OUTPUTS  (/tmp/data/11_genocheck/)
+# -----------------------------------------------------------------------------
+#   rnaseq_genotypes.{bed,bim,fam}   <- the deliverable, in ARRAY build
+#   rnaseq_genotypes.hg38.vcf.gz     the raw calls, hg38, for reference
+#   00_genocheck_site_stats.tsv      per-sample call rate / depth / het
+#   00_genocheck_crosswalk.tsv.gz    hg19 <-> hg38 site table actually used
+#   00_kinship_rna.kin0              KING, RNA samples only
+#   00_kinship_rna_report.tsv        RNA pairs, labelled (donor structure)
+#   -- IDENTITY tier only --
+#   00_kinship_merged.kin0           KING, RNA + array together
+#   00_similarity_pairs.tsv          every pair: concordance, kinship, IBS0
+#   00_similarity_report.tsv         one row per RNA sample: best array match,
+#                                    margin to runner-up, verdict
+#
+# ENV VARS (same convention as CONTAMINATION_ENABLED / DECONV_ENABLED)
+#   GENOCHECK_ENABLED      auto (default) | 1 | 0   auto = on if a .bim is found
+#   GENOCHECK_IDENTITY     auto (default) | 0        0 forces the SITES tier
+#   GENOCHECK_DIR          default /tmp/data/00_additional_files/genetics
+#   GENOCHECK_CHIP_PREFIX  fileset path without extension; only needed when the
+#                          directory holds more than one .bim
+#   GENOCHECK_CHIP_BUILD   hg19 (default) | hg38    build of the array fileset
+#   GENOCHECK_CHAIN        chain file path (else auto-discovered in the dir)
+#   GENOCHECK_MIN_DP       default 10     per-genotype depth
+#   GENOCHECK_MIN_GQ       default 20     per-genotype quality
+#   GENOCHECK_MIN_MQ       default 255    read mapping quality (STAR unique)
+#   GENOCHECK_MIN_BQ       default 20     base quality
+#   GENOCHECK_MAX_DEPTH    default 10000  mpileup per-file depth cap
+#   GENOCHECK_MAX_MISSING  default 0.5    drop site if more missing than this
+#   GENOCHECK_KEEP_DUPS    default 0      1 = do NOT filter duplicate reads
+#   GENOCHECK_INCLUDE_X    default 0      1 = also genotype chrX
+#   GENOCHECK_LD_PRUNE     default 0      1 = LD-prune before kinship
+#   GENOCHECK_DUP_KINSHIP  default 0.35   kinship above this = same individual
+#   GENOCHECK_MATCH_CONC   default 0.85   concordance for a `match` verdict
+#   GENOCHECK_MAX_IBS0     default 0.005  max IBS0 rate for a `match` verdict
+#   GENOCHECK_MIN_MARGIN   default 0.05   min concordance gap to the runner-up
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Genotype fileset discovery
+# -----------------------------------------------------------------------------
+# The array fileset lives in GENETICS_DIR under ANY basename; the .bim is the
+# anchor. Two tiers of capability, decided by what is actually present:
+#
+#   .bim only                 -> SITES tier. The .bim supplies the site list, so
+#                                RNA genotypes, the PLINK deliverable and the
+#                                RNA-vs-RNA kinship (donor structure) are all
+#                                produced. No identity check is possible -- there
+#                                are no array genotypes to compare against.
+#   .bim + .bed + .fam        -> IDENTITY tier. Everything above, plus the merge,
+#                                the cross-dataset kinship and the similarity
+#                                report.
+#
+# Ambiguity is never resolved silently: several .bim files in the directory and
+# no GENOCHECK_CHIP_PREFIX disables the stage with the candidate list printed
+# (or errors, if the stage was force-enabled).
+# -----------------------------------------------------------------------------
+GENETICS_DIR = os.environ.get("GENOCHECK_DIR",
+                              "/tmp/data/00_additional_files/genetics")
+GENOCHECK_OUT = "/tmp/data/11_genocheck"
+GENOCHECK_SAMPLE_MAP = GENETICS_DIR + "/sample_map.tsv"
+GENOCHECK_DONOR_MAP  = GENETICS_DIR + "/donor_map.tsv"
+
+
+def _genocheck_find_prefix(d):
+    """(prefix, note, candidates). Basename is free-form; *.bim is the anchor."""
+    import glob as _glob
+    env = os.environ.get("GENOCHECK_CHIP_PREFIX", "").strip()
+    if env:
+        pre = env[:-4] if env.endswith(".bim") else env
+        return pre, "set via GENOCHECK_CHIP_PREFIX", []
+    bims = sorted(_glob.glob(os.path.join(d, "*.bim")))
+    if len(bims) == 1:
+        return bims[0][:-4], f"auto-discovered in {d}", bims
+    if len(bims) > 1:
+        return "", f"{len(bims)} .bim files in {d} -- ambiguous", bims
+    return "", f"no *.bim in {d}", []
+
+
+def _genocheck_find_chain(d):
+    """Chain file for hg19->hg38: env > conventional name > a single *.chain*."""
+    import glob as _glob
+    env = os.environ.get("GENOCHECK_CHAIN", "").strip()
+    if env:
+        return env
+    conventional = os.path.join(d, "hg19ToHg38.over.chain.gz")
+    if os.path.isfile(conventional):
+        return conventional
+    hits = sorted(_glob.glob(os.path.join(d, "*.chain.gz"))
+                  + _glob.glob(os.path.join(d, "*.chain")))
+    return hits[0] if len(hits) == 1 else conventional
+
+
+GENOCHECK_CHIP_PREFIX, _chip_note, _chip_candidates = \
+    _genocheck_find_prefix(GENETICS_DIR)
+GENOCHECK_CHAIN = _genocheck_find_chain(GENETICS_DIR)
+
+
+def _nonempty(path):
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+
+_have_bim = bool(GENOCHECK_CHIP_PREFIX) and _nonempty(GENOCHECK_CHIP_PREFIX + ".bim")
+_have_full = _have_bim and _nonempty(GENOCHECK_CHIP_PREFIX + ".bed") \
+    and _nonempty(GENOCHECK_CHIP_PREFIX + ".fam")
+
+_genocheck_override = os.environ.get("GENOCHECK_ENABLED", "auto").lower()
+if _genocheck_override in ("0", "false", "no", "off"):
+    GENOCHECK_ENABLED = False
+elif _genocheck_override in ("1", "true", "yes", "on"):
+    GENOCHECK_ENABLED = True
+elif _genocheck_override == "auto":
+    GENOCHECK_ENABLED = _have_bim
+else:
+    print(f"[genocheck] unrecognised GENOCHECK_ENABLED='{_genocheck_override}', "
+          f"falling back to auto-detection", file=sys.stderr)
+    GENOCHECK_ENABLED = _have_bim
+
+# Identity tier needs real array genotypes, not just the site list.
+_identity_override = os.environ.get("GENOCHECK_IDENTITY", "auto").lower()
+if _identity_override in ("0", "false", "no", "off"):
+    GENOCHECK_IDENTITY = False
+else:
+    GENOCHECK_IDENTITY = GENOCHECK_ENABLED and _have_full
+
+GENOCHECK_CHIP_BUILD  = os.environ.get("GENOCHECK_CHIP_BUILD", "hg19").strip().lower()
+GENOCHECK_MIN_DP      = int(os.environ.get("GENOCHECK_MIN_DP", "10"))
+GENOCHECK_MIN_GQ      = int(os.environ.get("GENOCHECK_MIN_GQ", "20"))
+GENOCHECK_MIN_MQ      = int(os.environ.get("GENOCHECK_MIN_MQ", "255"))
+GENOCHECK_MIN_BQ      = int(os.environ.get("GENOCHECK_MIN_BQ", "20"))
+GENOCHECK_MAX_DEPTH   = int(os.environ.get("GENOCHECK_MAX_DEPTH", "10000"))
+GENOCHECK_MAX_MISSING = float(os.environ.get("GENOCHECK_MAX_MISSING", "0.5"))
+GENOCHECK_KEEP_DUPS   = os.environ.get("GENOCHECK_KEEP_DUPS", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+GENOCHECK_INCLUDE_X   = os.environ.get("GENOCHECK_INCLUDE_X", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+GENOCHECK_LD_PRUNE    = os.environ.get("GENOCHECK_LD_PRUNE", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
+GENOCHECK_DUP_KINSHIP = float(os.environ.get("GENOCHECK_DUP_KINSHIP", "0.35"))
+# Similarity thresholds for the r11q verdict. Heuristics, not hard science --
+# see the interpretation note in the KINSHIP header.
+GENOCHECK_MATCH_CONC  = float(os.environ.get("GENOCHECK_MATCH_CONC", "0.85"))
+GENOCHECK_MAX_IBS0    = float(os.environ.get("GENOCHECK_MAX_IBS0", "0.005"))
+GENOCHECK_MIN_MARGIN  = float(os.environ.get("GENOCHECK_MIN_MARGIN", "0.05"))
+
+# hg38 contigs we genotype on (the pileup space)
+GENOCHECK_CHROMS = [f"chr{i}" for i in range(1, 23)]
+if GENOCHECK_INCLUDE_X:
+    GENOCHECK_CHROMS.append("chrX")
+
+GENOCHECK_NEEDS_LIFT = GENOCHECK_CHIP_BUILD in ("hg19", "grch37", "b37", "37")
+
+# Duplicates excluded by default. For RNA a "duplicate" at a highly expressed
+# gene is often a genuinely independent molecule, so dropping them costs depth,
+# but keeping them lets one over-amplified original molecule masquerade as a
+# high-confidence homozygote. For identity work, losing depth is the cheaper error.
+GENOCHECK_FF = "UNMAP,SECONDARY,QCFAIL" if GENOCHECK_KEEP_DUPS \
+    else "UNMAP,SECONDARY,QCFAIL,DUP"
+
+# Container tags: VERIFY these resolve before the first run (`singularity pull`);
+# biocontainers build-hash suffixes drift. If your nikolayquadrat/toolbox image
+# carries bcftools / plink / plink2 / CrossMap, point these at it instead.
+BCFTOOLS_CONTAINER = os.environ.get(
+    "BCFTOOLS_CONTAINER", "docker://quay.io/biocontainers/bcftools:1.19--h8b25389_0")
+PLINK2_CONTAINER = os.environ.get(
+    "PLINK2_CONTAINER", "docker://quay.io/biocontainers/plink2:2.00a5.10--h4ac6f70_0")
+PLINK1_CONTAINER = os.environ.get(
+    "PLINK1_CONTAINER", "docker://quay.io/biocontainers/plink:1.90b6.21--h779adbc_1")
+CROSSMAP_CONTAINER = os.environ.get(
+    "CROSSMAP_CONTAINER", "docker://quay.io/biocontainers/crossmap:0.7.0--pyhdfd78af_0")
+
+if GENOCHECK_ENABLED and not _have_bim:
+    if _chip_candidates:
+        sys.exit("[genocheck] " + _chip_note + ":\n"
+                 + "\n".join("              " + b for b in _chip_candidates)
+                 + "\n            Set GENOCHECK_CHIP_PREFIX to the one to use "
+                   "(path without the .bim suffix).")
+    sys.exit(f"[genocheck] enabled but no usable .bim found ({_chip_note})")
+
+if GENOCHECK_ENABLED:
+    if GENOCHECK_CHIP_BUILD not in ("hg19", "grch37", "b37", "37",
+                                    "hg38", "grch38", "b38", "38"):
+        sys.exit(f"[genocheck] GENOCHECK_CHIP_BUILD='{GENOCHECK_CHIP_BUILD}' "
+                 "not understood; use hg19 or hg38")
+    if GENOCHECK_NEEDS_LIFT and not os.path.isfile(GENOCHECK_CHAIN):
+        sys.exit(
+            f"[genocheck] chip build is {GENOCHECK_CHIP_BUILD}, so the site list "
+            f"must be lifted to hg38, but no chain file at:\n    {GENOCHECK_CHAIN}\n"
+            "            Download hg19ToHg38.over.chain.gz from UCSC "
+            "(hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/) and stage it in "
+            f"{GENETICS_DIR}, or set GENOCHECK_CHAIN.")
+    print(f"[genocheck] enabled; fileset={GENOCHECK_CHIP_PREFIX} ({_chip_note})",
+          file=sys.stderr)
+    print(f"[genocheck] tier: "
+          + ("IDENTITY (.bed/.bim/.fam present -- merge, kinship and "
+             "similarity report will run)" if GENOCHECK_IDENTITY else
+             "SITES ONLY (.bim without .bed/.fam -- RNA genotypes and RNA-vs-RNA "
+             "kinship only, no identity check)"), file=sys.stderr)
+    print(f"[genocheck] build={GENOCHECK_CHIP_BUILD} "
+          f"lift={'hg19->hg38' if GENOCHECK_NEEDS_LIFT else 'none'}; output "
+          f"fileset will be in {GENOCHECK_CHIP_BUILD} coords with chip variant IDs",
+          file=sys.stderr)
+    print(f"[genocheck] filters: MQ>={GENOCHECK_MIN_MQ} BQ>={GENOCHECK_MIN_BQ} "
+          f"DP>={GENOCHECK_MIN_DP} GQ>={GENOCHECK_MIN_GQ} "
+          f"max_missing={GENOCHECK_MAX_MISSING} ff={GENOCHECK_FF}",
+          file=sys.stderr)
+    for _lbl, _p in (("sample map (hypothesis to TEST, not assumed)",
+                      GENOCHECK_SAMPLE_MAP),
+                     ("donor map", GENOCHECK_DONOR_MAP)):
+        if _nonempty(_p):
+            print(f"[genocheck] {_lbl}: {_p}", file=sys.stderr)
+else:
+    print(f"[genocheck] disabled ({_chip_note}, or forced off)", file=sys.stderr)
+
+
+# -----------------------------------------------------------------------------
+# Small shared helpers (module level so several rules can use them)
+# -----------------------------------------------------------------------------
+
+def _genocheck_read_map(path):
+    """Two-column whitespace file -> dict. Missing/empty file -> {}."""
+    out = {}
+    if not (os.path.isfile(path) and os.path.getsize(path) > 0):
+        return out
+    with open(path) as fh:
+        for line in fh:
+            f = line.split()
+            if len(f) >= 2 and not f[0].startswith("#"):
+                out[f[0]] = f[1]
+    return out
+
+
+def _genocheck_read_kin0(path):
+    """
+    Read a plink2 --make-king-table .kin0, normalising the column names, which
+    differ between plink2 builds (#FID1/#IID1 vs ID1/ID2, KINSHIP vs Kinship).
+    The resolved names are returned in df.attrs: 'kinship', 'ibs0', 'nsnp'
+    ('ibs0'/'nsnp' may be None if that build does not emit them).
+    """
+    import pandas as pd
+    df = pd.read_csv(path, sep=r"\s+")
+    ren = {"#FID1": "FID1", "#IID1": "IID1", "#ID1": "IID1",
+           "ID1": "IID1", "ID2": "IID2"}
+    df = df.rename(columns={k: v for k, v in ren.items() if k in df.columns})
+    if "IID1" not in df.columns or "IID2" not in df.columns:
+        raise ValueError(f"{path}: cannot find the two sample-ID columns; "
+                         f"found {list(df.columns)}")
+
+    def pick(*names):
+        for n in names:
+            if n in df.columns:
+                return n
+        return None
+
+    kinship = pick("KINSHIP", "Kinship", "kinship")
+    if kinship is None:
+        raise ValueError(f"{path}: no KINSHIP column; found {list(df.columns)}")
+    df.attrs["kinship"] = kinship
+    ibs0 = pick("IBS0", "Ibs0", "ibs0")
+    nsnp = pick("NSNP", "N_SNP", "Nsnp", "nsnp")
+    df.attrs["ibs0"] = ibs0
+    df.attrs["nsnp"] = nsnp
+
+    # IBS0 is a PROPORTION in KING-style .kin0 output (plink2 mimics KING), but
+    # some builds/tools emit a count. Decide from the data rather than assuming:
+    # an IBS0 count over tens of thousands of SNPs exceeds 1 for any unrelated
+    # pair, while a proportion never does. If every pair is a duplicate both
+    # readings give ~0, so the ambiguity is harmless.
+    if ibs0 is not None:
+        mx = pd.to_numeric(df[ibs0], errors="coerce").max()
+        if nsnp is not None and pd.notna(mx) and mx > 1.0:
+            df["ibs0_rate"] = pd.to_numeric(df[ibs0], errors="coerce") / \
+                pd.to_numeric(df[nsnp], errors="coerce").replace(0, pd.NA)
+            df.attrs["ibs0_scale"] = "count/NSNP"
+        else:
+            df["ibs0_rate"] = pd.to_numeric(df[ibs0], errors="coerce")
+            df.attrs["ibs0_scale"] = "proportion"
+    return df
+
+
+
+
 
 # -----------------------------------------------------------------------------
 # Targets
@@ -649,6 +1020,11 @@ rule all:
             + expand(f"{DECONV_OUT}/_cibersortx/{{ref}}/mixture.txt",
                      ref=DECONV_REFERENCES))
            if (DECONV_ACTIVE and DECONV_CIBERSORTX) else []),
+        *([GENOCHECK_OUT + "/rnaseq_genotypes.bed",
+            GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
+            GENOCHECK_OUT + "/00_kinship_rna_report.tsv"] if GENOCHECK_ENABLED else []),
+        *([GENOCHECK_OUT + "/00_similarity_report.tsv",
+            GENOCHECK_OUT + "/00_similarity_pairs.tsv"] if GENOCHECK_IDENTITY else []),
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
 
 # -----------------------------------------------------------------------------
@@ -3454,6 +3830,1185 @@ rule r10b_expression_xlsx:
         echo "[r10b] output on disk:"
         ls -l {output.xlsx}
         """
+
+
+# -----------------------------------------------------------------------------
+# r11a: chip .bim -> filtered site list, in chip coordinates
+# -----------------------------------------------------------------------------
+
+rule r11a_genocheck_sites:
+    """
+    Keep only sites that can be both genotyped from RNA and unambiguously
+    matched back to the array:
+
+      * single-letter ACGT alleles on BOTH sides. This drops indels, CNV and
+        multi-base probes, PLINK I/D coding, '-' and monomorphic '0' entries in
+        one test -- nothing that is not a clean SNP survives.
+      * biallelic (a1 != a2)
+      * NOT strand-ambiguous: A/T and C/G pairs are excluded outright. For
+        these, a strand flip is indistinguishable from a genotype swap, which
+        is the exact error this QC exists to detect.
+      * autosomes (+chrX if GENOCHECK_INCLUDE_X); PLINK 23/24/25/26 codes
+        resolved; the ORIGINAL chip chromosome string is carried through
+        unchanged so the final fileset merges with the chip without recoding.
+
+    Transitions (A/G, C/T) are deliberately NOT dropped. They are ADAR-editing
+    prone, but editing inflates het calls at a modest rate while costing 2/3 of
+    all SNPs to exclude -- a bad trade when the surviving set only has to
+    establish identity.
+    """
+    input:
+        bim = GENOCHECK_CHIP_PREFIX + ".bim",
+    output:
+        sites = GENOCHECK_OUT + "/sites_chipbuild.tsv",
+        bed   = GENOCHECK_OUT + "/sites_chipbuild.bed",
+        stats = GENOCHECK_OUT + "/sites_chipbuild.log",
+    run:
+        import numpy as np
+        import pandas as pd
+
+        AMBIG = {frozenset(("A", "T")), frozenset(("C", "G"))}
+        ACGT = list("ACGT")
+        # hg38 contig names we will end up genotyping on, as bare numbers/letters
+        want = {c.replace("chr", "") for c in GENOCHECK_CHROMS}
+        counts = {}
+
+        bim = pd.read_csv(input.bim, sep=r"\s+", header=None,
+                          names=["chrom", "id", "cm", "bp", "a1", "a2"],
+                          dtype={"chrom": str, "id": str, "bp": np.int64,
+                                 "a1": str, "a2": str})
+        counts["chip_variants"] = len(bim)
+
+        # normalised contig (for liftover + selection); chrom_orig preserved
+        bim["chrom_orig"] = bim["chrom"]
+        c = bim["chrom"].str.replace(r"^chr", "", regex=True, case=False)
+        c = c.replace({"23": "X", "24": "Y", "25": "X", "26": "MT"})
+        bim["contig"] = c
+        bim = bim[bim["contig"].isin(want)]
+        counts["on_requested_chroms"] = len(bim)
+
+        bim["a1"] = bim["a1"].str.upper().str.strip()
+        bim["a2"] = bim["a2"].str.upper().str.strip()
+        # single-letter ACGT on both sides, and biallelic
+        ok = bim["a1"].isin(ACGT) & bim["a2"].isin(ACGT) & (bim["a1"] != bim["a2"])
+        bim = bim[ok]
+        counts["single_letter_biallelic_snp"] = len(bim)
+
+        pairs = [frozenset((x, y)) for x, y in zip(bim["a1"], bim["a2"])]
+        bim = bim[[p not in AMBIG for p in pairs]]
+        counts["after_drop_AT_and_CG"] = len(bim)
+
+        bim = bim.drop_duplicates(subset=["contig", "bp"], keep="first")
+        bim = bim.drop_duplicates(subset=["id"], keep="first")
+        counts["after_dedup"] = len(bim)
+
+        bim = bim.sort_values(["contig", "bp"])
+        bim[["chrom_orig", "contig", "bp", "a1", "a2", "id"]].to_csv(
+            output.sites, sep="\t", header=False, index=False)
+
+        # BED for liftover. Name field packs everything needed to rejoin, with
+        # '|' as separator (never present in rsIDs or PLINK chrom codes).
+        with open(output.bed, "w") as fh:
+            for co, ct, bp, a1, a2, vid in bim[
+                    ["chrom_orig", "contig", "bp", "a1", "a2", "id"]].itertuples(
+                        index=False):
+                fh.write(f"chr{ct}\t{bp - 1}\t{bp}\t"
+                         f"{vid}|{co}|{bp}|{a1}|{a2}\n")
+
+        with open(output.stats, "w") as fh:
+            for k, v in counts.items():
+                fh.write(f"{k}\t{v}\n")
+                print(f"[genocheck][sites] {k}: {v}", file=sys.stderr)
+
+        if len(bim) < 1000:
+            raise ValueError(
+                f"only {len(bim)} usable chip SNPs; expected tens of thousands. "
+                "Check the .bim allele coding and chromosome naming.")
+
+
+# -----------------------------------------------------------------------------
+# r11b: lift the site list hg19 -> hg38  (no-op when the chip is already hg38)
+# -----------------------------------------------------------------------------
+
+rule r11b_genocheck_liftover:
+    """
+    CrossMap on a 1 bp-per-row BED. Only the SITE LIST is lifted; genotypes
+    never are. CrossMap writes successes to the output BED and failures to
+    <output>.unmap, which is counted in r11c.
+    """
+    input:
+        bed = GENOCHECK_OUT + "/sites_chipbuild.bed",
+        **({"chain": GENOCHECK_CHAIN} if GENOCHECK_NEEDS_LIFT else {}),
+    output:
+        bed   = GENOCHECK_OUT + "/sites_hg38_raw.bed",
+        unmap = GENOCHECK_OUT + "/sites_hg38_raw.bed.unmap",
+    params:
+        needs_lift = GENOCHECK_NEEDS_LIFT,
+        chain      = GENOCHECK_CHAIN,
+    singularity: CROSSMAP_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        if [ "{params.needs_lift}" = "True" ]; then
+            # CrossMap >=0.6 exposes `CrossMap`; older versions `CrossMap.py`
+            if command -v CrossMap >/dev/null 2>&1; then CM=CrossMap;
+            else CM=CrossMap.py; fi
+            $CM bed {params.chain} {input.bed} {output.bed}
+            # CrossMap writes failures to <out>.unmap; guarantee it exists
+            touch {output.unmap}
+        else
+            cp {input.bed} {output.bed}
+            : > {output.unmap}
+        fi
+        """
+
+
+rule r11c_genocheck_crosswalk:
+    """
+    Build the hg19 <-> hg38 crosswalk actually used downstream, and restrict to
+    transcribed sequence.
+
+      * a site must map to exactly ONE hg38 location, 1 bp wide. Sites with
+        multiple mappings are ambiguous and are dropped -- for identity work a
+        wrong position is worse than a missing one.
+      * the hg38 position must fall in a union-exon interval of the annotation
+        (overlapping/alternative exons merged, membership by binary search). A
+        site in an intron or intergenic region has no RNA coverage to call from,
+        so keeping it would only add missingness.
+
+    Emits the pileup inputs (BED + regions) in hg38, and the crosswalk keyed on
+    hg38 chrom:pos that r11i uses to write the result back out in chip coords.
+    """
+    input:
+        lifted = GENOCHECK_OUT + "/sites_hg38_raw.bed",
+        unmap  = GENOCHECK_OUT + "/sites_hg38_raw.bed.unmap",
+        gtf    = GTF,
+    output:
+        crosswalk = GENOCHECK_OUT + "/00_genocheck_crosswalk.tsv.gz",
+        regions   = GENOCHECK_OUT + "/sites_regions.txt",
+        stats     = GENOCHECK_OUT + "/crosswalk.log",
+    run:
+        import gzip
+        import numpy as np
+        from collections import Counter
+
+        keep_chroms = set(GENOCHECK_CHROMS)
+        counts = {}
+
+        # ---- parse lifted BED; reject non-unique and non-1bp mappings
+        name_hits = Counter()
+        rows = []
+        with open(input.lifted) as fh:
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                if len(f) < 4:
+                    continue
+                contig38, s, e, name = f[0], int(f[1]), int(f[2]), f[3]
+                name_hits[name] += 1
+                rows.append((contig38, s, e, name))
+        counts["lifted_rows"] = len(rows)
+
+        counts["failed_to_lift"] = sum(1 for _ in open(input.unmap)) \
+            if os.path.isfile(input.unmap) else 0
+
+        multi = {n for n, k in name_hits.items() if k > 1}
+        counts["dropped_multi_mapping"] = len(multi)
+
+        recs = []
+        n_badwidth = n_offchrom = 0
+        for contig38, s, e, name in rows:
+            if name in multi:
+                continue
+            if e - s != 1:
+                n_badwidth += 1
+                continue
+            if contig38 not in keep_chroms:
+                n_offchrom += 1
+                continue
+            vid, chrom_orig, bp_chip, a1, a2 = name.split("|")
+            recs.append((contig38, e, vid, chrom_orig, int(bp_chip), a1, a2))
+        counts["dropped_not_1bp"] = n_badwidth
+        counts["dropped_off_target_contig"] = n_offchrom
+        counts["unique_mapped_sites"] = len(recs)
+
+        # ---- union exons per contig (hg38; the GTF and the lifted sites agree)
+        raw = {}
+        opener = gzip.open if str(input.gtf).endswith(".gz") else open
+        with opener(input.gtf, "rt") as fh:
+            for line in fh:
+                if line[0] == "#":
+                    continue
+                f = line.split("\t", 5)
+                if len(f) < 5 or f[2] != "exon" or f[0] not in keep_chroms:
+                    continue
+                raw.setdefault(f[0], []).append((int(f[3]), int(f[4])))
+        starts_by, ends_by = {}, {}
+        for contig, ivs in raw.items():
+            ivs.sort()
+            ms, me = [], []
+            cs, ce = ivs[0]
+            for s, e in ivs[1:]:
+                if s <= ce + 1:
+                    ce = max(ce, e)
+                else:
+                    ms.append(cs); me.append(ce); cs, ce = s, e
+            ms.append(cs); me.append(ce)
+            starts_by[contig] = np.asarray(ms, dtype=np.int64)
+            ends_by[contig] = np.asarray(me, dtype=np.int64)
+        counts["exon_intervals_merged"] = int(sum(len(v) for v in starts_by.values()))
+
+        def in_exon(contig, pos):
+            s = starts_by.get(contig)
+            if s is None:
+                return False
+            e = ends_by[contig]
+            i = int(np.searchsorted(s, pos, side="right")) - 1
+            return i >= 0 and pos <= e[i]
+
+        recs = [r for r in recs if in_exon(r[0], r[1])]
+        counts["in_union_exon"] = len(recs)
+
+        # final ordering: hg38 chrom-major, position-ascending (mpileup needs it)
+        order = {c: i for i, c in enumerate(GENOCHECK_CHROMS)}
+        recs.sort(key=lambda r: (order[r[0]], r[1]))
+
+        with gzip.open(output.crosswalk, "wt") as cw, \
+                open(output.regions, "w") as rg:
+            cw.write("contig38\tpos38\tvariant_id\tchrom_chip\tpos_chip\t"
+                     "chip_a1\tchip_a2\n")
+            for contig38, pos38, vid, chrom_orig, bp_chip, a1, a2 in recs:
+                cw.write(f"{contig38}\t{pos38}\t{vid}\t{chrom_orig}\t"
+                         f"{bp_chip}\t{a1}\t{a2}\n")
+                rg.write(f"{contig38}:{pos38}-{pos38}\n")
+
+        with open(output.stats, "w") as fh:
+            for k, v in counts.items():
+                fh.write(f"{k}\t{v}\n")
+                print(f"[genocheck][crosswalk] {k}: {v}", file=sys.stderr)
+
+        if counts["lifted_rows"] and \
+                counts["failed_to_lift"] > 0.2 * counts["lifted_rows"]:
+            print("[genocheck][crosswalk] WARNING: >20% of sites failed to "
+                  "lift. Check that the chain file matches the chip's build "
+                  "direction (hg19->hg38, not the reverse).", file=sys.stderr)
+        if len(recs) < 1000:
+            raise ValueError(
+                f"only {len(recs)} sites survived liftover + exon restriction; "
+                "expected tens of thousands.")
+
+
+# -----------------------------------------------------------------------------
+# r11d / r11e: reference allele at each hg38 site
+# -----------------------------------------------------------------------------
+
+rule r11d_genocheck_refbase:
+    """
+    Reference base at every hg38 site, in batched samtools faidx calls (a
+    per-site call would be ~50k process spawns; faidx --region-file is not
+    available in older samtools, so regions go in as arguments).
+    """
+    input:
+        regions = GENOCHECK_OUT + "/sites_regions.txt",
+        fasta   = GENOME_FA,
+    output:
+        fa = temp(GENOCHECK_OUT + "/sites_refbase.fa"),
+    singularity: SAMTOOLS_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        : > {output.fa}
+        tr '\n' '\0' < {input.regions} \
+          | xargs -0 -n 2000 samtools faidx {input.fasta} >> {output.fa}
+        """
+
+
+rule r11e_genocheck_alleles:
+    """
+    Crosswalk + reference bases -> the allele file for `bcftools call -C alleles`
+    (CHROM POS REF,ALT in hg38 orientation).
+
+    A .bim gives A1/A2 without saying which is reference, and liftover can land
+    a site in an inverted region, so orientation is resolved explicitly:
+      * REF == A1 -> ALT = A2;  REF == A2 -> ALT = A1
+      * neither -> complement both and retry. A successful retry means the site
+        is strand-flipped relative to the chip manifest (manifest convention or
+        an inverted liftover block). It is recorded in the `flip` column so
+        r11i can complement the alleles back to the chip's orientation.
+      * still neither -> the site disagrees with the reference; dropped. A large
+        count here means the chain or the declared build is wrong.
+    """
+    input:
+        crosswalk = GENOCHECK_OUT + "/00_genocheck_crosswalk.tsv.gz",
+        fa        = GENOCHECK_OUT + "/sites_refbase.fa",
+    output:
+        alleles = GENOCHECK_OUT + "/sites_alleles.tsv",
+        bed     = GENOCHECK_OUT + "/sites_hg38.bed",
+        table   = GENOCHECK_OUT + "/sites_final.tsv",
+        stats   = GENOCHECK_OUT + "/sites_alleles.log",
+    run:
+        import gzip
+
+        COMP = {"A": "T", "T": "A", "C": "G", "G": "C"}
+
+        refbase, key = {}, None
+        with open(input.fa) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                if line[0] == ">":
+                    contig, _, rng = line[1:].partition(":")
+                    key = (contig, int(rng.split("-")[0]))
+                    refbase[key] = ""
+                elif key is not None:
+                    refbase[key] += line.upper()
+
+        n_in = n_out = n_flip = n_mismatch = n_badref = 0
+        out_rows = []
+        with gzip.open(input.crosswalk, "rt") as fh:
+            next(fh)
+            for line in fh:
+                contig38, pos38, vid, chrom_chip, pos_chip, a1, a2 = \
+                    line.rstrip("\n").split("\t")
+                pos38 = int(pos38)
+                n_in += 1
+                ref = refbase.get((contig38, pos38), "")
+                if len(ref) != 1 or ref not in COMP:
+                    n_badref += 1
+                    continue
+                flip = 0
+                if ref == a1:
+                    alt = a2
+                elif ref == a2:
+                    alt = a1
+                else:
+                    c1, c2 = COMP.get(a1), COMP.get(a2)
+                    if ref == c1:
+                        alt, flip = c2, 1; n_flip += 1
+                    elif ref == c2:
+                        alt, flip = c1, 1; n_flip += 1
+                    else:
+                        n_mismatch += 1
+                        continue
+                out_rows.append((contig38, pos38, ref, alt, vid,
+                                 chrom_chip, pos_chip, a1, a2, flip))
+                n_out += 1
+
+        with open(output.alleles, "w") as fa_out, \
+                open(output.bed, "w") as bed_out, \
+                open(output.table, "w") as tab_out:
+            tab_out.write("contig38\tpos38\tref38\talt38\tvariant_id\t"
+                          "chrom_chip\tpos_chip\tchip_a1\tchip_a2\tflip\n")
+            for r in out_rows:
+                contig38, pos38, ref, alt = r[0], r[1], r[2], r[3]
+                fa_out.write(f"{contig38}\t{pos38}\t{ref},{alt}\n")
+                bed_out.write(f"{contig38}\t{pos38 - 1}\t{pos38}\n")
+                tab_out.write("\t".join(str(x) for x in r) + "\n")
+
+        stats = {
+            "crosswalk_sites_in": n_in,
+            "sites_out": n_out,
+            "strand_flipped": n_flip,
+            "dropped_ref_allele_mismatch": n_mismatch,
+            "dropped_non_acgt_reference": n_badref,
+        }
+        with open(output.stats, "w") as fh:
+            for k, v in stats.items():
+                fh.write(f"{k}\t{v}\n")
+                print(f"[genocheck][alleles] {k}: {v}", file=sys.stderr)
+
+        if n_in and n_mismatch / n_in > 0.05:
+            raise ValueError(
+                f"{n_mismatch}/{n_in} sites ({100*n_mismatch/n_in:.1f}%) match "
+                "the hg38 reference in neither orientation. That is the "
+                "signature of a wrong chain file or a mis-declared chip build.")
+
+
+# -----------------------------------------------------------------------------
+# r11f: joint pileup + constrained calling, scattered by hg38 chromosome
+# -----------------------------------------------------------------------------
+
+rule r11f_genocheck_call_chrom:
+    """
+    One joint mpileup across ALL samples per chromosome, so every sample is
+    assessed at the same sites and missingness is interpretable.
+
+    mpileup flags:
+      -q {MQ}    MAPQ floor; 255 = STAR uniquely-mapped only
+      -Q {BQ}    base-quality floor
+      -d {DEPTH} per-file depth cap, far above default -- RNA depth at
+                 expressed exons is routinely in the thousands
+      -B         disable BAQ: it over-penalises reads near splice junctions and
+                 systematically loses RNA coverage
+      -I         skip indels (unreliable in RNA, absent from the array)
+      --ff       exclude unmapped/secondary/QC-fail (+duplicates by default)
+      -a AD,DP   per-sample allele depths, for QC
+    call flags:
+      -m             multiallelic caller
+      -C alleles -T  genotype ONLY the given REF,ALT pair; no novel alleles
+    """
+    input:
+        bams = expand("/tmp/data/03_bam_star/{sample}/"
+                      "{sample}.Aligned.sortedByCoord.out.patched.md.bam",
+                      sample=samples),
+        bais = expand("/tmp/data/03_bam_star/{sample}/"
+                      "{sample}.Aligned.sortedByCoord.out.patched.md.bam.bai",
+                      sample=samples),
+        alleles = GENOCHECK_OUT + "/sites_alleles.tsv",
+        bed     = GENOCHECK_OUT + "/sites_hg38.bed",
+        fasta   = GENOME_FA,
+    output:
+        bcf = temp(GENOCHECK_OUT + "/by_chrom/{chrom}.bcf"),
+    params:
+        mq = GENOCHECK_MIN_MQ, bq = GENOCHECK_MIN_BQ,
+        depth = GENOCHECK_MAX_DEPTH, ff = GENOCHECK_FF,
+        wd = GENOCHECK_OUT + "/by_chrom",
+    threads: 4
+    singularity: BCFTOOLS_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.wd}
+        P={params.wd}/{wildcards.chrom}
+
+        awk -v c={wildcards.chrom} '$1==c' {input.bed}     > $P.bed
+        awk -v c={wildcards.chrom} '$1==c' {input.alleles} > $P.alleles.tsv
+
+        if [ ! -s $P.bed ]; then
+            echo "[genocheck][ERR] no sites on {wildcards.chrom}" >&2; exit 1
+        fi
+
+        bgzip -f $P.alleles.tsv
+        tabix -s1 -b2 -e2 -f $P.alleles.tsv.gz
+
+        # sample names come from the @RG SM tag r03d writes
+        printf "%s\n" {input.bams} > $P.bamlist
+
+        bcftools mpileup \
+            -b $P.bamlist -f {input.fasta} -R $P.bed \
+            -q {params.mq} -Q {params.bq} -d {params.depth} \
+            -B -I --ff {params.ff} \
+            -a FORMAT/AD,FORMAT/DP -Ou \
+        | bcftools call \
+            -m -C alleles -T $P.alleles.tsv.gz \
+            --threads {threads} -Ob -o {output.bcf}
+
+        bcftools index -f {output.bcf}
+        """
+
+
+# -----------------------------------------------------------------------------
+# r11g: confidence filters -> hg38 VCF
+# -----------------------------------------------------------------------------
+
+rule r11g_genocheck_filter:
+    """
+    Genotype level first: any call with DP < MIN_DP or GQ < MIN_GQ becomes
+    MISSING rather than the site being dropped. A shallow call is uninformative,
+    not wrong, and blanking it keeps the site usable for the samples that do
+    have depth -- which matters because RNA depth spans orders of magnitude
+    between genes. Then site level: drop sites missing in more than
+    MAX_MISSING of samples.
+
+    IDs are set to hg38 CHROM:POS here purely as a join key for r11i, which
+    replaces them with the chip's variant IDs.
+
+    NOT applied by default: an allelic-balance filter on hets. Allele-specific
+    and mono-allelic expression is pervasive in brain RNA, so a 5:95 het may be
+    real biology; blanking those would remove mostly true genotypes. The
+    commented line adds it -- test the expression against your bcftools build
+    first.
+    """
+    input:
+        bcfs = expand(GENOCHECK_OUT + "/by_chrom/{chrom}.bcf",
+                      chrom=GENOCHECK_CHROMS),
+    output:
+        vcf = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
+        tbi = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz.tbi",
+    params:
+        min_dp = GENOCHECK_MIN_DP, min_gq = GENOCHECK_MIN_GQ,
+        max_missing = GENOCHECK_MAX_MISSING,
+    threads: 4
+    singularity: BCFTOOLS_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        bcftools concat -a -Ou {input.bcfs} \
+        | bcftools +setGT -Ou -- -t q \
+              -i 'FMT/DP<{params.min_dp} || FMT/GQ<{params.min_gq}' -n . \
+        | bcftools view -i 'F_MISSING<={params.max_missing}' -Ou \
+        | bcftools annotate --set-id '%CHROM:%POS' \
+              --threads {threads} -Oz -o {output.vcf}
+
+        # stricter alternative -- blank hets with extreme allelic imbalance:
+        #   | bcftools +setGT -Ou -- -t q \
+        #         -i 'GT="het" && (FMT/AD[:1])/(FMT/DP)<0.10' -n . \
+
+        bcftools index -t -f {output.vcf}
+        """
+
+
+# -----------------------------------------------------------------------------
+# r11h / r11i / r11j: PLINK fileset, remapped to chip coordinates
+# -----------------------------------------------------------------------------
+
+rule r11h_genocheck_plink_hg38:
+    """VCF -> interim PLINK fileset, still in hg38 with CHROM:POS IDs."""
+    input:
+        vcf = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
+    output:
+        bed = temp(GENOCHECK_OUT + "/_hg38/rna_hg38.bed"),
+        bim = temp(GENOCHECK_OUT + "/_hg38/rna_hg38.bim"),
+        fam = temp(GENOCHECK_OUT + "/_hg38/rna_hg38.fam"),
+    params:
+        out_prefix = GENOCHECK_OUT + "/_hg38/rna_hg38",
+    threads: 4
+    singularity: PLINK2_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p $(dirname {params.out_prefix})
+        plink2 --vcf {input.vcf} \
+            --double-id --vcf-half-call m --allow-extra-chr \
+            --snps-only just-acgt --max-alleles 2 \
+            --set-all-var-ids '@:#' \
+            --threads {threads} --make-bed --out {params.out_prefix}
+        """
+
+
+rule r11i_genocheck_remap:
+    """
+    Rewrite the .bim into the chip's coordinate system. The .bed genotype matrix
+    and .fam are untouched (variant ORDER is unchanged, only the labels), so
+    this is a pure relabelling:
+
+        hg38 chrom:pos  ->  chip chrom, chip bp, chip variant ID
+
+    Alleles are complemented for the sites r11e flagged as strand-flipped, so
+    the fileset comes out in the chip's allele orientation and merges cleanly.
+
+    Sample IDs are rewritten to chip IIDs here too if sample_map.tsv exists;
+    without it they stay as RNA sample names (kinship still works, the pairs
+    are just labelled by RNA name).
+
+    The result is position-UNSORTED, because hg19 and hg38 order variants
+    differently. r11j sorts it.
+    """
+    input:
+        bed   = GENOCHECK_OUT + "/_hg38/rna_hg38.bed",
+        bim   = GENOCHECK_OUT + "/_hg38/rna_hg38.bim",
+        fam   = GENOCHECK_OUT + "/_hg38/rna_hg38.fam",
+        table = GENOCHECK_OUT + "/sites_final.tsv",
+    output:
+        bed = temp(GENOCHECK_OUT + "/_remap/rna_remap.bed"),
+        bim = temp(GENOCHECK_OUT + "/_remap/rna_remap.bim"),
+        fam = temp(GENOCHECK_OUT + "/_remap/rna_remap.fam"),
+        keep = GENOCHECK_OUT + "/_remap/remapped_ids.txt",
+        log  = GENOCHECK_OUT + "/remap.log",
+    params:
+        sample_map = GENOCHECK_SAMPLE_MAP,
+    run:
+        import shutil
+
+        COMP = {"A": "T", "T": "A", "C": "G", "G": "C", "0": "0"}
+
+        xw = {}
+        with open(input.table) as fh:
+            next(fh)
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                xw[f[0] + ":" + f[1]] = {
+                    "vid": f[4], "chrom": f[5], "bp": f[6], "flip": f[9] == "1"}
+
+        n_in = n_mapped = n_flipped = 0
+        kept_ids = []
+        with open(input.bim) as fin, open(output.bim, "w") as fout:
+            for line in fin:
+                chrom, vid, cm, bp, a1, a2 = line.rstrip("\n").split("\t")
+                n_in += 1
+                rec = xw.get(vid)
+                if rec is None:
+                    # Not in the crosswalk: keep the row (the .bed matrix must
+                    # stay aligned) but mark it so r11j can drop it.
+                    fout.write(f"{chrom}\t__DROP__{vid}\t{cm}\t{bp}\t{a1}\t{a2}\n")
+                    continue
+                if rec["flip"]:
+                    a1, a2 = COMP.get(a1, a1), COMP.get(a2, a2)
+                    n_flipped += 1
+                fout.write(f"{rec['chrom']}\t{rec['vid']}\t{cm}\t"
+                           f"{rec['bp']}\t{a1}\t{a2}\n")
+                kept_ids.append(rec["vid"])
+                n_mapped += 1
+
+        shutil.copy(input.bed, output.bed)
+
+        # fam: optionally rename samples to their chip IIDs
+        remap = {}
+        if os.path.isfile(params.sample_map) and \
+                os.path.getsize(params.sample_map) > 0:
+            with open(params.sample_map) as fh:
+                for line in fh:
+                    f = line.split()
+                    if len(f) >= 2:
+                        remap[f[0]] = f[1]
+        n_renamed = 0
+        with open(input.fam) as fin, open(output.fam, "w") as fout:
+            for line in fin:
+                f = line.split()
+                if f[1] in remap:
+                    new = remap[f[1]]
+                    f[0], f[1] = new, new
+                    n_renamed += 1
+                fout.write(" ".join(f) + "\n")
+
+        with open(output.keep, "w") as fh:
+            fh.write("\n".join(kept_ids) + "\n")
+
+        stats = {"bim_rows_in": n_in, "remapped_to_chip_build": n_mapped,
+                 "alleles_complemented": n_flipped,
+                 "dropped_not_in_crosswalk": n_in - n_mapped,
+                 "samples_renamed_to_chip_iid": n_renamed}
+        with open(output.log, "w") as fh:
+            for k, v in stats.items():
+                fh.write(f"{k}\t{v}\n")
+                print(f"[genocheck][remap] {k}: {v}", file=sys.stderr)
+
+
+rule r11j_genocheck_plink_final:
+    """
+    Drop the unmapped rows and sort variants into chip-build order.
+    This is the deliverable: rnaseq_genotypes.{bed,bim,fam}, in the chip's
+    build, with the chip's variant IDs.
+    """
+    input:
+        bed  = GENOCHECK_OUT + "/_remap/rna_remap.bed",
+        bim  = GENOCHECK_OUT + "/_remap/rna_remap.bim",
+        fam  = GENOCHECK_OUT + "/_remap/rna_remap.fam",
+        keep = GENOCHECK_OUT + "/_remap/remapped_ids.txt",
+    output:
+        bed = GENOCHECK_OUT + "/rnaseq_genotypes.bed",
+        bim = GENOCHECK_OUT + "/rnaseq_genotypes.bim",
+        fam = GENOCHECK_OUT + "/rnaseq_genotypes.fam",
+    params:
+        in_prefix  = GENOCHECK_OUT + "/_remap/rna_remap",
+        out_prefix = GENOCHECK_OUT + "/rnaseq_genotypes",
+    threads: 4
+    singularity: PLINK2_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        plink2 --bfile {params.in_prefix} \
+            --extract {input.keep} \
+            --allow-extra-chr --sort-vars \
+            --threads {threads} --make-bed --out {params.out_prefix}
+        """
+
+
+# =============================================================================
+# KINSHIP AND IDENTITY
+# =============================================================================
+# Produced unconditionally (needs only the site list):
+#   r11k/r11l  RNA x RNA kinship + QC. In a multi-region design this is the
+#              donor-structure check: two regions from the same donor must look
+#              like duplicates, different donors like unrelated.
+#
+# Produced only at the IDENTITY tier (.bed/.bim/.fam all present):
+#   r11m..r11q merge, cross-dataset kinship, all-pairs IBS, similarity report.
+#
+# SAMPLE NAMES ARE NOT ASSUMED TO CORRESPOND. Nothing here matches RNA samples
+# to array samples by name. Every RNA sample is compared against every array
+# sample and ranked by genotype similarity, so the assignment is discovered from
+# the data. If sample_map.tsv is supplied it is treated as a HYPOTHESIS: r11q
+# reports whether the data-driven best match agrees with it, and flags it when
+# it does not. RNA IDs are suffixed '_RNA' before the merge so that identical
+# names on both sides cannot collide or be mistaken for each other.
+#
+# HOW TO READ THESE NUMBERS -- the thresholds are NOT the textbook ones. Allele
+# dropout at modest depth turns true hets into apparent homozygotes, which
+# biases kinship and concordance DOWNWARD. Expect:
+#   * RNA vs RNA, same donor: often near the 0.5 duplicate expectation, because
+#     two samples from one donor express the same genes and so drop out at the
+#     same sites -- the errors are CORRELATED and partly cancel.
+#   * RNA vs array, same person: concordance typically 0.85-0.97 and kinship
+#     0.30-0.45 rather than 0.5, because dropout is one-sided. That is a MATCH,
+#     not a half-sib.
+#   * unrelated pairs sit near 0 kinship in both comparisons; this is the robust
+#     part of the signal.
+# IBS0 (opposite-homozygote rate) is the sturdiest discriminator: dropout turns
+# a het into one of the two homozygotes, which produces IBS1, not IBS0, so IBS0
+# stays near zero for a true match even when kinship has been deflated. Judge by
+# rank, margin and IBS0 rather than by an absolute cutoff.
+# =============================================================================
+
+rule r11k_genocheck_kinship_rna:
+    """
+    KING-robust kinship among the RNA samples only. --make-king-table also
+    reports IBS0 and NSNP, which is what separates a true duplicate (IBS0 ~ 0)
+    from a first-degree relative (IBS0 > 0) when dropout has deflated kinship.
+
+    LD pruning is OFF by default: the site set is already small (tens of
+    thousands of exonic SNPs) and pruning costs more precision than the LD
+    inflation it removes. GENOCHECK_LD_PRUNE=1 enables it.
+    """
+    input:
+        bed = GENOCHECK_OUT + "/rnaseq_genotypes.bed",
+    output:
+        kin = GENOCHECK_OUT + "/00_kinship_rna.kin0",
+    params:
+        prefix   = GENOCHECK_OUT + "/rnaseq_genotypes",
+        wd       = GENOCHECK_OUT + "/_kinship",
+        ld_prune = GENOCHECK_LD_PRUNE,
+    threads: 4
+    singularity: PLINK2_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.wd}
+        T={params.wd}/rna
+        if [ "{params.ld_prune}" = "True" ]; then
+            plink2 --bfile {params.prefix} --allow-extra-chr \
+                --indep-pairwise 200kb 1 0.2 --threads {threads} \
+                --out $T.prune >/dev/null
+            plink2 --bfile {params.prefix} --allow-extra-chr \
+                --extract $T.prune.prune.in \
+                --make-king-table --king-table-filter -1 \
+                --threads {threads} --out $T >/dev/null
+        else
+            plink2 --bfile {params.prefix} --allow-extra-chr \
+                --make-king-table --king-table-filter -1 \
+                --threads {threads} --out $T >/dev/null
+        fi
+        cp $T.kin0 {output.kin}
+        """
+
+
+rule r11l_genocheck_rna_report:
+    """
+    Per-sample QC plus the RNA-internal kinship report.
+
+      site_stats    call rate, mean depth, heterozygosity per RNA sample. Read
+                    this FIRST -- a sample with a low call rate has too few
+                    shared sites for any kinship estimate to mean much, and a
+                    low het rate marks the dropout regime where even a correct
+                    match looks only partly related.
+      kinship_rna_report  every RNA pair, labelled, with the expected
+                    same-donor status if donor_map.tsv is present. Unexpected
+                    duplicate-level pairs (two "different" donors that are
+                    actually one person) and missing ones (two regions of one
+                    donor that are not related) both surface here.
+    """
+    input:
+        vcf = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
+        kin = GENOCHECK_OUT + "/00_kinship_rna.kin0",
+    output:
+        site_stats = GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
+        report     = GENOCHECK_OUT + "/00_kinship_rna_report.tsv",
+    params:
+        donor_map = GENOCHECK_DONOR_MAP,
+        dup_cut   = GENOCHECK_DUP_KINSHIP,
+    run:
+        import gzip
+        import pandas as pd
+
+        # ---------- per-sample stats, parsed straight from the VCF
+        with gzip.open(input.vcf, "rt") as fh:
+            for line in fh:
+                if line.startswith("#CHROM"):
+                    vcf_samples = line.rstrip("\n").split("\t")[9:]
+                    break
+            n_sites = 0
+            called = {s: 0 for s in vcf_samples}
+            hets   = {s: 0 for s in vcf_samples}
+            dp_sum = {s: 0.0 for s in vcf_samples}
+            dp_n   = {s: 0 for s in vcf_samples}
+            for line in fh:
+                if line[0] == "#":
+                    continue
+                f = line.rstrip("\n").split("\t")
+                n_sites += 1
+                fmt = f[8].split(":")
+                dp_i = fmt.index("DP") if "DP" in fmt else None
+                for s, col in zip(vcf_samples, f[9:]):
+                    parts = col.split(":")
+                    gt = parts[0]
+                    if gt in ("./.", ".", ".|."):
+                        continue
+                    called[s] += 1
+                    if gt in ("0/1", "1/0", "0|1", "1|0"):
+                        hets[s] += 1
+                    if dp_i is not None and len(parts) > dp_i:
+                        v = parts[dp_i]
+                        if v not in (".", ""):
+                            dp_sum[s] += float(v); dp_n[s] += 1
+
+        stats = pd.DataFrame({
+            "sample": vcf_samples,
+            "n_sites": n_sites,
+            "n_called": [called[s] for s in vcf_samples],
+            "call_rate": [called[s] / n_sites if n_sites else 0 for s in vcf_samples],
+            "mean_dp": [dp_sum[s] / dp_n[s] if dp_n[s] else 0 for s in vcf_samples],
+            "n_het": [hets[s] for s in vcf_samples],
+            "het_rate": [hets[s] / called[s] if called[s] else 0 for s in vcf_samples],
+        })
+        stats.to_csv(output.site_stats, sep="\t", index=False, float_format="%.4f")
+
+        # ---------- RNA-internal kinship
+        kin = _genocheck_read_kin0(input.kin)
+        kcol = kin.attrs["kinship"]
+        kin["label"] = [
+            "same_individual" if k >= params.dup_cut else
+            "related" if k >= 0.08 else "unrelated" for k in kin[kcol]]
+
+        donors = _genocheck_read_map(params.donor_map)
+        if donors:
+            kin["same_donor_expected"] = [
+                (donors.get(a) is not None and donors.get(a) == donors.get(b))
+                for a, b in zip(kin["IID1"], kin["IID2"])]
+            kin["agrees_with_donor_map"] = [
+                (exp == (lab == "same_individual"))
+                for exp, lab in zip(kin["same_donor_expected"], kin["label"])]
+
+        kin.sort_values(kcol, ascending=False).to_csv(
+            output.report, sep="\t", index=False, float_format="%.5f")
+
+        print(f"[genocheck][report] {len(vcf_samples)} RNA samples, {n_sites} "
+              f"sites, median call rate {stats['call_rate'].median():.3f}",
+              file=sys.stderr)
+        if donors and "agrees_with_donor_map" in kin:
+            bad = int((~kin["agrees_with_donor_map"]).sum())
+            print(f"[genocheck][report] {bad} RNA pair(s) disagree with "
+                  f"donor_map.tsv -- see {output.report}", file=sys.stderr)
+
+
+# -----------------------------------------------------------------------------
+# IDENTITY tier: requires the complete array fileset
+# -----------------------------------------------------------------------------
+
+rule r11m_genocheck_chip_subset:
+    """Array fileset restricted to the variants the RNA calls actually cover."""
+    input:
+        chip_bed = GENOCHECK_CHIP_PREFIX + ".bed",
+        bim      = GENOCHECK_OUT + "/rnaseq_genotypes.bim",
+    output:
+        bed = temp(GENOCHECK_OUT + "/_merge/chip_shared.bed"),
+        bim = temp(GENOCHECK_OUT + "/_merge/chip_shared.bim"),
+        fam = temp(GENOCHECK_OUT + "/_merge/chip_shared.fam"),
+    params:
+        chip_prefix = GENOCHECK_CHIP_PREFIX,
+        out_prefix  = GENOCHECK_OUT + "/_merge/chip_shared",
+        wd          = GENOCHECK_OUT + "/_merge",
+    threads: 4
+    singularity: PLINK2_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.wd}
+        cut -f2 {input.bim} > {params.wd}/shared_ids.txt
+        plink2 --bfile {params.chip_prefix} \
+            --extract {params.wd}/shared_ids.txt \
+            --snps-only just-acgt --max-alleles 2 \
+            --allow-extra-chr --sort-vars \
+            --threads {threads} --make-bed --out {params.out_prefix}
+        """
+
+
+rule r11n_genocheck_merge:
+    """
+    Merge RNA + array with the standard plink1.9 two-pass flip procedure:
+    attempt the merge; if PLINK reports allele-mismatching variants in .missnp,
+    flip the RNA fileset at exactly those variants and retry; if any still
+    mismatch, exclude them. Flips surviving r11e/r11i are rare (A/T and C/G were
+    excluded, so a flip is resolvable), but a manifest can be internally
+    inconsistent, and an unflipped variant reads as a genotype swap at that site.
+
+    RNA sample IDs are suffixed '_RNA' first. This is what makes the comparison
+    name-agnostic: the two sides stay distinguishable even when they use the
+    same sample names, and no pairing is implied by a shared name.
+    """
+    input:
+        rna_bed  = GENOCHECK_OUT + "/rnaseq_genotypes.bed",
+        chip_bed = GENOCHECK_OUT + "/_merge/chip_shared.bed",
+    output:
+        bed = GENOCHECK_OUT + "/_merge/merged.bed",
+        bim = GENOCHECK_OUT + "/_merge/merged.bim",
+        fam = GENOCHECK_OUT + "/_merge/merged.fam",
+        log = GENOCHECK_OUT + "/merge.log",
+    params:
+        rna  = GENOCHECK_OUT + "/rnaseq_genotypes",
+        chip = GENOCHECK_OUT + "/_merge/chip_shared",
+        wd   = GENOCHECK_OUT + "/_merge",
+    threads: 4
+    singularity: PLINK1_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        cd {params.wd}
+
+        awk '{{print $1, $2, $1"_RNA", $2"_RNA"}}' {params.rna}.fam > rna_tag.txt
+        plink --bfile {params.rna} --update-ids rna_tag.txt \
+              --allow-extra-chr --make-bed --out rna_tagged >/dev/null
+
+        if plink --bfile rna_tagged --bmerge {params.chip} \
+                 --allow-extra-chr --make-bed --out merged >merge_pass1.log 2>&1
+        then
+            echo "merge: clean on first pass" > {output.log}
+        else
+            if [ -s merged-merge.missnp ]; then
+                n=$(wc -l < merged-merge.missnp)
+                echo "merge: $n allele-mismatching variants; flipping RNA and retrying" \
+                    > {output.log}
+                plink --bfile rna_tagged --flip merged-merge.missnp \
+                      --allow-extra-chr --make-bed --out rna_flipped >/dev/null
+                rm -f merged-merge.missnp
+                if plink --bfile rna_flipped --bmerge {params.chip} \
+                         --allow-extra-chr --make-bed --out merged \
+                         >merge_pass2.log 2>&1
+                then
+                    echo "merge: clean after flip" >> {output.log}
+                else
+                    n2=$( [ -s merged-merge.missnp ] && wc -l < merged-merge.missnp || echo 0 )
+                    echo "merge: $n2 variants still mismatched after flip; excluding" \
+                        >> {output.log}
+                    plink --bfile rna_flipped --exclude merged-merge.missnp \
+                          --allow-extra-chr --make-bed --out rna_excl >/dev/null
+                    plink --bfile rna_excl --bmerge {params.chip} \
+                          --allow-extra-chr --make-bed --out merged >/dev/null
+                fi
+            else
+                echo "merge: FAILED with no .missnp -- see merge_pass1.log" \
+                    >> {output.log}
+                cat merge_pass1.log >&2
+                exit 1
+            fi
+        fi
+        awk 'END{{print "variants_in_merged", NR}}' merged.bim >> {output.log}
+        awk 'END{{print "samples_in_merged", NR}}' merged.fam >> {output.log}
+        """
+
+
+rule r11o_genocheck_kinship_merged:
+    """KING-robust kinship across the merged RNA + array set, all pairs."""
+    input:
+        bed = GENOCHECK_OUT + "/_merge/merged.bed",
+    output:
+        kin = GENOCHECK_OUT + "/00_kinship_merged.kin0",
+    params:
+        prefix   = GENOCHECK_OUT + "/_merge/merged",
+        wd       = GENOCHECK_OUT + "/_kinship",
+        ld_prune = GENOCHECK_LD_PRUNE,
+    threads: 4
+    singularity: PLINK2_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.wd}
+        T={params.wd}/merged
+        if [ "{params.ld_prune}" = "True" ]; then
+            plink2 --bfile {params.prefix} --allow-extra-chr \
+                --indep-pairwise 200kb 1 0.2 --threads {threads} \
+                --out $T.prune >/dev/null
+            plink2 --bfile {params.prefix} --allow-extra-chr \
+                --extract $T.prune.prune.in \
+                --make-king-table --king-table-filter -1 \
+                --threads {threads} --out $T >/dev/null
+        else
+            plink2 --bfile {params.prefix} --allow-extra-chr \
+                --make-king-table --king-table-filter -1 \
+                --threads {threads} --out $T >/dev/null
+        fi
+        cp $T.kin0 {output.kin}
+        """
+
+
+rule r11p_genocheck_ibs:
+    """
+    All-pairs IBS with plink1.9 `--genome full`, which reports IBS0/IBS1/IBS2
+    counts. Genotype CONCORDANCE is then IBS2 / (IBS0+IBS1+IBS2) -- the fraction
+    of co-called sites where the two samples carry the identical genotype. That
+    is the most directly interpretable similarity measure for a sample-swap
+    check, and unlike PI_HAT it does not depend on allele-frequency estimates,
+    which are unreliable in a set this small.
+    """
+    input:
+        bed = GENOCHECK_OUT + "/_merge/merged.bed",
+    output:
+        genome = GENOCHECK_OUT + "/_merge/merged.genome",
+    params:
+        prefix = GENOCHECK_OUT + "/_merge/merged",
+    threads: 4
+    singularity: PLINK1_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        plink --bfile {params.prefix} --genome full --allow-extra-chr \
+              --threads {threads} --out {params.prefix} >/dev/null
+        test -s {output.genome}
+        """
+
+
+rule r11q_genocheck_identity:
+    """
+    The similarity report. Joins concordance (from IBS counts) with KING kinship
+    and IBS0 rate for every RNA x array pair, then condenses to one row per RNA
+    sample: its most similar array sample, the margin to the runner-up, and a
+    verdict.
+
+    The MARGIN is the decisive column. A correct assignment sits in a wide gap
+    from the next-best candidate; a swap, a mislabelled tube or a contaminated
+    sample shows two comparably good partners. Absolute concordance is read
+    loosely, because allele dropout depresses it for a correct pairing (see the
+    interpretation note above).
+
+    Verdicts: `match` (concordance >= GENOCHECK_MATCH_CONC, IBS0 rate <=
+    GENOCHECK_MAX_IBS0, margin >= GENOCHECK_MIN_MARGIN); `ambiguous` (margin
+    below threshold -- two candidates fit comparably well); `no_match`
+    (nothing in the array set reaches duplicate-level similarity, i.e. the
+    donor was never genotyped, or this RNA sample is something else entirely);
+    `weak` (passes none of the above cleanly -- inspect by hand, usually a
+    low-call-rate sample).
+
+    If sample_map.tsv was supplied, the expected array ID is carried alongside
+    and `agrees_with_map` says whether the data agree with it. The map never
+    influences the matching itself.
+    """
+    input:
+        genome     = GENOCHECK_OUT + "/_merge/merged.genome",
+        kin        = GENOCHECK_OUT + "/00_kinship_merged.kin0",
+        site_stats = GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
+    output:
+        pairs    = GENOCHECK_OUT + "/00_similarity_pairs.tsv",
+        identity = GENOCHECK_OUT + "/00_similarity_report.tsv",
+    params:
+        sample_map  = GENOCHECK_SAMPLE_MAP,
+        match_conc  = GENOCHECK_MATCH_CONC,
+        max_ibs0    = GENOCHECK_MAX_IBS0,
+        min_margin  = GENOCHECK_MIN_MARGIN,
+        dup_cut     = GENOCHECK_DUP_KINSHIP,
+    run:
+        import pandas as pd
+
+        def origin(iid):
+            return "RNA" if str(iid).endswith("_RNA") else "array"
+
+        def strip_tag(iid):
+            s = str(iid)
+            return s[:-4] if s.endswith("_RNA") else s
+
+        # ---------- IBS -> concordance
+        g = pd.read_csv(input.genome, sep=r"\s+")
+        need = {"IID1", "IID2", "IBS0", "IBS1", "IBS2"}
+        missing = need - set(g.columns)
+        if missing:
+            raise ValueError(
+                f"{input.genome} lacks {sorted(missing)}; `--genome full` is "
+                f"required for IBS counts. Columns found: {list(g.columns)}")
+        tot = g["IBS0"] + g["IBS1"] + g["IBS2"]
+        g["n_compared"] = tot
+        g["concordance"] = g["IBS2"] / tot.replace(0, pd.NA)
+        g["ibs0_rate_genome"] = g["IBS0"] / tot.replace(0, pd.NA)
+        gcols = ["IID1", "IID2", "n_compared", "concordance",
+                 "ibs0_rate_genome"]
+        if "PI_HAT" in g.columns:
+            gcols.append("PI_HAT")
+        if "DST" in g.columns:
+            gcols.append("DST")
+        g = g[gcols]
+
+        # ---------- KING kinship
+        k = _genocheck_read_kin0(input.kin)
+        kcol = k.attrs["kinship"]
+        keep = ["IID1", "IID2", kcol] + \
+            (["ibs0_rate"] if "ibs0_rate" in k.columns else [])
+        k = k[keep].rename(columns={kcol: "kinship",
+                                    "ibs0_rate": "ibs0_rate_king"})
+
+        # pair keys are unordered, so join on a sorted tuple
+        for df in (g, k):
+            df["_key"] = [tuple(sorted((str(a), str(b))))
+                          for a, b in zip(df["IID1"], df["IID2"])]
+        m = g.merge(k.drop(columns=["IID1", "IID2"]), on="_key", how="outer")
+
+        # rebuild the pair labels from the key (outer join can leave NaNs)
+        m["IID1"] = [k_[0] for k_ in m["_key"]]
+        m["IID2"] = [k_[1] for k_ in m["_key"]]
+        m = m.drop(columns=["_key"])
+        m["origin1"] = m["IID1"].map(origin)
+        m["origin2"] = m["IID2"].map(origin)
+        m["comparison"] = [
+            "RNA-RNA" if a == b == "RNA" else
+            "array-array" if a == b == "array" else "RNA-array"
+            for a, b in zip(m["origin1"], m["origin2"])]
+        m.sort_values("concordance", ascending=False).to_csv(
+            output.pairs, sep="\t", index=False, float_format="%.5f")
+
+        # ---------- one row per RNA sample, against ARRAY samples only
+        cross = m[m["comparison"] == "RNA-array"].copy()
+        cross["rna"] = [a if o1 == "RNA" else b for a, b, o1
+                        in zip(cross["IID1"], cross["IID2"], cross["origin1"])]
+        cross["arr"] = [b if o1 == "RNA" else a for a, b, o1
+                        in zip(cross["IID1"], cross["IID2"], cross["origin1"])]
+
+        smap = _genocheck_read_map(params.sample_map)
+        stats = pd.read_csv(input.site_stats, sep="\t").set_index("sample")
+
+        rows = []
+        for rid, sub in cross.groupby("rna", sort=True):
+            sub = sub.sort_values("concordance", ascending=False)
+            top = sub.iloc[0]
+            second = sub.iloc[1] if len(sub) > 1 else None
+            conc = top["concordance"]
+            margin = (conc - second["concordance"]) if second is not None \
+                else float("nan")
+            ibs0 = top.get("ibs0_rate_king")
+            if ibs0 is None or pd.isna(ibs0):
+                ibs0 = top.get("ibs0_rate_genome")
+
+            if pd.notna(conc) and conc >= params.match_conc \
+                    and (pd.isna(ibs0) or ibs0 <= params.max_ibs0) \
+                    and (pd.isna(margin) or margin >= params.min_margin):
+                verdict = "match"
+            elif pd.notna(margin) and margin < params.min_margin:
+                verdict = "ambiguous"
+            elif pd.notna(top.get("kinship", float("nan"))) \
+                    and top["kinship"] < params.dup_cut:
+                verdict = "no_match"
+            else:
+                verdict = "weak"
+
+            plain = strip_tag(rid)
+            expected = smap.get(plain)
+            rows.append({
+                "rna_sample": plain,
+                "best_array_match": top["arr"],
+                "concordance": conc,
+                "kinship": top.get("kinship", float("nan")),
+                "ibs0_rate": ibs0,
+                "n_compared": top["n_compared"],
+                "runner_up": second["arr"] if second is not None else "NA",
+                "runner_up_concordance": second["concordance"]
+                if second is not None else float("nan"),
+                "margin": margin,
+                "verdict": verdict,
+                "rna_call_rate": float(stats["call_rate"].get(plain, float("nan"))),
+                "expected_array_id": expected if expected else "NA",
+                "agrees_with_map": (top["arr"] == expected) if expected else "NA",
+            })
+
+        rep = pd.DataFrame(rows).sort_values("rna_sample")
+        rep.to_csv(output.identity, sep="\t", index=False, float_format="%.5f")
+
+        counts = rep["verdict"].value_counts().to_dict()
+        print(f"[genocheck][identity] verdicts: {counts}", file=sys.stderr)
+        if smap:
+            bad = rep[rep["agrees_with_map"] == False]
+            if len(bad):
+                print(f"[genocheck][identity] {len(bad)} sample(s) do NOT match "
+                      f"sample_map.tsv: "
+                      f"{', '.join(bad['rna_sample'].astype(str))}",
+                      file=sys.stderr)
+            else:
+                print("[genocheck][identity] all samples agree with "
+                      "sample_map.tsv", file=sys.stderr)
 
 
 # =============================================================================
