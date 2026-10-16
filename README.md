@@ -607,13 +607,13 @@ For site $i$ with alt count $a_i$ out of depth $d_i$, the latent variable is the
 
 $$
 \begin{aligned}
-H_1:\quad & a_i \sim \sum_{g=0}^{2} \pi_g \,\mathrm{BetaBin}\!\left(d_i,\ \mu'_{g},\ \rho_{g}\right),
-  && \mu_{g} = \tfrac{g}{2} \\[4pt]
+H_1:\quad & a_i \sim \sum_{g=0}^{2} \pi_g \,\mathrm{BetaBin}\left(d_i,\ \mu'_{g},\ \rho_{g}\right),
+  && \mu_{g} = \tfrac{g}{2}
 \end{aligned}
 $$
 $$
 \begin{aligned}
-H_2:\quad & a_i \sim \sum_{j=0}^{2}\sum_{k=0}^{2} \pi_j \pi_k \,\mathrm{BetaBin}\!\left(d_i,\ \mu'_{jk},\ \rho_{jk}\right),
+H_2:\quad & a_i \sim \sum_{j=0}^{2}\sum_{k=0}^{2} \pi_j \pi_k \,\mathrm{BetaBin}\left(d_i,\ \mu'_{jk},\ \rho_{jk}\right),
   && \mu_{jk} = (1-\alpha)\tfrac{j}{2} + \alpha\tfrac{k}{2},\quad \alpha \in (0,\tfrac{1}{2}]
 \end{aligned}
 $$
