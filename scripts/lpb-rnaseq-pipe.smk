@@ -16,7 +16,7 @@
 #   - sjdbOverhang: depends on YOUR read length (NOT 75, unless your reads are
 #                   2x76bp like GTEx). Set READ_LENGTH below to match your data.
 #
-# Outputs per sample:
+# Main outputs per sample:
 #   - 03_bam_star/{sample}/Aligned.sortedByCoord.out.patched.md.bam
 #       (the canonical GTEx-style output: STAR-aligned, coordinate-sorted,
 #        duplicate-marked; this is the one to feed to DROP)
@@ -26,9 +26,12 @@
 #       (STAR's gene-level counts, mergeable with GTEx V11 count matrix)
 # =============================================================================
 
-import pandas as pd
 import os
 import sys
+import gzip
+import math
+import pandas as pd
+import numpy as np
 
 # -----------------------------------------------------------------------------
 # User-tunable parameters
@@ -598,7 +601,7 @@ if not DECONV_ACTIVE:
     print(f"[r09] deconvolution stage inactive: {_reason}")
 
 # =============================================================================
-# 11. RNA-seq genotype extraction, chip concordance and kinship  (r11a .. r11n)
+# 11. RNA-seq genotype extraction, chip concordance and kinship  (r11a .. r11t)
 # =============================================================================
 # Produce a PLINK fileset of CONFIDENT genotypes called from the RNA-seq BAMs,
 # in the SAME BUILD and with the SAME VARIANT IDs as an existing SNP-array
@@ -749,7 +752,21 @@ GENOCHECK_OUT = "/tmp/data/11_genocheck"
 GENOCHECK_SAMPLE_MAP = GENETICS_DIR + "/sample_map.tsv"
 GENOCHECK_DONOR_MAP  = GENETICS_DIR + "/donor_map.tsv"
 
+# mixture test (r11r/r11s)
+GENOCHECK_MIX_MIN_DP      = int(os.environ.get("GENOCHECK_MIX_MIN_DP", "30"))
+GENOCHECK_MIX_MAX_DP_MULT = float(os.environ.get("GENOCHECK_MIX_MAX_DP_MULT", "5"))
+GENOCHECK_MIX_MAX_SITES   = int(os.environ.get("GENOCHECK_MIX_MAX_SITES", "20000"))
+GENOCHECK_MIX_MIN_SITES   = int(os.environ.get("GENOCHECK_MIX_MIN_SITES", "500"))
+GENOCHECK_MIX_ALPHA_MIN   = float(os.environ.get("GENOCHECK_MIX_ALPHA_MIN", "0.03"))
+GENOCHECK_MIX_DBIC        = float(os.environ.get("GENOCHECK_MIX_DBIC", "10"))
+GENOCHECK_MIX_DROP_TRANSITIONS = os.environ.get(
+    "GENOCHECK_MIX_DROP_TRANSITIONS", "1").strip().lower() in ("1","true","yes","on")
+GENOCHECK_PLOT_THEME = os.environ.get("GENOCHECK_PLOT_THEME", "light").strip().lower()
 
+if GENOCHECK_PLOT_THEME not in ("light", "dark"):
+    print(f"[genocheck] unrecognised GENOCHECK_PLOT_THEME="
+          f"'{GENOCHECK_PLOT_THEME}', using light", file=sys.stderr)
+    GENOCHECK_PLOT_THEME = "light"
 def _genocheck_find_prefix(d):
     """(prefix, note, candidates). Basename is free-form; *.bim is the anchor."""
     import glob as _glob
@@ -777,6 +794,233 @@ def _genocheck_find_chain(d):
     hits = sorted(_glob.glob(os.path.join(d, "*.chain.gz"))
                   + _glob.glob(os.path.join(d, "*.chain")))
     return hits[0] if len(hits) == 1 else conventional
+
+# ---------------------------------------------------------------------------
+# Optional bootstrap: fetch a reference hg19 site list + the liftOver chain
+# ---------------------------------------------------------------------------
+# Runs at PARSE TIME, not as a rule, and that is deliberate. Whether the whole
+# genocheck stage is enabled is decided from the filesystem while the Snakefile
+# is being read, so a .bim produced by a rule could not switch the stage on in
+# the same run -- it would take two invocations. Fetching here closes that loop.
+#
+# It is written to be harmless:
+#   * nothing is downloaded when a .bim (or chain) is already present
+#   * every failure is swallowed, recorded, and the stage simply stays disabled
+#     -- the workflow is never stopped by it
+#   * a failure marker suppresses retries for a few hours, so a dry run does not
+#     sit through the timeouts again
+#   * downloads stream to <file>.part and are renamed only on success, so an
+#     interrupted fetch never leaves a half file that looks valid
+#
+# URLS ARE UNVERIFIED FROM THE DEVELOPMENT ENVIRONMENT (egress there blocks
+# UCSC). They are the canonical UCSC goldenPath paths and are tried in order;
+# whatever happens is written to 00_genocheck_fetch_status.tsv, so a dead URL
+# shows up as a logged failure rather than a silent wrong file. Override with
+# GENOCHECK_SITES_URL / GENOCHECK_CHAIN_URL.
+# ---------------------------------------------------------------------------
+
+GENOCHECK_FETCH = os.environ.get("GENOCHECK_FETCH", "auto").strip().lower()
+GENOCHECK_FETCH_TIMEOUT = int(os.environ.get("GENOCHECK_FETCH_TIMEOUT", "60"))
+GENOCHECK_FETCH_RETRY_H = float(os.environ.get("GENOCHECK_FETCH_RETRY_H", "6"))
+GENOCHECK_FETCH_MAX_SITES = int(os.environ.get("GENOCHECK_FETCH_MAX_SITES",
+                                               "500000"))
+# HapMap SNPs (CEU) from the UCSC hg19 database: rsID, position and both
+# alleles, which is exactly a .bim's content, at a canonical stable path.
+GENOCHECK_SITES_URLS = [u for u in [
+    os.environ.get("GENOCHECK_SITES_URL", "").strip(),
+    "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/hapmapSnpsCEU.txt.gz",
+    "https://hgdownload.cse.ucsc.edu/goldenPath/hg19/database/hapmapSnpsCEU.txt.gz",
+] if u]
+GENOCHECK_CHAIN_URLS = [u for u in [
+    os.environ.get("GENOCHECK_CHAIN_URL", "").strip(),
+    "https://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz",
+    "https://hgdownload.cse.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz",
+] if u]
+GENOCHECK_FETCHED_BIM = GENETICS_DIR + "/hapmap_ceu_hg19.bim"
+
+
+def _genocheck_download(url, target, timeout):
+    """Stream url -> target via urllib (which honours http(s)_proxy). Returns
+    (ok, bytes, detail). Renames into place only on a complete transfer."""
+    import urllib.request
+    tmp = target + ".part"
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "lpb-rnaseq-pipe/genocheck"})
+        n = 0
+        with urllib.request.urlopen(req, timeout=timeout) as r, \
+                open(tmp, "wb") as fh:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                n += len(chunk)
+        if n == 0:
+            raise IOError("empty response")
+        os.replace(tmp, target)
+        return True, n, "ok"
+    except Exception as exc:                       # never fatal, by design
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False, 0, f"{type(exc).__name__}: {exc}"
+
+
+def _genocheck_ucsc_snps_to_bim(src, bim, max_sites):
+    """UCSC hapmapSnps* table -> PLINK .bim.
+
+    Columns: bin, chrom, chromStart, chromEnd, name, score, strand, observed,
+    allele1, homoCount1, allele2, homoCount2, hetCount. chromEnd is the 1-based
+    position of a SNP. Only single-letter ACGT biallelic autosomal rows are
+    kept; if that leaves more than max_sites they are thinned uniformly, which
+    preserves genome-wide spread (r11a will cut them to exons anyway, and the
+    pileup cost scales with the surviving count).
+    """
+    import gzip
+    import random
+    ACGT = set("ACGT")
+    rows = []
+    opener = gzip.open if src.endswith(".gz") else open
+    with opener(src, "rt") as fh:
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 11:
+                continue
+            chrom, end, name, a1, a2 = f[1], f[3], f[4], f[8], f[10]
+            c = chrom[3:] if chrom.startswith("chr") else chrom
+            if not c.isdigit() or not (1 <= int(c) <= 22):
+                continue
+            a1, a2 = a1.upper(), a2.upper()
+            if a1 not in ACGT or a2 not in ACGT or a1 == a2:
+                continue
+            rows.append((int(c), int(end), name, a1, a2))
+    if not rows:
+        raise ValueError("no usable rows parsed from the UCSC table")
+    rows.sort()
+    if max_sites and len(rows) > max_sites:
+        step = len(rows) / float(max_sites)
+        rows = [rows[int(i * step)] for i in range(max_sites)]
+    tmp = bim + ".part"
+    with open(tmp, "w") as fh:
+        for c, pos, name, a1, a2 in rows:
+            fh.write(f"{c}\t{name}\t0\t{pos}\t{a1}\t{a2}\n")
+    os.replace(tmp, bim)
+    return len(rows)
+
+
+def _genocheck_bootstrap(genetics_dir, out_dir, need_bim, need_chain,
+                         chain_target):
+    """Fetch what is missing; write a status table; never raise."""
+    status = []
+    try:
+        os.makedirs(genetics_dir, exist_ok=True)
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"[genocheck][fetch] cannot create {genetics_dir}: {exc}",
+              file=sys.stderr)
+        return status
+
+    marker = os.path.join(out_dir, ".genocheck_fetch_failed")
+    if GENOCHECK_FETCH != "force" and os.path.exists(marker):
+        import time
+        age_h = (time.time() - os.path.getmtime(marker)) / 3600.0
+        if age_h < GENOCHECK_FETCH_RETRY_H:
+            print(f"[genocheck][fetch] skipped: a previous attempt failed "
+                  f"{age_h:.1f} h ago (retries suppressed for "
+                  f"{GENOCHECK_FETCH_RETRY_H:g} h; delete {marker} or set "
+                  f"GENOCHECK_FETCH=force to retry now)", file=sys.stderr)
+            return status
+
+    any_fail = False
+    if need_chain:
+        for url in GENOCHECK_CHAIN_URLS:
+            print(f"[genocheck][fetch] chain <- {url}", file=sys.stderr)
+            ok, n, detail = _genocheck_download(url, chain_target,
+                                                GENOCHECK_FETCH_TIMEOUT)
+            status.append(("chain", url, chain_target, n,
+                           "ok" if ok else "failed", detail))
+            if ok:
+                print(f"[genocheck][fetch] chain ok ({n/1e6:.1f} MB)",
+                      file=sys.stderr)
+                break
+        else:
+            any_fail = True
+
+    if need_bim:
+        raw = os.path.join(genetics_dir, "hapmapSnpsCEU.txt.gz")
+        got = False
+        for url in GENOCHECK_SITES_URLS:
+            print(f"[genocheck][fetch] site list <- {url}", file=sys.stderr)
+            ok, n, detail = _genocheck_download(url, raw,
+                                                GENOCHECK_FETCH_TIMEOUT)
+            status.append(("sites_raw", url, raw, n,
+                           "ok" if ok else "failed", detail))
+            if ok:
+                got = True
+                print(f"[genocheck][fetch] site list ok ({n/1e6:.1f} MB)",
+                      file=sys.stderr)
+                break
+        if got:
+            try:
+                k = _genocheck_ucsc_snps_to_bim(raw, GENOCHECK_FETCHED_BIM,
+                                                GENOCHECK_FETCH_MAX_SITES)
+                status.append(("sites_bim", raw, GENOCHECK_FETCHED_BIM, k,
+                               "ok", f"{k} variants written"))
+                print(f"[genocheck][fetch] wrote {GENOCHECK_FETCHED_BIM} "
+                      f"({k} variants)", file=sys.stderr)
+            except Exception as exc:
+                any_fail = True
+                status.append(("sites_bim", raw, GENOCHECK_FETCHED_BIM, 0,
+                               "failed", f"{type(exc).__name__}: {exc}"))
+                print(f"[genocheck][fetch] conversion failed: {exc}",
+                      file=sys.stderr)
+        else:
+            any_fail = True
+
+    if status:
+        try:
+            with open(os.path.join(out_dir,
+                                   "00_genocheck_fetch_status.tsv"), "w") as fh:
+                fh.write("target\tsource\tdestination\tsize_or_count\t"
+                         "status\tdetail\n")
+                for row in status:
+                    fh.write("\t".join(str(x) for x in row) + "\n")
+        except OSError:
+            pass
+    try:
+        if any_fail:
+            open(marker, "w").write("see 00_genocheck_fetch_status.tsv\n")
+        elif os.path.exists(marker):
+            os.remove(marker)
+    except OSError:
+        pass
+    if any_fail:
+        print(f"[genocheck][fetch] one or more downloads FAILED -- the "
+              f"genocheck stage will stay disabled this run; see "
+              f"{out_dir}/00_genocheck_fetch_status.tsv. The rest of the "
+              f"workflow is unaffected.", file=sys.stderr)
+    return status
+
+
+# Fetch BEFORE discovery, so a freshly downloaded .bim is visible to the same
+# parse that decides whether the stage is enabled.
+_pre_bims = sorted(__import__("glob").glob(os.path.join(GENETICS_DIR, "*.bim")))
+_pre_chain = _genocheck_find_chain(GENETICS_DIR)
+_fetch_allowed = (
+    GENOCHECK_FETCH not in ("0", "false", "no", "off")
+    and os.environ.get("GENOCHECK_ENABLED", "auto").strip().lower()
+    not in ("0", "false", "no", "off"))
+_need_chain = (os.environ.get("GENOCHECK_CHIP_BUILD", "hg19").strip().lower()
+               in ("hg19", "grch37", "b37", "37")
+               and not os.path.isfile(_pre_chain))
+if _fetch_allowed and ((not _pre_bims) or _need_chain):
+    _genocheck_bootstrap(GENETICS_DIR, GENOCHECK_OUT,
+                         need_bim=not _pre_bims, need_chain=_need_chain,
+                         chain_target=GENETICS_DIR + "/hg19ToHg38.over.chain.gz")
+
 
 
 GENOCHECK_CHIP_PREFIX, _chip_note, _chip_candidates = \
@@ -1021,11 +1265,457 @@ rule all:
                      ref=DECONV_REFERENCES))
            if (DECONV_ACTIVE and DECONV_CIBERSORTX) else []),
         *([GENOCHECK_OUT + "/rnaseq_genotypes.bed",
-            GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
-            GENOCHECK_OUT + "/00_kinship_rna_report.tsv"] if GENOCHECK_ENABLED else []),
+        GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
+        GENOCHECK_OUT + "/00_kinship_rna_report.tsv",
+        GENOCHECK_OUT + "/00_mixture_report.tsv",
+        GENOCHECK_OUT + "/00_mixture_vaf_histogram.svg",
+        GENOCHECK_OUT + "/00_mixture_alpha_profile.svg"] if GENOCHECK_ENABLED else []),
         *([GENOCHECK_OUT + "/00_similarity_report.tsv",
-            GENOCHECK_OUT + "/00_similarity_pairs.tsv"] if GENOCHECK_IDENTITY else []),
+        GENOCHECK_OUT + "/00_similarity_pairs.tsv"] if GENOCHECK_IDENTITY else []),
     shell: "echo 'GTEx-V11-compatible alignment + QC complete.'"
+
+_GENOCHECK_LANCZOS = (676.5203681218851, -1259.1392167224028, 771.32342877765313,
+            -176.61502916214059, 12.507343278686905, -0.13857109526572012,
+            9.9843695780195716e-6, 1.5056327351493116e-7)
+
+
+def _genocheck_gammaln(x):
+    """Vectorised log-gamma (Lanczos, g=7). numpy has no gammaln and we do not
+    want a scipy dependency inside a Snakemake run: block."""
+    x = np.asarray(x, dtype=float)
+    small = x < 1.0
+    xs = np.where(small, x + 1.0, x)
+    z = xs - 1.0
+    a = np.full(z.shape, 0.99999999999980993)
+    for i, c in enumerate(_GENOCHECK_LANCZOS):
+        a = a + c / (z + i + 1.0)
+    t = z + 7.5
+    out = 0.5 * np.log(2.0 * np.pi) + (z + 0.5) * np.log(t) - t + np.log(a)
+    return np.where(small, out - np.log(np.where(small, x, 1.0)), out)
+
+
+def _genocheck_lbeta(a, b):
+    return _genocheck_gammaln(a) + _genocheck_gammaln(b) - _genocheck_gammaln(a + b)
+
+
+def _genocheck_bb_logpmf(alt, dep, mu, rho):
+    """Beta-binomial log-pmf up to the binomial coefficient, which is constant
+    across components and hypotheses and so cancels in every comparison."""
+    mu = np.clip(mu, 1e-9, 1 - 1e-9)
+    s = (1.0 - rho) / rho
+    A, B = mu * s, (1.0 - mu) * s
+    return _genocheck_lbeta(alt + A, dep - alt + B) - _genocheck_lbeta(A, B)
+
+
+def _genocheck_comp_means(alpha, eps):
+    """Expected VAF of every latent component, error-adjusted.
+
+    H1 (one donor):  g/2 for g alt copies in {0,1,2}        -> 3 components
+    H2 (two donors): (1-alpha)*gA/2 + alpha*gB/2            -> 9 components
+    alpha is confined to (0, 0.5]; alpha and 1-alpha describe the same mixture
+    with the donor labels swapped, so only one half is identifiable.
+    """
+    m = np.array([0.0, 0.5, 1.0])
+    if alpha is None:
+        v = m
+    else:
+        v = ((1.0 - alpha) * m[:, None] + alpha * m[None, :]).ravel()
+    return v * (1.0 - eps) + (1.0 - v) * eps
+
+
+def _genocheck_logsumexp(a, axis=None):
+    mx = np.max(a, axis=axis, keepdims=True)
+    out = mx + np.log(np.sum(np.exp(a - mx), axis=axis, keepdims=True))
+    return np.squeeze(out, axis=axis) if axis is not None else out.item()
+
+
+def _genocheck_em_fit(alt, dep, alpha, eps, rho_edge, rho_mid, iters=40, tol=1e-6):
+    """EM for the genotype-class frequencies pi (shared by both donors).
+
+    Returns (loglik, pi). Components whose expected VAF sits at 0 or 1 get
+    rho_edge (sequencing error / editing leakage only); every intermediate
+    component gets rho_mid, which is what absorbs allele-specific expression.
+    Both hypotheses fit their own pi and their own dispersions, so neither is
+    handicapped -- what separates them is whether mass sits at intermediate
+    VAFs that three components cannot reach.
+    """
+    v = _genocheck_comp_means(alpha, eps)
+    edge = (v <= eps + 1e-12) | (v >= 1 - eps - 1e-12)
+    rho = np.where(edge, rho_edge, rho_mid)
+    L = np.stack([_genocheck_bb_logpmf(alt, dep, v[k], rho[k]) for k in range(v.size)], 1)
+
+    pi = np.full(3, 1.0 / 3.0)
+    prev = -np.inf
+    for _ in range(iters):
+        w = np.outer(pi, pi).ravel() if alpha is not None else pi
+        lw = np.log(np.maximum(w, 1e-300))
+        ll_i = _genocheck_logsumexp(L + lw, axis=1)
+        ll = float(np.sum(ll_i))
+        r = np.exp(L + lw - ll_i[:, None])
+        if alpha is None:
+            pi = r.sum(0) / r.shape[0]
+        else:
+            R = r.sum(0).reshape(3, 3)
+            counts = R.sum(1) + R.sum(0)          # each donor contributes once
+            pi = counts / counts.sum()
+        pi = np.clip(pi, 1e-6, None); pi /= pi.sum()
+        if ll - prev < tol * max(1.0, abs(prev)):
+            prev = ll
+            break
+        prev = ll
+    return prev, pi
+
+
+def genocheck_fit_mixture(alt, dep, alpha_grid=None, eps=0.002,
+                rho_edge_grid=(0.004,), rho_mid_grid=(0.02, 0.06, 0.12, 0.20, 0.30, 0.42)):
+    """Compare one-donor vs two-donor fits for one sample.
+
+    Returns a dict with both log-likelihoods, the profile of H2 log-likelihood
+    over alpha, the MAP alpha, and delta BIC (positive favours two donors).
+    Free parameters: pi contributes 2 to both models and cancels; each model
+    also selects 2 dispersions from a grid; H2 adds alpha. So k2 - k1 = 1.
+    """
+    alt = np.asarray(alt, float)
+    dep = np.asarray(dep, float)
+    n = alt.size
+    two_stage = alpha_grid is None
+    if alpha_grid is None:
+        alpha_grid = np.round(np.arange(0.02, 0.501, 0.02), 4)
+
+    ll1 = -np.inf
+    for re_ in rho_edge_grid:
+        for rm in rho_mid_grid:
+            ll, _ = _genocheck_em_fit(alt, dep, None, eps, re_, rm)
+            ll1 = max(ll1, ll)
+
+    prof = {}
+    ll2 = -np.inf
+    best_alpha = float("nan")
+    for a in alpha_grid:
+        best_a = -np.inf
+        for re_ in rho_edge_grid:
+            for rm in rho_mid_grid:
+                ll, _ = _genocheck_em_fit(alt, dep, float(a), eps, re_, rm)
+                best_a = max(best_a, ll)
+        prof[float(a)] = best_a
+        if best_a > ll2:
+            ll2, best_alpha = best_a, float(a)
+
+    if two_stage and np.isfinite(best_alpha):
+        lo, hi = max(0.01, best_alpha - 0.02), min(0.50, best_alpha + 0.02)
+        for a in np.round(np.arange(lo, hi + 1e-9, 0.005), 4):
+            best_a = -np.inf
+            for re_ in rho_edge_grid:
+                for rm in rho_mid_grid:
+                    ll, _ = _genocheck_em_fit(alt, dep, float(a), eps, re_, rm)
+                    best_a = max(best_a, ll)
+            prof[float(a)] = best_a
+            if best_a > ll2:
+                ll2, best_alpha = best_a, float(a)
+
+    dbic = 2.0 * (ll2 - ll1) - 1.0 * np.log(max(n, 2))
+    return {"n_sites": int(n), "loglik_1donor": float(ll1),
+            "loglik_2donor": float(ll2), "alpha_hat": best_alpha,
+            "delta_bic": float(dbic), "alpha_profile": prof}
+
+
+
+
+def _genocheck_esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+# Themes resolve to literal hex here and are written as PRESENTATION
+# ATTRIBUTES, never CSS. Browsers honour CSS custom properties, but cairosvg,
+# librsvg, Inkscape and ImageMagick do not -- a var()-styled SVG converts to a
+# solid black rectangle, which is precisely what happens when someone turns this
+# QC figure into a paper panel. Literal attributes render identically anywhere.
+_GENOCHECK_THEMES = {
+    "light": {"surface": "#fcfcfb", "t1": "#0b0b0b", "t2": "#52514e",
+              "faint": "#d8d7d2", "series": "#2a78d6", "fill": "#9ec5f4"},
+    "dark":  {"surface": "#1a1a19", "t1": "#f0efec", "t2": "#c3c2b7",
+              "faint": "#3a3a38", "series": "#3987e5", "fill": "#1c5cab"},
+}
+# Status palette is fixed, never themed, and never carries meaning alone: every
+# swatch sits beside its spelled-out verdict.
+_GENOCHECK_STATUS = {"mixture": "#d03b3b", "inconclusive_low_alpha": "#fab219",
+           "single_donor": "#0ca30c"}
+_GENOCHECK_FONT = "'Helvetica Neue',Helvetica,Arial,sans-serif"
+
+
+def _genocheck_svg_head(w, h, title, T):
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
+            f'viewBox="0 0 {w} {h}" role="img" aria-label="{_genocheck_esc(title)}">\n'
+            f'<rect x="0" y="0" width="{w}" height="{h}" '
+            f'fill="{T["surface"]}"/>\n')
+
+
+def _genocheck_svg_txt(x, y, s, fill, size, weight=None, anchor=None):
+    w = f' font-weight="{weight}"' if weight else ""
+    a = f' text-anchor="{anchor}"' if anchor else ""
+    return (f'<text x="{x:.1f}" y="{y:.1f}" fill="{fill}" '
+            f'font-family="{_GENOCHECK_FONT}" font-size="{size}"{w}{a}>{s}</text>')
+
+
+def _genocheck_svg_line(x1, y1, x2, y2, stroke, width=1, dash=None, opacity=None):
+    d = f' stroke-dasharray="{dash}"' if dash else ""
+    o = f' opacity="{opacity}"' if opacity is not None else ""
+    return (f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="{stroke}" stroke-width="{width}"{d}{o}/>')
+
+
+def _genocheck_glyphs(s):
+    import re
+    """Character count with numeric entities collapsed to one glyph each."""
+    return len(re.sub(r"&#\d+;", "\u00b7", s))
+
+
+def _genocheck_wrap(text, max_chars):
+    """Greedy wrap that treats an entity as a single glyph. The subtitle has to
+    fit whatever width the panel grid dictates -- at two columns an unwrapped
+    line runs off the canvas, and SVG does not reflow."""
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if cur and _genocheck_glyphs(trial) > max_chars:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = trial
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
+def _genocheck_grid_shape(n, max_cols=6):
+    import math
+    cols = min(max_cols, max(1, int(math.ceil(math.sqrt(n)))))
+    return cols, int(math.ceil(n / cols))
+
+
+def _genocheck_panel_header(out, x0, y0, name, sub, verdict, T):
+    out.append(f'<rect x="{x0}" y="{y0 - 17}" width="8" height="8" rx="1.5" '
+               f'fill="{_GENOCHECK_STATUS.get(verdict, T["t2"])}"/>')
+    out.append(_genocheck_svg_txt(x0 + 13, y0 - 9, _genocheck_esc(name), T["t1"], 11, weight="600"))
+    out.append(_genocheck_svg_txt(x0 + 13, y0 + 3, _genocheck_esc(sub), T["t2"], 9.5))
+
+
+def genocheck_vaf_histogram_svg(samples, hist, meta, bin_w=0.02, theme="light"):
+    """Small multiples of allele-fraction distributions, one panel per sample.
+
+    Each panel shows ONE distribution, so the marks take a single sequential
+    hue -- colour encodes magnitude, not identity, and no legend is needed. The
+    one-donor / two-donor verdict is deliberately NOT in the mark colour; it
+    rides in the panel header as a status swatch beside the spelled-out
+    verdict, so the call never rests on colour alone.
+
+    The y axis is clipped to the tallest NON-EDGE bin. Homozygous sites pile
+    into the first and last bins an order of magnitude above everything else;
+    unclipped they flatten the intermediate-VAF region, which is the only part
+    of the plot carrying signal. Clipped bins get a broken top and their true
+    count printed above, so nothing is hidden silently.
+    """
+    T = _GENOCHECK_THEMES[theme]
+    PW, PH = 250, 132
+    ML, MR, MB = 44, 14, 34
+    GX, GY = 16, 26
+    cols, rows = _genocheck_grid_shape(len(samples))
+    W = ML + cols * PW + (cols - 1) * GX + MR
+    sub = _genocheck_wrap(
+        "One donor puts mass only near 0, 0.5 and 1. A two-donor mixture adds "
+        "sidebands at &#945;/2, &#945;, 0.5&#177;&#945;/2 and 1&#8722;&#945; "
+        "(dashed guides). y is clipped to the tallest non-edge bin; clipped "
+        "bars are capped with a break and labelled &#8593; with their true "
+        "count.", int((W - ML - MR) / 5.6))
+    MT = 44 + 14 * len(sub) + 20          # keep the header clear of row 1
+    H = MT + rows * PH + (rows - 1) * GY + MB
+    out = [_genocheck_svg_head(W, H, "Allele fraction per site, by sample", T)]
+    out.append(_genocheck_svg_txt(ML, 24, "Allele fraction per site, by sample", T["t1"], 15,
+                    weight="600"))
+    for k, line in enumerate(sub):
+        out.append(_genocheck_svg_txt(ML, 42 + 14 * k, line, T["t2"], 10.5))
+
+    for i, s in enumerate(samples):
+        r, c = divmod(i, cols)
+        x0, y0 = ML + c * (PW + GX), MT + r * (PH + GY)
+        bins = hist.get(s, [])
+        m = meta.get(s, {})
+        verdict = m.get("verdict", "NA")
+        alpha, dbic = m.get("alpha_hat"), m.get("delta_bic")
+        sub = verdict.replace("_", " ")
+        if alpha is not None and alpha == alpha and verdict == "mixture":
+            sub += f"  α̂={alpha:.3f}"
+        if dbic is not None and dbic == dbic:
+            sub += f"  ΔBIC={dbic:+.0f}"
+        _genocheck_panel_header(out, x0, y0, s, sub, verdict, T)
+
+        if not bins:
+            out.append(_genocheck_svg_txt(x0 + PW / 2, y0 + PH / 2, "no sites", T["t2"], 10,
+                            anchor="middle"))
+            continue
+
+        counts = [c_ for _, c_ in bins]
+        inner = [c_ for lo, c_ in bins if 0.02 <= lo <= 0.94]
+        cap = max(1.0, (max(inner) * 1.15) if inner and max(inner) > 0
+                  else (max(counts) or 1))
+
+        px0, py0 = x0, y0 + 10
+        pw, ph = PW - 10, PH - 30
+
+        for frac in (0.0, 0.5, 1.0):
+            gy = py0 + ph - frac * ph
+            out.append(_genocheck_svg_line(px0, gy, px0 + pw, gy, T["faint"], 1))
+            out.append(_genocheck_svg_txt(px0 - 5, gy + 3, f"{int(round(frac * cap))}",
+                            T["t2"], 8.5, anchor="end"))
+
+        if verdict == "mixture" and alpha and alpha == alpha:
+            for g in (alpha / 2, alpha, 0.5 - alpha / 2, 0.5 + alpha / 2,
+                      1 - alpha):
+                if 0 < g < 1:
+                    gx = px0 + g * pw
+                    out.append(_genocheck_svg_line(gx, py0, gx, py0 + ph, T["t2"], 1,
+                                     dash="3 3", opacity=0.5))
+
+        # filled step area: the right mark for a 50-bin distribution -- separate
+        # bars at ~5px fragment the shape and the sidebands stop reading
+        pts = [f"{px0:.1f},{py0 + ph:.1f}"]
+        clipped = []
+        for lo, c_ in bins:
+            xl = px0 + lo * pw
+            xr = px0 + min(lo + bin_w, 1.0) * pw
+            yv = py0 + ph - (min(c_, cap) / cap) * ph
+            pts += [f"{xl:.1f},{yv:.1f}", f"{xr:.1f},{yv:.1f}"]
+            if c_ > cap:
+                clipped.append((xl, xr, c_))
+        pts.append(f"{px0 + pw:.1f},{py0 + ph:.1f}")
+        out.append(f'<polygon points="{" ".join(pts)}" fill="{T["fill"]}" '
+                   f'fill-opacity="0.85" stroke="{T["series"]}" '
+                   f'stroke-width="1.25" stroke-linejoin="round"/>')
+
+        for xl, xr, c_ in clipped:
+            out.append(_genocheck_svg_line(xl, py0 + 2, xr, py0 + 2, T["surface"], 2))
+            anchor = "start" if (xl + xr) / 2 < px0 + pw / 2 else "end"
+            out.append(_genocheck_svg_txt(xl if anchor == "start" else xr, py0 - 1,
+                            f"&#8593;{int(c_)}", T["t2"], 8, anchor=anchor))
+
+        out.append(_genocheck_svg_line(px0, py0 + ph, px0 + pw, py0 + ph, T["t2"], 1,
+                         opacity=0.55))
+        for t in (0.0, 0.25, 0.5, 0.75, 1.0):
+            tx = px0 + t * pw
+            out.append(_genocheck_svg_line(tx, py0 + ph, tx, py0 + ph + 3, T["t2"], 1,
+                             opacity=0.55))
+            out.append(_genocheck_svg_txt(tx, py0 + ph + 13, f"{t:g}", T["t2"], 8.5,
+                            anchor="middle"))
+
+        # native tooltips, no JS: one transparent hit rect per bin
+        for lo, c_ in bins:
+            out.append(
+                f'<rect x="{px0 + lo * pw:.1f}" y="{py0:.1f}" '
+                f'width="{bin_w * pw:.1f}" height="{ph:.1f}" fill="none" '
+                f'pointer-events="all"><title>{_genocheck_esc(s)}  VAF {lo:.2f}'
+                f'–{min(lo + bin_w, 1.0):.2f}: {int(c_)} sites'
+                f'</title></rect>')
+
+    foot = _genocheck_wrap("x: alt-allele fraction (AD alt / AD sum) &#183; y: number "
+                 "of sites &#183; counts also in "
+                 "00_mixture_vaf_histogram.tsv.gz", int((W - ML - MR) / 5.4))
+    out.append(_genocheck_svg_txt(ML, H - 12, foot[0], T["t2"], 10))
+    out.append("</svg>\n")
+    return "".join(out)
+
+
+def genocheck_alpha_profile_svg(samples, prof, meta, dbic_cut=10.0, theme="light"):
+    """Delta BIC against mixture fraction, one panel per sample.
+
+    One line per panel, so no legend. The dashed rule is the calling threshold
+    and the marker is the chosen alpha. A flat profile under the rule is a clean
+    single donor; a sharp peak is a mixture; a broad shallow rise is the
+    borderline case worth inspecting rather than trusting -- which is the whole
+    reason this figure exists alongside the verdict column.
+    """
+    T = _GENOCHECK_THEMES[theme]
+    PW, PH = 250, 118
+    ML, MR, MB = 50, 14, 34
+    GX, GY = 16, 26
+    cols, rows = _genocheck_grid_shape(len(samples))
+    W = ML + cols * PW + (cols - 1) * GX + MR
+    sub = _genocheck_wrap(
+        f"&#916;BIC = 2(logL&#8322;&#8722;logL&#8321;) &#8722; ln n; positive "
+        f"favours two donors. Dashed rule: the calling threshold, &#916;BIC = "
+        f"{dbic_cut:g}. Marker: the chosen &#945;.",
+        int((W - ML - MR) / 5.6))
+    MT = 44 + 14 * len(sub) + 20
+    H = MT + rows * PH + (rows - 1) * GY + MB
+    out = [_genocheck_svg_head(W, H, "Two-donor support against mixture fraction", T)]
+    out.append(_genocheck_svg_txt(ML, 24, "Two-donor support against mixture fraction "
+                    "&#945;", T["t1"], 15, weight="600"))
+    for k, line in enumerate(sub):
+        out.append(_genocheck_svg_txt(ML, 42 + 14 * k, line, T["t2"], 10.5))
+
+    for i, s in enumerate(samples):
+        r, c = divmod(i, cols)
+        x0, y0 = ML + c * (PW + GX), MT + r * (PH + GY)
+        pr = sorted(prof.get(s, []))
+        m = meta.get(s, {})
+        verdict = m.get("verdict", "NA")
+        _genocheck_panel_header(out, x0, y0, s, verdict.replace("_", " "), verdict, T)
+        if not pr:
+            out.append(_genocheck_svg_txt(x0 + PW / 2, y0 + PH / 2, "not fitted", T["t2"], 10,
+                            anchor="middle"))
+            continue
+
+        px0, py0 = x0, y0 + 10
+        pw, ph = PW - 10, PH - 30
+        xs = [a for a, _ in pr]
+        ys = [d for _, d in pr]
+        ylo = min(min(ys), -abs(dbic_cut) * 1.5)
+        yhi = max(max(ys), dbic_cut * 1.5)
+        span = (yhi - ylo) or 1.0
+        xlo, xhi = min(xs), max(xs)
+        xspan = (xhi - xlo) or 1.0
+        sx = lambda a: px0 + (a - xlo) / xspan * pw          # noqa: E731
+        sy = lambda d: py0 + ph - (d - ylo) / span * ph      # noqa: E731
+
+        if ylo <= 0 <= yhi:
+            out.append(_genocheck_svg_line(px0, sy(0), px0 + pw, sy(0), T["faint"], 1))
+        if ylo <= dbic_cut <= yhi:
+            out.append(_genocheck_svg_line(px0, sy(dbic_cut), px0 + pw, sy(dbic_cut),
+                             _GENOCHECK_STATUS["mixture"], 1, dash="4 3", opacity=0.7))
+        for val in (ylo, yhi):
+            out.append(_genocheck_svg_txt(px0 - 5, sy(val) + 3, f"{val:,.0f}", T["t2"], 8.5,
+                            anchor="end"))
+
+        out.append('<polyline points="'
+                   + " ".join(f"{sx(a):.1f},{sy(d):.1f}" for a, d in pr)
+                   + f'" fill="none" stroke="{T["series"]}" stroke-width="2" '
+                   f'stroke-linejoin="round"/>')
+
+        best = max(pr, key=lambda t: t[1])
+        out.append(f'<circle cx="{sx(best[0]):.1f}" cy="{sy(best[1]):.1f}" '
+                   f'r="4.5" fill="{T["series"]}" stroke="{T["surface"]}" '
+                   f'stroke-width="2"><title>{_genocheck_esc(s)} '
+                   f'α̂={best[0]:.3f} ΔBIC={best[1]:+.1f}'
+                   f'</title></circle>')
+        by = sy(best[1])
+        out.append(_genocheck_svg_txt(sx(best[0]), by + (14 if by - py0 < 16 else -9),
+                        f"{best[0]:.3f}", T["t2"], 8.5, anchor="middle"))
+
+        out.append(_genocheck_svg_line(px0, py0 + ph, px0 + pw, py0 + ph, T["t2"], 1,
+                         opacity=0.55))
+        for t in (0.0, 0.1, 0.2, 0.3, 0.4, 0.5):
+            if xlo <= t <= xhi:
+                out.append(_genocheck_svg_line(sx(t), py0 + ph, sx(t), py0 + ph + 3, T["t2"],
+                                 1, opacity=0.55))
+                out.append(_genocheck_svg_txt(sx(t), py0 + ph + 13, f"{t:g}", T["t2"], 8.5,
+                                anchor="middle"))
+
+    foot = _genocheck_wrap("x: mixture fraction &#945; &#183; y: &#916;BIC &#183; "
+                 "values also in 00_mixture_alpha_profile.tsv.gz",
+                 int((W - ML - MR) / 5.4))
+    out.append(_genocheck_svg_txt(ML, H - 12, foot[0], T["t2"], 10))
+    out.append("</svg>\n")
+    return "".join(out)
 
 # -----------------------------------------------------------------------------
 # Trimming
@@ -4387,9 +5077,10 @@ rule r11i_genocheck_remap:
     Alleles are complemented for the sites r11e flagged as strand-flipped, so
     the fileset comes out in the chip's allele orientation and merges cleanly.
 
-    Sample IDs are rewritten to chip IIDs here too if sample_map.tsv exists;
-    without it they stay as RNA sample names (kinship still works, the pairs
-    are just labelled by RNA name).
+    Sample IDs: the IID is always the RNA sample name (the only unique one);
+    the FID carries the grouping from sample_map.tsv or donor_map.tsv when
+    either supplies one, so regions of a donor sit in one family. Both maps may
+    be partial.
 
     The result is position-UNSORTED, because hg19 and hg38 order variants
     differently. r11j sorts it.
@@ -4407,6 +5098,7 @@ rule r11i_genocheck_remap:
         log  = GENOCHECK_OUT + "/remap.log",
     params:
         sample_map = GENOCHECK_SAMPLE_MAP,
+        donor_map  = GENOCHECK_DONOR_MAP,
     run:
         import shutil
 
@@ -4442,24 +5134,25 @@ rule r11i_genocheck_remap:
 
         shutil.copy(input.bed, output.bed)
 
-        # fam: optionally rename samples to their chip IIDs
-        remap = {}
-        if os.path.isfile(params.sample_map) and \
-                os.path.getsize(params.sample_map) > 0:
-            with open(params.sample_map) as fh:
-                for line in fh:
-                    f = line.split()
-                    if len(f) >= 2:
-                        remap[f[0]] = f[1]
-        n_renamed = 0
+        # fam: the IID stays the RNA sample name, because it is the only
+        # identifier guaranteed unique. sample_map.tsv is MANY-TO-ONE in a
+        # multi-region design (several regions of one donor point at ONE array
+        # sample), so writing the array id into both FID and IID would produce
+        # duplicate FID+IID pairs and PLINK would reject the fileset. The FID
+        # carries the grouping instead: array id if sample_map has one, else
+        # donor id from donor_map, else the RNA name. Both maps may be partial;
+        # an unmapped sample simply keeps its own name as FID.
+        smap   = _genocheck_read_map(params.sample_map)
+        donors = _genocheck_read_map(params.donor_map)
+        n_grouped = 0
         with open(input.fam) as fin, open(output.fam, "w") as fout:
             for line in fin:
                 f = line.split()
-                if f[1] in remap:
-                    new = remap[f[1]]
-                    f[0], f[1] = new, new
-                    n_renamed += 1
-                fout.write(" ".join(f) + "\n")
+                rna = f[1]
+                fid = smap.get(rna) or donors.get(rna) or rna
+                if fid != rna:
+                    n_grouped += 1
+                fout.write(" ".join([fid, rna] + f[2:]) + "\n")
 
         with open(output.keep, "w") as fh:
             fh.write("\n".join(kept_ids) + "\n")
@@ -4467,7 +5160,7 @@ rule r11i_genocheck_remap:
         stats = {"bim_rows_in": n_in, "remapped_to_chip_build": n_mapped,
                  "alleles_complemented": n_flipped,
                  "dropped_not_in_crosswalk": n_in - n_mapped,
-                 "samples_renamed_to_chip_iid": n_renamed}
+                 "samples_given_group_fid": n_grouped}
         with open(output.log, "w") as fh:
             for k, v in stats.items():
                 fh.write(f"{k}\t{v}\n")
@@ -4581,7 +5274,6 @@ rule r11k_genocheck_kinship_rna:
         cp $T.kin0 {output.kin}
         """
 
-
 rule r11l_genocheck_rna_report:
     """
     Per-sample QC plus the RNA-internal kinship report.
@@ -4661,11 +5353,17 @@ rule r11l_genocheck_rna_report:
 
         donors = _genocheck_read_map(params.donor_map)
         if donors:
+            # donor_map.tsv may be PARTIAL. A pair in which either member is
+            # unmapped is "unknown", NOT "expected to be different donors" --
+            # conflating the two turns missing metadata into a false alarm, so
+            # such pairs are reported as NA and excluded from the tally.
+            d1 = [donors.get(a) for a in kin["IID1"]]
+            d2 = [donors.get(b) for b in kin["IID2"]]
             kin["same_donor_expected"] = [
-                (donors.get(a) is not None and donors.get(a) == donors.get(b))
-                for a, b in zip(kin["IID1"], kin["IID2"])]
+                "NA" if (x is None or y is None) else (x == y)
+                for x, y in zip(d1, d2)]
             kin["agrees_with_donor_map"] = [
-                (exp == (lab == "same_individual"))
+                "NA" if exp == "NA" else (exp == (lab == "same_individual"))
                 for exp, lab in zip(kin["same_donor_expected"], kin["label"])]
 
         kin.sort_values(kcol, ascending=False).to_csv(
@@ -4675,9 +5373,13 @@ rule r11l_genocheck_rna_report:
               f"sites, median call rate {stats['call_rate'].median():.3f}",
               file=sys.stderr)
         if donors and "agrees_with_donor_map" in kin:
-            bad = int((~kin["agrees_with_donor_map"]).sum())
+            # the column is mixed bool/"NA", so `~` would raise -- count the
+            # genuine False entries only
+            bad = sum(1 for v in kin["agrees_with_donor_map"] if v is False)
+            unk = sum(1 for v in kin["agrees_with_donor_map"] if v == "NA")
             print(f"[genocheck][report] {bad} RNA pair(s) disagree with "
-                  f"donor_map.tsv -- see {output.report}", file=sys.stderr)
+                  f"donor_map.tsv ({unk} pair(s) unknown -- member not in the "
+                  f"map) -- see {output.report}", file=sys.stderr)
 
 
 # -----------------------------------------------------------------------------
@@ -4744,7 +5446,10 @@ rule r11n_genocheck_merge:
         set -euo pipefail
         cd {params.wd}
 
-        awk '{{print $1, $2, $1"_RNA", $2"_RNA"}}' {params.rna}.fam > rna_tag.txt
+        # suffix the IID only: the FID carries the donor/array grouping from
+        # r11i and is worth keeping, while the IID is what must not collide
+        # with an array sample of the same name
+        awk '{{print $1, $2, $1, $2"_RNA"}}' {params.rna}.fam > rna_tag.txt
         plink --bfile {params.rna} --update-ids rna_tag.txt \
               --allow-extra-chr --make-bed --out rna_tagged >/dev/null
 
@@ -5010,6 +5715,345 @@ rule r11q_genocheck_identity:
                 print("[genocheck][identity] all samples agree with "
                       "sample_map.tsv", file=sys.stderr)
 
+
+# =============================================================================
+# MIXTURE DETECTION -- one donor or two?  (r11r, r11s)
+# =============================================================================
+# Asks a single question per RNA sample: do the read-level allele fractions fit
+# better as ONE donor or as a MIXTURE OF TWO? It never uses anybody's
+# genotypes -- not the array's, not the pipeline's own calls. The only thing
+# taken from the array fileset is WHICH SITES to look at, via the usual r11a
+# site list. The test therefore runs at both tiers, and is unchanged when a
+# complete fileset is supplied.
+#
+# WHY NOT HETEROZYGOSITY
+# ----------------------
+# A mixture does inflate called heterozygosity -- at 50:50 a site is het unless
+# both donors are homozygous for the same allele, so H_mix = 1 - (p^4 + q^4)
+# against H_single = 2pq, which at MAF 0.5 is 0.875 vs 0.50. But the genotype
+# caller throws the evidence away: below roughly alpha = 0.15-0.20 the minor
+# donor's reads never carry a site past the het prior, so the call is simply
+# the major donor's genotype and het rate barely moves. Het rate is also
+# confounded with depth, because allele dropout deflates it. Read-level allele
+# fractions have had no threshold applied to them, which is why they are
+# sensitive an order of magnitude lower.
+#
+# THE MODEL
+# ---------
+# Per site, alt and total (= AD[0] + AD[1]) read counts. The latent variable is
+# the unobserved genotype class, not a called one.
+#
+#   H1, one donor:   expected VAF in {0, 1/2, 1}                 3 components
+#   H2, two donors:  (1-alpha)*gA/2 + alpha*gB/2                 9 components
+#
+# H2's extra components sit at alpha/2, alpha, 1/2 +/- alpha/2 and 1-alpha --
+# sidebands that three components cannot reach, and whose position IS the
+# estimate of alpha. alpha is confined to (0, 0.5]: alpha and 1-alpha are the
+# same mixture with the donor labels swapped, so only one half is identifiable.
+#
+# Emissions are beta-binomial, with TWO dispersions: one for components whose
+# expected VAF is 0 or 1 (sequencing error and editing leakage only) and one
+# for every intermediate component, which is what absorbs allele-specific
+# expression. Both hypotheses fit their own genotype-class frequencies pi by EM
+# and select their own dispersions from the same grid, so neither is
+# handicapped; what separates them is only whether mass sits at intermediate
+# VAFs. The ASE dispersion grid reaches 0.42 deliberately -- a narrower grid
+# makes a pure sample with strong ASE fit better as a mixture, which was a real
+# false positive during development.
+#
+# Model choice is by BIC. pi contributes 2 parameters to both models and
+# cancels; each model also picks 2 dispersions off the grid; H2 adds alpha, so
+# k2 - k1 = 1 and delta_BIC = 2*(logL2 - logL1) - ln(n). Positive favours two
+# donors.
+#
+# VALIDATED ON SIMULATION (4000 sites, median depth 60, HWE genotypes,
+# beta-binomial ASE):
+#   pure, ASE rho=0.06 .......... dBIC  -32   single donor
+#   pure, heavy ASE rho=0.20 .... dBIC  -33   single donor
+#   pure, extreme ASE rho=0.35 .. dBIC  -19   single donor
+#   mixture alpha=0.05 .......... dBIC +1370  alpha_hat 0.060
+#   mixture alpha=0.10 .......... dBIC  +709  alpha_hat 0.105
+#   mixture alpha=0.30 .......... dBIC  +591  alpha_hat 0.300
+#   mixture alpha=0.50 .......... dBIC  +902  alpha_hat 0.500
+# alpha_hat is biased upward below alpha ~ 0.03 (a true 0.02 came back 0.035),
+# so treat sub-0.03 estimates as "something is there" rather than as a quantity.
+#
+# WHAT IT CANNOT DO
+# -----------------
+#   * name the contaminant -- that needs genotypes, which this test refuses to
+#     use by design. Cross-reference the `ambiguous` verdicts in r11q instead.
+#   * see a mixture of one donor with THEMSELVES (several regions of the same
+#     brain pooled) -- genetically invisible.
+#   * separate true contamination from index hopping. If every sample in a
+#     batch returns a similar small alpha, read it as a flowcell-level floor,
+#     not as a per-sample problem: look at the spread, then the outliers.
+#   * work on a related contaminant as well as an unrelated one -- shared
+#     genotypes leave fewer informative sites and shrink alpha_hat.
+#
+# A/G and T/C sites are excluded by default (GENOCHECK_MIX_DROP_TRANSITIONS):
+# ADAR A-to-I editing produces exactly the low-VAF alt-allele signature that a
+# few per cent of contamination does.
+# =============================================================================
+
+rule r11r_genocheck_vaf_counts:
+    """
+    Per-site allele counts for every sample, straight out of the filtered VCF.
+    Only FORMAT/AD is read -- the GT field is ignored entirely, which is what
+    keeps this test independent of any genotype call.
+
+    Depth is taken as AD[0] + AD[1] rather than FORMAT/DP: the allele fraction
+    should be computed over reads that actually support one of the two alleles,
+    not over every read at the position.
+    """
+    input:
+        vcf = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
+    output:
+        counts  = GENOCHECK_OUT + "/_mixture/ad_counts.tsv.gz",
+        samples = GENOCHECK_OUT + "/_mixture/ad_samples.txt",
+    params:
+        wd = GENOCHECK_OUT + "/_mixture",
+    threads: 2
+    singularity: BCFTOOLS_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.wd}
+        bcftools query -l {input.vcf} > {output.samples}
+        bcftools query -f '%CHROM\t%POS\t%REF\t%ALT[\t%AD]\n' {input.vcf} \
+          | gzip -c > {output.counts}
+        """
+
+
+rule r11s_genocheck_mixture:
+    """
+    Fit both hypotheses per sample and report which the data prefer.
+
+    Site filtering, all mixture-specific:
+      * depth (AD sum) >= GENOCHECK_MIX_MIN_DP. Resolution is the whole game
+        here: at depth 10 the binomial SD at VAF 0.5 is ~0.16, which smears the
+        sidebands into the central mode. 30 is the floor at which they resolve.
+      * depth <= GENOCHECK_MIX_MAX_DP_MULT x the sample median, dropping
+        collapsed-paralog pileups whose allele fractions are meaningless.
+      * A/G and T/C excluded (RNA editing mimics low-level contamination).
+      * subsampled to GENOCHECK_MIX_MAX_SITES with a fixed seed, for runtime.
+
+    Outputs: the per-sample verdict, the full log-likelihood profile over alpha
+    (so a borderline call can be inspected rather than trusted), and a VAF
+    histogram per sample -- the sidebands are usually visible by eye once a
+    mixture is real.
+    """
+    input:
+        counts  = GENOCHECK_OUT + "/_mixture/ad_counts.tsv.gz",
+        samples = GENOCHECK_OUT + "/_mixture/ad_samples.txt",
+    output:
+        report    = GENOCHECK_OUT + "/00_mixture_report.tsv",
+        profile   = GENOCHECK_OUT + "/00_mixture_alpha_profile.tsv.gz",
+        histogram = GENOCHECK_OUT + "/00_mixture_vaf_histogram.tsv.gz",
+    params:
+        min_dp       = GENOCHECK_MIX_MIN_DP,
+        max_dp_mult  = GENOCHECK_MIX_MAX_DP_MULT,
+        max_sites    = GENOCHECK_MIX_MAX_SITES,
+        min_sites    = GENOCHECK_MIX_MIN_SITES,
+        alpha_min    = GENOCHECK_MIX_ALPHA_MIN,
+        dbic_cut     = GENOCHECK_MIX_DBIC,
+        drop_transit = GENOCHECK_MIX_DROP_TRANSITIONS,
+        seed         = 42,
+    run:
+        import gzip
+        import numpy as np
+        import pandas as pd
+
+        TRANSITIONS = {("A", "G"), ("G", "A"), ("C", "T"), ("T", "C")}
+
+        sample_names = [s.strip() for s in open(input.samples)
+                        if s.strip()]
+        n_s = len(sample_names)
+        alt_l = [[] for _ in range(n_s)]
+        dep_l = [[] for _ in range(n_s)]
+
+        with gzip.open(input.counts, "rt") as fh:
+            for line in fh:
+                f = line.rstrip("\n").split("\t")
+                if len(f) < 4 + n_s:
+                    continue
+                ref, alt = f[2].upper(), f[3].upper()
+                if params.drop_transit and (ref, alt) in TRANSITIONS:
+                    continue
+                for i, cell in enumerate(f[4:4 + n_s]):
+                    if "," not in cell:
+                        continue
+                    r_s, a_s = cell.split(",")[:2]
+                    if r_s in (".", "") or a_s in (".", ""):
+                        continue
+                    r_i, a_i = int(r_s), int(a_s)
+                    d = r_i + a_i
+                    if d >= params.min_dp:
+                        alt_l[i].append(a_i)
+                        dep_l[i].append(d)
+
+        rng = np.random.default_rng(params.seed)
+        rows, profs, hists = [], [], []
+        bins = np.arange(0.0, 1.0001, 0.02)
+
+        for i, s in enumerate(sample_names):
+            a = np.asarray(alt_l[i], dtype=float)
+            d = np.asarray(dep_l[i], dtype=float)
+            n_raw = a.size
+            if n_raw:
+                cap = params.max_dp_mult * float(np.median(d))
+                k = d <= cap
+                a, d = a[k], d[k]
+            if a.size > params.max_sites:
+                idx = rng.choice(a.size, params.max_sites, replace=False)
+                a, d = a[idx], d[idx]
+
+            if a.size:
+                vaf = a / d
+                h, _ = np.histogram(vaf, bins=bins)
+                for lo, c in zip(bins[:-1], h):
+                    hists.append({"sample": s, "vaf_bin_low": round(float(lo), 3),
+                                  "n_sites": int(c)})
+
+            if a.size < params.min_sites:
+                rows.append({"sample": s, "n_sites_used": int(a.size),
+                             "n_sites_at_depth": n_raw,
+                             "median_depth": float(np.median(d)) if a.size else 0.0,
+                             "loglik_1donor": float("nan"),
+                             "loglik_2donor": float("nan"),
+                             "alpha_hat": float("nan"),
+                             "delta_bic": float("nan"),
+                             "verdict": "insufficient_sites"})
+                continue
+
+            res = genocheck_fit_mixture(a, d)
+            db, ah = res["delta_bic"], res["alpha_hat"]
+            if db >= params.dbic_cut and ah >= params.alpha_min:
+                verdict = "mixture"
+            elif db < params.dbic_cut:
+                verdict = "single_donor"
+            else:
+                # favoured statistically but below the alpha floor: the error /
+                # editing / index-hopping regime, not a reportable mixture
+                verdict = "inconclusive_low_alpha"
+
+            rows.append({"sample": s, "n_sites_used": res["n_sites"],
+                         "n_sites_at_depth": n_raw,
+                         "median_depth": float(np.median(d)),
+                         "loglik_1donor": res["loglik_1donor"],
+                         "loglik_2donor": res["loglik_2donor"],
+                         "alpha_hat": ah, "delta_bic": db,
+                         "verdict": verdict})
+
+            ln_n = float(np.log(max(res["n_sites"], 2)))
+            for al, ll in sorted(res["alpha_profile"].items()):
+                profs.append({"sample": s, "alpha": al, "loglik_2donor": ll,
+                              "delta_bic": 2.0 * (ll - res["loglik_1donor"]) - ln_n})
+            print(f"[genocheck][mixture] {s}: n={res['n_sites']} "
+                  f"alpha_hat={ah:.3f} dBIC={db:.1f} -> {verdict}",
+                  file=sys.stderr)
+
+        rep = pd.DataFrame(rows)
+        rep.to_csv(output.report, sep="\t", index=False, float_format="%.4f")
+        pd.DataFrame(profs).to_csv(output.profile, sep="\t", index=False,
+                                   float_format="%.4f")
+        pd.DataFrame(hists).to_csv(output.histogram, sep="\t", index=False)
+
+        mixed = rep[rep["verdict"] == "mixture"]
+        if len(mixed):
+            print(f"[genocheck][mixture] {len(mixed)} sample(s) fit two donors "
+                  f"better: "
+                  + ", ".join(f"{r['sample']}(a={r['alpha_hat']:.2f})"
+                              for _, r in mixed.iterrows()), file=sys.stderr)
+            lo, hi = mixed["alpha_hat"].min(), mixed["alpha_hat"].max()
+            if len(mixed) == len(rep) and (hi - lo) < 0.03:
+                print("[genocheck][mixture] NOTE: every sample returns a "
+                      "similar alpha -- that pattern is a flowcell-level "
+                      "floor (index hopping), not a per-sample swap.",
+                      file=sys.stderr)
+        else:
+            print("[genocheck][mixture] no sample prefers the two-donor model",
+                  file=sys.stderr)
+
+
+rule r11t_genocheck_mixture_plots:
+    """
+    Render the mixture evidence as two small-multiples SVG figures.
+
+    Written by hand with no plotting library: the figures must render wherever
+    this pipeline runs, and matplotlib / ggplot2 cannot be assumed inside the
+    containers this workflow already uses. Colours are emitted as PRESENTATION
+    ATTRIBUTES rather than CSS custom properties -- browsers resolve var(), but
+    cairosvg, librsvg, Inkscape and ImageMagick do not, and a var()-styled SVG
+    silently converts to a solid black rectangle the first time someone turns it
+    into a paper panel. (Confirmed the hard way during development.)
+
+    Reading them:
+      * vaf_histogram -- one donor puts mass only near 0, 0.5 and 1. A mixture
+        fills in the gaps, and the dashed guides mark where the sidebands are
+        predicted for the fitted alpha. This is the figure that makes the call
+        checkable by eye rather than on trust.
+      * alpha_profile -- a flat profile below the dashed threshold is a clean
+        single donor, a sharp peak is a mixture, and a broad shallow rise is the
+        borderline case to inspect.
+
+    The verdict is never carried by mark colour: each panel header pairs a
+    status swatch with the verdict spelled out, and the underlying numbers stay
+    available in the TSVs r11s wrote.
+
+    GENOCHECK_PLOT_THEME=dark re-steps both figures for a dark surface.
+    """
+    input:
+        report    = GENOCHECK_OUT + "/00_mixture_report.tsv",
+        profile   = GENOCHECK_OUT + "/00_mixture_alpha_profile.tsv.gz",
+        histogram = GENOCHECK_OUT + "/00_mixture_vaf_histogram.tsv.gz",
+    output:
+        vaf   = GENOCHECK_OUT + "/00_mixture_vaf_histogram.svg",
+        prof  = GENOCHECK_OUT + "/00_mixture_alpha_profile.svg",
+    params:
+        theme    = GENOCHECK_PLOT_THEME,
+        dbic_cut = GENOCHECK_MIX_DBIC,
+    run:
+        import csv
+        import gzip
+
+        def _f(x):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return float("nan")
+
+        meta = {}
+        with open(input.report) as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                meta[r["sample"]] = {
+                    "verdict": r.get("verdict", "NA"),
+                    "alpha_hat": _f(r.get("alpha_hat")),
+                    "delta_bic": _f(r.get("delta_bic"))}
+
+        hist = {}
+        with gzip.open(input.histogram, "rt") as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                hist.setdefault(r["sample"], []).append(
+                    (float(r["vaf_bin_low"]), int(r["n_sites"])))
+        for v in hist.values():
+            v.sort()
+
+        prof = {}
+        with gzip.open(input.profile, "rt") as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                prof.setdefault(r["sample"], []).append(
+                    (float(r["alpha"]), _f(r["delta_bic"])))
+
+        order = sorted(meta)
+        with open(output.vaf, "w") as fh:
+            fh.write(genocheck_vaf_histogram_svg(order, hist, meta,
+                                                 theme=params.theme))
+        with open(output.prof, "w") as fh:
+            fh.write(genocheck_alpha_profile_svg(order, prof, meta,
+                                                 dbic_cut=params.dbic_cut,
+                                                 theme=params.theme))
+        print(f"[genocheck][mixture] wrote {output.vaf} and {output.prof} "
+              f"({len(order)} panels, {params.theme} theme)", file=sys.stderr)
 
 # =============================================================================
 # Reference download instructions (run ONCE before the pipeline)
