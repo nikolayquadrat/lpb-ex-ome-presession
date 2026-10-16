@@ -11,7 +11,7 @@ Although the study was motivated by the availability of transcriptome data for a
 ## Overview
 This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on **single-case (n=1) analysis against cohort and reference data**.
 
-The exome workflow performs variant calling, annotation, quality control, and prioritisation of rare variants into candidate tiers based on predicted functional impact, gene constraint, population frequency, and disease-relevant gene sets. The RNA-seq workflow generates analysis-ready alignments and quality-control metrics for the DROP framework, enabling detection of aberrant expression, aberrant splicing, and monoallelic expression. Additional components support HLA typing, contamination screening, sex inference, cell-composition assessment, and optional cell-type deconvolution.
+The exome workflow performs variant calling, annotation, quality control, and prioritisation of rare variants into candidate tiers based on predicted functional impact, gene constraint, population frequency, and disease-relevant gene sets. The RNA-seq workflow generates analysis-ready alignments and quality-control metrics for the DROP framework, enabling detection of aberrant expression, aberrant splicing, and monoallelic expression. Additional components support HLA typing, contamination screening, sex inference, cell-composition assessment, and cell-type deconvolution.
 
 ## Ia. Variant-calling and annotation: reference data acquisition and post-processing
 *scripts/lpb-exome-priritisation-collect-data.sh*<br>
@@ -435,28 +435,31 @@ Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical dupl
 
 #### 4. RNA-seq quality control
  Picard CollectRnaSeqMetrics 2.27.5 (rule `r04c_picard_rnaseq_metrics`) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using `ucsc-gtfToGenePred -genePredExt -geneNameAsName2` followed by column-reordering to refFlat format (rule `r04a_make_refflat`). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule `r04b_make_rrna_intervals`). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and `VALIDATION_STRINGENCY=LENIENT` to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule `r04d_qc_summary`, `04_qc/00_qc_summary.tsv`) reporting:
- - PF_BASES. Total number of bases in reads passing Illumina's chastity filter (PF = Passed Filter), including non-aligned reads. The denominator for most fraction metrics below.
- - PF_ALIGNED_BASES. Bases from PF reads that aligned to the reference. Bases in soft-clips, insertions, and secondary/supplementary alignments are excluded. Roughly equal to PF_BASES × overall alignment rate.
- - PCT_RIBOSOMAL_BASES. rRNA contamination. Quality target: <5% with good rRNA depletion (Ribo-Zero / Poly-A selection); >10% indicates depletion failure or RNA degradation pulling reads to rRNA fragments.
- - PCT_CODING_BASES. Fraction of aligned bases mapping to protein-coding (CDS) regions. Higher is generally better for downstream gene-expression analysis. Typical range for well-prepared poly-A brain RNA: 40–60%.
- - PCT_UTR_BASES. Fraction of aligned bases mapping to 5' or 3' UTRs. Together with PCT_CODING_BASES this sums to PCT_MRNA_BASES. Typical range: 25–40%.
- - PCT_INTRONIC_BASES. Fraction of aligned bases in intronic regions. Elevated levels (>20%) indicate either DNA contamination of the RNA prep, immature/pre-mRNA enrichment, or RNA degradation that exposed intronic reads.
- - PCT_INTERGENIC_BASES. Fraction of aligned bases falling outside any annotated gene. Elevated levels (>10%) typically signal genomic DNA contamination or assembly quality issues.
- - PCT_MRNA_BASES. Combined PCT_CODING_BASES + PCT_UTR_BASES. The most important single quality metric for poly-A RNA-seq. Target: >85% for high-quality poly-A samples; <60% indicates a degraded or contaminated library.
- - PCT_USABLE_BASES. Fraction of all PF bases (not just aligned) that landed in mRNA (PF_ALIGNED_BASES × PCT_MRNA_BASES / PF_BASES). Combines alignment rate and library purity into one number.
- - MEDIAN_CV_COVERAGE. Median coefficient of variation in coverage across the 1000 most-expressed transcripts (CV = stdev/mean). Lower is better — uniform coverage means small CV. Values <0.6 are typical for good libraries; >0.8 indicates uneven coverage (often degradation-driven).
- - MEDIAN_5PRIME_BIAS. Median ratio of coverage at the 5' end vs. the middle of the top-1000 transcripts. Values near 0.5 = balanced; <0.3 = 5' depleted; >0.7 = 5' enriched. 5' enrichment with poly-A selection is unusual and may suggest a library-prep issue.
- - MEDIAN_3PRIME_BIAS. Median ratio of coverage at the 3' end vs. the middle. The single most diagnostic degradation signature for poly-A libraries. Values near 0.5 = balanced; >0.7 = significant 3' enrichment from RNA degradation (poly-A primers pulled coverage toward the 3' end as transcripts fragmented); >0.8 = severe degradation.
- - MEDIAN_5PRIME_TO_3PRIME_BIAS. Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.
- - PCT_CORRECT_STRAND_READS. For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.
- - Uniquely_mapped. Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; below 10M, autoencoder denoising breaks down and outlier detection becomes unreliable.
- - Uniquely_mapped_pct. STAR's reported percentage of input reads that mapped uniquely (e.g., 90.10%). Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).
- Four flag columns identify outlier samples:
- - flag_3prime_bias_high. Fires when a sample's MEDIAN_3PRIME_BIAS exceeds the cohort median plus three median-absolute-deviations (cohort-relative outlier detection that adapts to the protocol's baseline).
- - flag_rrna_high. Fires when PCT_RIBOSOMAL_BASES exceeds 10% (depletion-failure threshold).
- - flag_mrna_low. Fires when PCT_MRNA_BASES falls below 60% (genomic-DNA or pre-mRNA contamination threshold).
- - flag_low_complexity. Boolean absolute-threshold flag: True if Uniquely_mapped < 10,000,000. Catches samples that look clean by RNA-quality metrics but lack enough reads for reliable outlier detection. Samples with this flag True should be excluded from the OUTRIDER reference panel; including them as the test sample is fine but will yield lower-power results.
- These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
+
+|flag|description|
+|-|-|
+|PF_BASES|Total number of bases in reads passing Illumina's chastity filter (PF = Passed Filter), including non-aligned reads. The denominator for most fraction metrics below.|
+|PF_ALIGNED_BASES|Bases from PF reads that aligned to the reference. Bases in soft-clips, insertions, and secondary/supplementary alignments are excluded. Roughly equal to PF_BASES × overall alignment rate.|
+|PCT_RIBOSOMAL_BASES|rRNA contamination. Quality target: <5% with good rRNA depletion (Ribo-Zero / Poly-A selection); >10% indicates depletion failure or RNA degradation pulling reads to rRNA fragments.|
+|PCT_CODING_BASES|Fraction of aligned bases mapping to protein-coding (CDS) regions. Higher is generally better for downstream gene-expression analysis. Typical range for well-prepared poly-A brain RNA: 40–60%.|
+|PCT_UTR_BASES|Fraction of aligned bases mapping to 5' or 3' UTRs. Together with PCT_CODING_BASES this sums to PCT_MRNA_BASES. Typical range: 25–40%.|
+|PCT_INTRONIC_BASES|Fraction of aligned bases in intronic regions. Elevated levels (>20%) indicate either DNA contamination of the RNA prep, immature/pre-mRNA enrichment, or RNA degradation that exposed intronic reads.|
+|PCT_INTERGENIC_BASES|Fraction of aligned bases falling outside any annotated gene. Elevated levels (>10%) typically signal genomic DNA contamination or assembly quality issues.|
+|PCT_MRNA_BASES|Combined PCT_CODING_BASES + PCT_UTR_BASES. The most important single quality metric for poly-A RNA-seq. Target: >85% for high-quality poly-A samples; <60% indicates a degraded or contaminated library.|
+|PCT_USABLE_BASES|Fraction of all PF bases (not just aligned) that landed in mRNA (PF_ALIGNED_BASES × PCT_MRNA_BASES / PF_BASES). Combines alignment rate and library purity into one number.|
+|MEDIAN_CV_COVERAGE|Median coefficient of variation in coverage across the 1000 most-expressed transcripts (CV = stdev/mean). Lower is better — uniform coverage means small CV. Values <0.6 are typical for good libraries; >0.8 indicates uneven coverage (often degradation-driven).|
+|MEDIAN_5PRIME_BIAS|Median ratio of coverage at the 5' end vs. the middle of the top-1000 transcripts. Values near 0.5 = balanced; <0.3 = 5' depleted; >0.7 = 5' enriched. 5' enrichment with poly-A selection is unusual and may suggest a library-prep issue.|
+|MEDIAN_3PRIME_BIAS|Median ratio of coverage at the 3' end vs. the middle. The single most diagnostic degradation signature for poly-A libraries. Values near 0.5 = balanced; >0.7 = significant 3' enrichment from RNA degradation (poly-A primers pulled coverage toward the 3' end as transcripts fragmented); >0.8 = severe degradation.|
+|MEDIAN_5PRIME_TO_3PRIME_BIAS|Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.|
+|PCT_CORRECT_STRAND_READS|For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.|
+|Uniquely_mapped|Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; below 10M, autoencoder denoising breaks down and outlier detection becomes unreliable.|
+|Uniquely_mapped_pct|STAR's reported percentage of input reads that mapped uniquely (e.g., 90.10%). Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).|
+|flag_3prime_bias_high|Fires when a sample's MEDIAN_3PRIME_BIAS exceeds the cohort median plus three median-absolute-deviations (cohort-relative outlier detection that adapts to the protocol's baseline).|
+|flag_rrna_high|Fires when PCT_RIBOSOMAL_BASES exceeds 10% (depletion-failure threshold).|
+|flag_mrna_low|Fires when PCT_MRNA_BASES falls below 60% (genomic-DNA or pre-mRNA contamination threshold).|
+|flag_low_complexity|Boolean absolute-threshold flag: True if Uniquely_mapped < 10,000,000. Catches samples that look clean by RNA-quality metrics but lack enough reads for reliable outlier detection. Samples with this flag True should be excluded from the OUTRIDER reference panel; including them as the test sample is fine but will yield lower-power results.|
+
+These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
 
 #### 5. Neurotropic pathogens / contamination check (optional)
 The list of the species (*00_additional_files/contamination/species.txt*) is intentionally broad and is designed to screen human RNA-seq data for microbial signals, including viruses, bacteria, fungi, protozoa, free-living amoebae, and helminths. The list is organised by biological and analytical priority, beginning with neurotropic and neuroinvasive pathogens, followed by brain post-mortem and autopsy-background signatures, laboratory and environmental contamination sentinels, and computational decoy controls. Each organism is represented by a selected genome or reference assembly to facilitate reproducible alignment-based screening.
@@ -526,13 +529,15 @@ Genetic sex is inferred from marker-gene expression in the STAR-aligned, duplica
 A reference-free marker-expression readout is used for cell-composition QC. Panels are defined in the CELL_MARKER_GENES config dictionary. Adding or editing a panel requires no rule changes, just delete the `../04_qc/cellcomp` folder.
 
 Main marker panels specified in the pipe script:
-- "neuron": *RBFOX3, MAP2, NEFL, NEFM, NEFH, ELAVL3, ELAVL4, INA*;
-- "astrocyte": *GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, GJA1, GLUL*;
-- "oligodendroglial": *OLIG1, OLIG2, MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*; # mature + OPC
-- "microglia": *SALL1, GPR34, P2RY12, TMEM119, HEXB*;
-- "endothelial": *CLDN5, FLT1, PECAM1, VWF, CDH5, PTPRB*;
-- "mural": *RGS5, PDGFRB, KCNJ8, ABCC9, HIGD1B, NOTCH3, MYH11*; # pericytes, VSMC
-- "fibroblast": *DCN, LUM, COL1A1, COL1A2, COL3A1, COL5A1, COL5A2, COL15A1*;
+|cell type|markers|
+|-|-|
+|neuron|*RBFOX3, MAP2, NEFL, NEFM, NEFH, ELAVL3, ELAVL4, INA*|
+|astrocyte|*GFAP, AQP4, SLC1A2, SLC1A3, ALDH1L1, GJA1, GLUL*|
+|oligodendroglial (mature + OPC)|*OLIG1, OLIG2, MBP, PLP1, MOG, MAG, CNP, MOBP, CLDN11*|
+|microglia|*SALL1, GPR34, P2RY12, TMEM119, HEXB*|
+|endothelial|*CLDN5, FLT1, PECAM1, VWF, CDH5, PTPRB*|
+|mural (pericytes, VSMC)|*RGS5, PDGFRB, KCNJ8, ABCC9, HIGD1B, NOTCH3, MYH11*|
+|fibroblast|*DCN, LUM, COL1A1, COL1A2, COL3A1, COL5A1, COL5A2, COL15A1*|
 
 NB: *SOX10* is a canonical OPC/oligodendrocyte marker gene, but it is also a VUS candidate gene in the study. It is deliberately omitted so the composition check stays independent of candidate evaluation.
 
@@ -565,6 +570,83 @@ cibersortx/fractions --username you@lab.org --token xxxxxxxx \
 *scripts/lpb-post-drop-cell-type-assessment.R*<br>
 Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
 <img src="images/cell_type.png" alt="Cell types by samples" width="65%"><br>
+
+#### 11. Genotype identity check, kinship and mixture detection
+
+Calls genotypes from the RNA-seq BAMs at the sites of an existing SNP-array fileset, producing a PLINK fileset that can be compared directly against it to
+verify sample identity and donor relationships.
+- With a `.bim` alone (*sites*): RNA genotypes, the PLINK deliverable, per-sample QC and RNA-vs-RNA kinship.
+- With `.bed`/`.bim`/`.fam` (*identity*): additionally the merge, cross-dataset kinship, all-pairs IBS and the similarity report.
+
+Genotyping is **targeted, not de novo**: the array `.bim` supplies the site list, and `bcftools call -C alleles` is constrained to the array's own REF/ALT pair at each position. The two filesets therefore carry identical alleles at identical positions and need no post-hoc allele reconciliation. This also
+sidesteps de novo RNA calling artefacts (splice-junction mispairing, ADAR A-to-I editing read as A>G).
+
+The output fileset is always in the **array's build with the array's variant IDs**. Since the BAMs are hg38 and arrays are usually hg19, only the site list
+is lifted over (CrossMap, 1 bp per row) — never a VCF or genotypes — and each lifted site carries its original coordinates and rsID forward as a crosswalk
+used to write the calls back out. Sites that fail to lift, lift to more than one location, or whose alleles match the hg38 reference in neither orientation are dropped and counted. Sites whose array alleles do not match the hg38 reference base in the orientation given (whether from a manifest strand convention or an inverted liftover block) are detected by complementing and complemented back to array orientation in the output.
+
+Confidence filters: single-letter ACGT biallelic SNPs only, strand-ambiguous A/T and C/G excluded, site inside a union-exon interval; reads at MAPQ ≥ 255 (STAR unique) and BQ ≥ 20 with duplicates and BAQ off; genotypes with DP < 10 or GQ < 20 set to missing rather than dropping the site; sites missing in > 50 % of samples removed.
+
+**Inputs** — `.../00_additional_files/genetics/`, basenames free-form (the `.bim` is found by glob):
+
+| File | Required | Purpose |
+|---|---|---|
+| `*.bim` | yes | site list; anchors fileset discovery, will be attempted to download from [UCSC](https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/hapmapSnpsCEU.txt.gz) if absent |
+| `*.bed`, `*.fam` | no | enables finding DNA identitiy |
+| `hg19ToHg38.over.chain.gz` | if array is hg19 | liftover, will be attempted to dowload from [UCSC](https://hgdownload.gi.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz) if absent |
+| `sample_map.tsv` | no | `rna_sample → array_id`, catches RNA/DNA mismatches |
+| `donor_map.tsv` | no | `rna_sample → donor_id`, catches different samples supposed to be from the same donor |
+
+Sample names are never assumed to correspond. RNA IDs are suffixed `_RNA` before the merge, and every RNA sample is scored against every array sample and ranked, so the assignment is discovered from the genotypes. A supplied `sample_map.tsv` is treated as a hypothesis: the report states whether the data-driven best match agrees with it. Donor IDs in the `donor_map.tsv` are arbitrary. Both correspondence tables are optional and don't need to be complete.
+
+**Mixture detection** (`r11r`–`r11t`)
+
+Asks per RNA sample whether the read-level allele fractions fit better as one donor or as a mixture of two. No genotypes are used — `r11r` reads `FORMAT/AD` and ignores `GT`; the array fileset supplies only the choice of sites — so the test runs at both tiers.
+
+For site $i$ with alt count $a_i$ out of depth $d_i$, the latent variable is the unobserved genotype class. Writing $\mu' = \mu(1-\varepsilon) + (1-\mu)\varepsilon$ for the error-adjusted mean:
+
+$$
+\begin{aligned}
+H_1:\quad & a_i \sim \sum_{g=0}^{2} \pi_g \,\mathrm{BetaBin}\!\left(d_i,\ \mu'_{g},\ \rho_{g}\right),
+  && \mu_{g} = \tfrac{g}{2} \\[4pt]
+H_2:\quad & a_i \sim \sum_{j=0}^{2}\sum_{k=0}^{2} \pi_j \pi_k \,\mathrm{BetaBin}\!\left(d_i,\ \mu'_{jk},\ \rho_{jk}\right),
+  && \mu_{jk} = (1-\alpha)\tfrac{j}{2} + \alpha\tfrac{k}{2},\quad \alpha \in (0,\tfrac{1}{2}]
+\end{aligned}
+$$
+
+$H_2$ places components at $\alpha/2$, $\alpha$, $\tfrac{1}{2}\pm\alpha/2$ and $1-\alpha$ — sidebands three components cannot reach, and whose position estimates $\alpha$. Each $\rho_{jk}$ takes one of two values: a small one where $\mu \in \{0,1\}$ (sequencing error, RNA editing) and a larger one for intermediate components, which absorbs allele-specific expression. Both hypotheses fit their own $\pi$ by EM and their own dispersions, so the comparison turns only on where mass sits. Model choice is by BIC, with $k_2 - k_1 = 1$:
+
+$$\Delta\mathrm{BIC} = 2\left(\ell_2 - \ell_1\right) - \ln n$$
+
+positive favouring two donors.
+
+Verdicts: `mixture` (ΔBIC ≥ 10 and α̂ ≥ 0.03), `single_donor` (ΔBIC < 10),
+`inconclusive_low_alpha`, `insufficient_sites`.
+
+##### **Outputs** — `11_genocheck/`:
+
+| File | Contents |
+|---|---|
+| `rnaseq_genotypes.{bed,bim,fam}` | the deliverable, array build and IDs |
+| `rnaseq_genotypes.hg38.vcf.gz` | raw calls in hg38 |
+| `00_genocheck_site_stats.tsv` | per-sample call rate, depth, heterozygosity |
+| `00_genocheck_crosswalk.tsv.gz` | hg19 ↔ hg38 site table used |
+| `00_kinship_rna{.kin0,_report.tsv}` | KING within RNA (donor structure) |
+| `00_kinship_merged.kin0` | KING across RNA + array |
+| `00_similarity_pairs.tsv` | every pair: concordance, kinship, IBS0 |
+| `00_similarity_report.tsv` | per RNA sample: best match, margin, verdict |
+| `00_mixture_report.tsv` | per sample: α̂, both log-likelihoods, ΔBIC, verdict |
+| `00_mixture_alpha_profile.tsv.gz` | ΔBIC against α, per sample |
+| `00_mixture_vaf_histogram.tsv.gz` | VAF histogram counts, per sample |
+| `00_mixture_vaf_histogram.svg` | the histograms, small multiples, sidebands marked |
+| `00_mixture_alpha_profile.svg` | ΔBIC vs α, small multiples, threshold marked |
+
+Similarity is genotype concordance, `IBS2 / (IBS0 + IBS1 + IBS2)` from `plink --genome full`, preferred over PI_HAT because it needs no allele-frequency estimates.
+
+**Interpreting the numbers.** Allele dropout at modest depth turns true heterozygotes into apparent homozygotes and biases concordance and kinship downward, so the usual thresholds do not transfer. A correct RNA-vs-array pairing typically shows concordance 0.85–0.97 and kinship 0.30–0.45 rather than 0.5; two regions of one donor often sit nearer 0.5, because they express the same genes and so drop out at the same sites, partly cancelling the error. Judge by rank, by the margin to the runner-up, and by IBS0 — dropout produces IBS1, not IBS0, so the opposite-homozygote rate stays near zero for a true match even when kinship has been deflated.
+
+Enabled automatically when a `00_additional_files/genetics/<any_name>.bim` is present; `GENOCHECK_ENABLED=0` disables it.
+Requires `bcftools`, `plink`, `plink2` and `CrossMap`.
 
 #### 10. Pipeline outputs
 Per sample:
