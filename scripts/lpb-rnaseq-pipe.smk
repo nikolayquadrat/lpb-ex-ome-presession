@@ -716,8 +716,8 @@ if not DECONV_ACTIVE:
 #   GENOCHECK_MIN_GQ       default 20     per-genotype quality
 #   GENOCHECK_MIN_MQ       default 255    read mapping quality (STAR unique)
 #   GENOCHECK_MIN_BQ       default 20     base quality
-#   GENOCHECK_MAX_DEPTH    default 10000  mpileup per-file depth cap
-#   GENOCHECK_MAX_MISSING  default 0.5    drop site if more missing than this
+#   GENOCHECK_MAX_DEPTH    default 250  mpileup per-file depth cap
+#   GENOCHECK_MAX_MISSING  default 1    drop site if more missing than this
 #   GENOCHECK_KEEP_DUPS    default 0      1 = do NOT filter duplicate reads
 #   GENOCHECK_INCLUDE_X    default 0      1 = also genotype chrX
 #   GENOCHECK_LD_PRUNE     default 0      1 = LD-prune before kinship
@@ -751,6 +751,30 @@ GENETICS_DIR = os.environ.get("GENOCHECK_DIR",
 GENOCHECK_OUT = "/tmp/data/11_genocheck"
 GENOCHECK_SAMPLE_MAP = GENETICS_DIR + "/sample_map.tsv"
 GENOCHECK_DONOR_MAP  = GENETICS_DIR + "/donor_map.tsv"
+# Regions excluded from the site list, in the ARRAY's coordinates. The extended
+# MHC is excluded by default on genotyping-quality grounds, not merely for
+# speed: with a noALT/noHLA reference every HLA haplotype collapses onto the
+# primary contig, so RNA genotypes there carry mismapping, reference bias and
+# false heterozygotes. The window also covers the 6p22 histone cluster, whose
+# transcripts are extremely abundant. Both make the region the single worst
+# place in the genome to genotype from RNA -- and, because it is also the
+# densest and most polymorphic stretch, stride thinning CONCENTRATES it rather
+# than diluting it (observed: 24.5% of one cohort's chr6 sites fell in a region
+# covering 3.5% of the chromosome, which pinned that chromosome's pileup).
+_GENOCHECK_MHC = {"hg19": ("6", 25_500_000, 34_000_000),
+                  "hg38": ("6", 25_500_000, 33_800_000)}
+GENOCHECK_EXCLUDE_MHC = os.environ.get(
+    "GENOCHECK_EXCLUDE_MHC", "1").strip().lower() in ("1", "true", "yes", "on")
+# Extra regions: a BED in the array's build, contig without "chr" or with it.
+GENOCHECK_EXCLUDE_BED = os.environ.get("GENOCHECK_EXCLUDE_BED", "").strip()
+
+# Depth screen (r11e2). bcftools must traverse every read overlapping a site
+# regardless of --max-depth, so one ultra-deep site costs that traversal in
+# every BAM. Sites above the ceiling are dropped: depth that extreme at a
+# single base is collapsed paralogs, rRNA or multi-mapping, never a clean
+# diploid locus, so nothing of value is lost. 0 disables the screen.
+GENOCHECK_MAX_SITE_DEPTH = int(os.environ.get("GENOCHECK_MAX_SITE_DEPTH", "5000"))
+GENOCHECK_DEPTH_PROBE_N  = int(os.environ.get("GENOCHECK_DEPTH_PROBE_N", "3"))
 
 # mixture test (r11r/r11s)
 GENOCHECK_MIX_MIN_DP      = int(os.environ.get("GENOCHECK_MIX_MIN_DP", "30"))
@@ -1058,10 +1082,29 @@ else:
 GENOCHECK_CHIP_BUILD  = os.environ.get("GENOCHECK_CHIP_BUILD", "hg19").strip().lower()
 GENOCHECK_MIN_DP      = int(os.environ.get("GENOCHECK_MIN_DP", "10"))
 GENOCHECK_MIN_GQ      = int(os.environ.get("GENOCHECK_MIN_GQ", "20"))
+# GQ is NOT part of the genotype filter by default -- bcftools call omits the
+# tag entirely on hom-ref records, so filtering on it discards most true
+# genotypes. Opt in only if you know your BCFs carry GQ on every record.
+GENOCHECK_USE_GQ      = os.environ.get("GENOCHECK_USE_GQ", "0").strip().lower() \
+    in ("1", "true", "yes", "on")
 GENOCHECK_MIN_MQ      = int(os.environ.get("GENOCHECK_MIN_MQ", "255"))
 GENOCHECK_MIN_BQ      = int(os.environ.get("GENOCHECK_MIN_BQ", "20"))
-GENOCHECK_MAX_DEPTH   = int(os.environ.get("GENOCHECK_MAX_DEPTH", "10000"))
-GENOCHECK_MAX_MISSING = float(os.environ.get("GENOCHECK_MAX_MISSING", "0.5"))
+GENOCHECK_MAX_DEPTH   = int(os.environ.get("GENOCHECK_MAX_DEPTH", "250"))
+# Site-level missingness. The default of 1.0 drops ONLY sites with no genotype
+# in any sample. It is deliberately near-vacuous: every pairwise statistic here
+# (KING, IBS, concordance) compares two samples over the sites where BOTH are
+# called, so a site genotyped in 7 of 47 samples is fully usable for those 7.
+# Rationing sites by cohort consensus instead lets one unusable library shrink
+# the site set for every good one. Lower this only if you specifically want
+# cohort-wide complete sites.
+GENOCHECK_MAX_MISSING = float(os.environ.get("GENOCHECK_MAX_MISSING", "1.0"))
+# Per-sample fitness: the minimum number of confident genotypes a sample needs
+# to take part. A sample below this is EXCLUDED from the PLINK fileset, the
+# kinship tables and the identity comparison -- reported, not silently dropped.
+# Fitness is a property of the sample, never of its neighbours.
+GENOCHECK_MIN_SAMPLE_SITES = int(os.environ.get("GENOCHECK_MIN_SAMPLE_SITES",
+                                                "500"))
+GENOCHECK_MAX_SITES   = int(os.environ.get("GENOCHECK_MAX_SITES", "30000"))
 GENOCHECK_KEEP_DUPS   = os.environ.get("GENOCHECK_KEEP_DUPS", "0").strip().lower() \
     in ("1", "true", "yes", "on")
 GENOCHECK_INCLUDE_X   = os.environ.get("GENOCHECK_INCLUDE_X", "0").strip().lower() \
@@ -4592,6 +4635,30 @@ rule r11a_genocheck_sites:
         bim = bim.drop_duplicates(subset=["id"], keep="first")
         counts["after_dedup"] = len(bim)
 
+        # excluded regions, in the array's own coordinates
+        excl = []
+        if GENOCHECK_EXCLUDE_MHC:
+            key = "hg38" if GENOCHECK_CHIP_BUILD in ("hg38", "grch38", "b38",
+                                                     "38") else "hg19"
+            excl.append(_GENOCHECK_MHC[key])
+        if GENOCHECK_EXCLUDE_BED and os.path.isfile(GENOCHECK_EXCLUDE_BED):
+            with open(GENOCHECK_EXCLUDE_BED) as fh:
+                for line in fh:
+                    f = line.split()
+                    if len(f) >= 3 and not line.startswith(("#", "track")):
+                        c = f[0][3:] if f[0].startswith("chr") else f[0]
+                        excl.append((c, int(f[1]), int(f[2])))
+        if excl:
+            drop = pd.Series(False, index=bim.index)
+            for c, lo, hi in excl:
+                drop |= (bim["contig"] == c) & (bim["bp"] >= lo) & (bim["bp"] <= hi)
+            n_drop = int(drop.sum())
+            bim = bim[~drop]
+            counts["dropped_excluded_regions"] = n_drop
+            counts["after_region_exclusion"] = len(bim)
+            print(f"[genocheck][sites] excluded {n_drop} sites in "
+                  f"{len(excl)} region(s) (MHC by default)", file=sys.stderr)
+
         bim = bim.sort_values(["contig", "bp"])
         bim[["chrom_orig", "contig", "bp", "a1", "a2", "id"]].to_csv(
             output.sites, sep="\t", header=False, index=False)
@@ -4666,6 +4733,12 @@ rule r11c_genocheck_crosswalk:
         site in an intron or intergenic region has no RNA coverage to call from,
         so keeping it would only add missingness.
 
+    Finally the surviving sites are thinned to GENOCHECK_MAX_SITES (default
+    30000). This is the cost control for the whole stage: bcftools seeks once
+    per site per BAM, so a dense array left unthinned can mean millions of
+    seeks in a single-threaded pileup. See the constant's comment for why 30000
+    is ample.
+
     Emits the pileup inputs (BED + regions) in hg38, and the crosswalk keyed on
     hg38 chrom:pos that r11i uses to write the result back out in chip coords.
     """
@@ -4677,6 +4750,8 @@ rule r11c_genocheck_crosswalk:
         crosswalk = GENOCHECK_OUT + "/00_genocheck_crosswalk.tsv.gz",
         regions   = GENOCHECK_OUT + "/sites_regions.txt",
         stats     = GENOCHECK_OUT + "/crosswalk.log",
+    params:
+        max_sites = GENOCHECK_MAX_SITES,
     run:
         import gzip
         import numpy as np
@@ -4762,6 +4837,23 @@ rule r11c_genocheck_crosswalk:
         order = {c: i for i, c in enumerate(GENOCHECK_CHROMS)}
         recs.sort(key=lambda r: (order[r[0]], r[1]))
 
+        # Thin to the site budget. Sorting first means a fixed stride spreads the
+        # survivors proportionally across chromosomes and, within a chromosome,
+        # across gene-dense regions -- which is where the expressed sites are.
+        # Deliberately a stride rather than a random sample: the set must be
+        # identical on a re-run, or the pileup and every downstream figure would
+        # shift for no reason.
+        if params.max_sites and len(recs) > params.max_sites:
+            step = len(recs) / float(params.max_sites)
+            recs = [recs[int(i * step)] for i in range(params.max_sites)]
+            counts["after_thinning"] = len(recs)
+            print(f"[genocheck][crosswalk] thinned to {len(recs)} sites "
+                  f"(GENOCHECK_MAX_SITES); raw pileup cost is now about "
+                  f"{len(recs) * len(samples) / 1e6:.1f}M index seeks across "
+                  f"{len(samples)} BAMs", file=sys.stderr)
+        else:
+            counts["after_thinning"] = len(recs)
+
         with gzip.open(output.crosswalk, "wt") as cw, \
                 open(output.regions, "w") as rg:
             cw.write("contig38\tpos38\tvariant_id\tchrom_chip\tpos_chip\t"
@@ -4785,7 +4877,6 @@ rule r11c_genocheck_crosswalk:
             raise ValueError(
                 f"only {len(recs)} sites survived liftover + exon restriction; "
                 "expected tens of thousands.")
-
 
 # -----------------------------------------------------------------------------
 # r11d / r11e: reference allele at each hg38 site
@@ -4915,8 +5006,92 @@ rule r11e_genocheck_alleles:
 
 
 # -----------------------------------------------------------------------------
+# r11e2: depth screen -- drop ultra-deep sites before they reach the pileup
+# -----------------------------------------------------------------------------
+
+rule r11e2_genocheck_depth_screen:
+    """
+    Remove sites whose read depth is pathological, measured with samtools
+    bedcov on the few largest BAMs.
+
+    WHY, precisely: --max-depth caps how many reads bcftools KEEPS at a
+    position, not how many it must traverse. A site buried under a million
+    reads therefore costs that traversal in every BAM of a joint pileup, and
+    one such site can pin a whole chromosome's job while every other
+    chromosome finishes in minutes. The screen is index-based and cheap, so it
+    pays for itself many times over.
+
+    The probe deliberately applies NO mapping-quality filter: the traversal
+    cost is incurred before MAPQ filtering, so a multi-mapping pile-up has to
+    be visible here even though mpileup would discard those reads later.
+
+    Nothing of scientific value is lost. Single-base depth in the thousands is
+    collapsed paralogs, rRNA or mismapping, not a clean diploid locus, and such
+    sites would give unreliable genotypes anyway. Set
+    GENOCHECK_MAX_SITE_DEPTH=0 to skip the screen entirely.
+    """
+    input:
+        bed     = GENOCHECK_OUT + "/sites_hg38.bed",
+        alleles = GENOCHECK_OUT + "/sites_alleles.tsv",
+        bams    = expand("/tmp/data/03_bam_star/{sample}/"
+                         "{sample}.Aligned.sortedByCoord.out.patched.md.bam",
+                         sample=samples),
+        bais    = expand("/tmp/data/03_bam_star/{sample}/"
+                         "{sample}.Aligned.sortedByCoord.out.patched.md.bam.bai",
+                         sample=samples),
+    output:
+        bed     = GENOCHECK_OUT + "/sites_hg38.screened.bed",
+        alleles = GENOCHECK_OUT + "/sites_alleles.screened.tsv",
+        log     = GENOCHECK_OUT + "/depth_screen.log",
+    params:
+        max_depth = GENOCHECK_MAX_SITE_DEPTH,
+        probe_n   = GENOCHECK_DEPTH_PROBE_N,
+        wd        = GENOCHECK_OUT + "/_screen",
+    threads: 2
+    singularity: SAMTOOLS_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.wd}
+
+        if [ "{params.max_depth}" -le 0 ]; then
+            cp {input.bed} {output.bed}
+            cp {input.alleles} {output.alleles}
+            echo -e "screen\tdisabled (GENOCHECK_MAX_SITE_DEPTH=0)" > {output.log}
+            exit 0
+        fi
+
+        # probe with the largest BAMs -- deepest libraries, worst hotspots
+        ls -S {input.bams} | head -n {params.probe_n} > {params.wd}/probes.txt
+        samtools bedcov {input.bed} $(cat {params.wd}/probes.txt)             > {params.wd}/bedcov.tsv
+
+        # columns 4..NF are the summed depth of the 1 bp region per probe BAM;
+        # keep a site only if the worst probe stays under the ceiling
+        awk -v m={params.max_depth} 'BEGIN{{OFS="\t"}}
+            {{ mx=0; for (i=4; i<=NF; i++) if ($i+0 > mx) mx=$i+0
+               if (mx <= m) print $1, $2, $3; else print $1, $3, mx > "/dev/stderr" }}'             {params.wd}/bedcov.tsv 2> {params.wd}/dropped.tsv > {output.bed}
+
+        # carry the same decision over to the alleles file (key = chrom:pos)
+        awk 'NR==FNR {{ keep[$1":"$3]=1; next }} ($1":"$2) in keep'             {output.bed} {input.alleles} > {output.alleles}
+
+        {{
+          printf "sites_in\t%s\n"        "$(wc -l < {input.bed})"
+          printf "sites_kept\t%s\n"      "$(wc -l < {output.bed})"
+          printf "sites_dropped\t%s\n"   "$(wc -l < {params.wd}/dropped.tsv)"
+          printf "alleles_kept\t%s\n"    "$(wc -l < {output.alleles})"
+          printf "max_site_depth\t%s\n"  "{params.max_depth}"
+          printf "probe_bams\t%s\n"      "$(tr '\n' ',' < {params.wd}/probes.txt)"
+          echo   "# deepest dropped sites (contig, pos, depth):"
+          sort -k3,3nr {params.wd}/dropped.tsv | head -20
+        }} > {output.log}
+
+        echo "[genocheck][screen] kept $(wc -l < {output.bed}) of $(wc -l < {input.bed}) sites" >&2
+        """
+
+# -----------------------------------------------------------------------------
 # r11f: joint pileup + constrained calling, scattered by hg38 chromosome
 # -----------------------------------------------------------------------------
+
 
 rule r11f_genocheck_call_chrom:
     """
@@ -4926,8 +5101,8 @@ rule r11f_genocheck_call_chrom:
     mpileup flags:
       -q {MQ}    MAPQ floor; 255 = STAR uniquely-mapped only
       -Q {BQ}    base-quality floor
-      -d {DEPTH} per-file depth cap, far above default -- RNA depth at
-                 expressed exons is routinely in the thousands
+      -d {DEPTH} per-file depth cap; it multiplies by the number of BAMs, and a
+                 few hundred reads already settle a known biallelic site
       -B         disable BAQ: it over-penalises reads near splice junctions and
                  systematically loses RNA coverage
       -I         skip indels (unreliable in RNA, absent from the array)
@@ -4944,11 +5119,11 @@ rule r11f_genocheck_call_chrom:
         bais = expand("/tmp/data/03_bam_star/{sample}/"
                       "{sample}.Aligned.sortedByCoord.out.patched.md.bam.bai",
                       sample=samples),
-        alleles = GENOCHECK_OUT + "/sites_alleles.tsv",
-        bed     = GENOCHECK_OUT + "/sites_hg38.bed",
+        alleles = GENOCHECK_OUT + "/sites_alleles.screened.tsv",
+        bed     = GENOCHECK_OUT + "/sites_hg38.screened.bed",
         fasta   = GENOME_FA,
     output:
-        bcf = temp(GENOCHECK_OUT + "/by_chrom/{chrom}.bcf"),
+        bcf = GENOCHECK_OUT + "/by_chrom/{chrom}.bcf",
     params:
         mq = GENOCHECK_MIN_MQ, bq = GENOCHECK_MIN_BQ,
         depth = GENOCHECK_MAX_DEPTH, ff = GENOCHECK_FF,
@@ -4981,11 +5156,11 @@ rule r11f_genocheck_call_chrom:
             -a FORMAT/AD,FORMAT/DP -Ou \
         | bcftools call \
             -m -C alleles -T $P.alleles.tsv.gz \
+            -f GQ \
             --threads {threads} -Ob -o {output.bcf}
 
         bcftools index -f {output.bcf}
         """
-
 
 # -----------------------------------------------------------------------------
 # r11g: confidence filters -> hg38 VCF
@@ -4994,7 +5169,10 @@ rule r11f_genocheck_call_chrom:
 rule r11g_genocheck_filter:
     """
     Genotype level first: any call with DP < MIN_DP or GQ < MIN_GQ becomes
-    MISSING rather than the site being dropped. A shallow call is uninformative,
+    MISSING rather than the site being dropped. GQ exists only because r11f
+    passes -f GQ to bcftools call; if the BCFs were produced without it, this
+    rule detects the absent tag and falls back to a depth-only filter instead
+    of failing. A shallow call is uninformative,
     not wrong, and blanking it keeps the site usable for the samples that do
     have depth -- which matters because RNA depth spans orders of magnitude
     between genes. Then site level: drop sites missing in more than
@@ -5018,24 +5196,150 @@ rule r11g_genocheck_filter:
     params:
         min_dp = GENOCHECK_MIN_DP, min_gq = GENOCHECK_MIN_GQ,
         max_missing = GENOCHECK_MAX_MISSING,
+        use_gq = GENOCHECK_USE_GQ,
     threads: 4
     singularity: BCFTOOLS_CONTAINER
     shell:
         r"""
         set -euo pipefail
+
+        # DEPTH ONLY, deliberately: no GQ term.
+        # bcftools call emits FORMAT/GQ only for POLYMORPHIC records. A
+        # homozygous-reference record comes out as plain GT:DP:AD with no GQ
+        # field at all -- and those are the large majority at array sites in
+        # RNA. Referencing FMT/GQ in the filter therefore blanks almost every
+        # hom-ref genotype, because bcftools treats the absent tag as grounds
+        # for exclusion. A header check does not save you: GQ is declared in
+        # the header as soon as ANY record carries it, so the check passes and
+        # the term stays in. Observed: 20944 sites -> 3 usable, every sample
+        # identical.
+        # DP is sufficient here anyway. These are known biallelic sites with
+        # the alleles fixed in advance, so depth is the thing that decides
+        # whether a genotype is trustworthy. GENOCHECK_MIN_GQ is kept for
+        # reference but is NOT applied; see GENOCHECK_USE_GQ if you want it
+        # back, and expect to lose the hom-ref calls if you turn it on.
+        GTEXPR='FMT/DP<{params.min_dp}'
+        if [ "{params.use_gq}" = "True" ]; then
+            GTEXPR="$GTEXPR || FMT/GQ<{params.min_gq}"
+            echo "[genocheck][filter] WARNING: GENOCHECK_USE_GQ is on; records" \
+                 "without FORMAT/GQ (i.e. most hom-ref calls) will be blanked." >&2
+        fi
+
         bcftools concat -a -Ou {input.bcfs} \
-        | bcftools +setGT -Ou -- -t q \
-              -i 'FMT/DP<{params.min_dp} || FMT/GQ<{params.min_gq}' -n . \
-        | bcftools view -i 'F_MISSING<={params.max_missing}' -Ou \
+        | bcftools filter -S . -e "$GTEXPR" -Ou \
+        | bcftools view -i 'F_MISSING<{params.max_missing}' -Ou \
         | bcftools annotate --set-id '%CHROM:%POS' \
               --threads {threads} -Oz -o {output.vcf}
 
-        # stricter alternative -- blank hets with extreme allelic imbalance:
-        #   | bcftools +setGT -Ou -- -t q \
-        #         -i 'GT="het" && (FMT/AD[:1])/(FMT/DP)<0.10' -n . \
+        # stricter alternative -- blank hets with extreme allelic imbalance.
+        # Note it must also use `filter -S .`, for the same per-genotype reason:
+        #   | bcftools filter -S . \
+        #         -e 'GT="het" && (FMT/AD[:1])/(FMT/DP)<0.10' -Ou \
 
         bcftools index -t -f {output.vcf}
         """
+
+
+# -----------------------------------------------------------------------------
+# r11g2: per-sample fitness -- a sample either qualifies or is excluded
+# -----------------------------------------------------------------------------
+
+rule r11g2_genocheck_sample_qc:
+    """
+    Decide, per sample, whether it can be genotyped well enough to take part.
+
+    A sample with too few confident genotypes is excluded from the PLINK
+    fileset, and therefore from the kinship tables and the identity
+    comparison. It is NOT allowed to influence which sites the others use --
+    that is the whole point of judging fitness per sample rather than filtering
+    sites by cohort consensus. Libraries differ enormously in what they cover
+    (an IP library sees only its target transcripts), so a cohort-wide site
+    rule would let the narrowest library dictate the site set for all.
+
+    Excluded samples are listed with their numbers in
+    00_genocheck_site_stats.tsv, so an exclusion is a visible result rather
+    than a silent disappearance. The mixture test (r11r/r11s) applies its own
+    per-sample floor and is unaffected by this gate: it reads AD directly and
+    needs no genotypes.
+    """
+    input:
+        vcf = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
+    output:
+        stats = GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
+        keep  = GENOCHECK_OUT + "/fit_samples.txt",
+    params:
+        min_sites = GENOCHECK_MIN_SAMPLE_SITES,
+    run:
+        import gzip
+        import pandas as pd
+
+        with gzip.open(input.vcf, "rt") as fh:
+            for line in fh:
+                if line.startswith("#CHROM"):
+                    vcf_samples = line.rstrip("\n").split("\t")[9:]
+                    break
+            else:
+                raise ValueError(f"{input.vcf}: no #CHROM header line")
+            n_sites = 0
+            called = {s: 0 for s in vcf_samples}
+            hets   = {s: 0 for s in vcf_samples}
+            dp_sum = {s: 0.0 for s in vcf_samples}
+            dp_n   = {s: 0 for s in vcf_samples}
+            for line in fh:
+                if line[0] == "#":
+                    continue
+                f = line.rstrip("\n").split("\t")
+                n_sites += 1
+                fmt = f[8].split(":")
+                dp_i = fmt.index("DP") if "DP" in fmt else None
+                for s, col in zip(vcf_samples, f[9:]):
+                    parts = col.split(":")
+                    gt = parts[0]
+                    if gt in ("./.", ".", ".|."):
+                        continue
+                    called[s] += 1
+                    if gt in ("0/1", "1/0", "0|1", "1|0"):
+                        hets[s] += 1
+                    if dp_i is not None and len(parts) > dp_i:
+                        v = parts[dp_i]
+                        if v not in (".", ""):
+                            dp_sum[s] += float(v); dp_n[s] += 1
+
+        rows = []
+        for s in vcf_samples:
+            fit = called[s] >= params.min_sites
+            rows.append({
+                "sample": s, "n_sites": n_sites, "n_called": called[s],
+                "call_rate": called[s] / n_sites if n_sites else 0.0,
+                "mean_dp": dp_sum[s] / dp_n[s] if dp_n[s] else 0.0,
+                "n_het": hets[s],
+                "het_rate": hets[s] / called[s] if called[s] else 0.0,
+                "verdict": "fit" if fit else "excluded_too_few_genotypes",
+            })
+        stats = pd.DataFrame(rows)
+        stats.to_csv(output.stats, sep="\t", index=False, float_format="%.4f")
+
+        fit = stats[stats["verdict"] == "fit"]["sample"].tolist()
+        with open(output.keep, "w") as fh:          # plink2 --keep: FID IID
+            for s in fit:
+                fh.write(f"{s}\t{s}\n")
+
+        dropped = [r["sample"] for r in rows if r["verdict"] != "fit"]
+        print(f"[genocheck][sample-qc] {len(fit)}/{len(vcf_samples)} samples "
+              f"fit (>= {params.min_sites} confident genotypes of {n_sites} "
+              f"sites)", file=sys.stderr)
+        if dropped:
+            print(f"[genocheck][sample-qc] excluded: "
+                  + ", ".join(f"{d}({called[d]})" for d in dropped),
+                  file=sys.stderr)
+        if not fit:
+            raise ValueError(
+                f"no sample reached {params.min_sites} confident genotypes "
+                f"(best was {max(called.values()) if called else 0} of "
+                f"{n_sites} sites). Either the depth filter is too strict for "
+                "these libraries (lower GENOCHECK_MIN_DP), too few sites "
+                "survived (raise GENOCHECK_MAX_SITES), or this data cannot "
+                "support genotype QC.")
 
 
 # -----------------------------------------------------------------------------
@@ -5043,9 +5347,14 @@ rule r11g_genocheck_filter:
 # -----------------------------------------------------------------------------
 
 rule r11h_genocheck_plink_hg38:
-    """VCF -> interim PLINK fileset, still in hg38 with CHROM:POS IDs."""
+    """
+    VCF -> interim PLINK fileset, still in hg38 with CHROM:POS IDs, restricted
+    to the samples r11g2 found fit. Everything downstream (kinship, merge,
+    identity) inherits that restriction.
+    """
     input:
-        vcf = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
+        vcf  = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
+        keep = GENOCHECK_OUT + "/fit_samples.txt",
     output:
         bed = temp(GENOCHECK_OUT + "/_hg38/rna_hg38.bed"),
         bim = temp(GENOCHECK_OUT + "/_hg38/rna_hg38.bim"),
@@ -5059,6 +5368,7 @@ rule r11h_genocheck_plink_hg38:
         set -euo pipefail
         mkdir -p $(dirname {params.out_prefix})
         plink2 --vcf {input.vcf} \
+            --keep {input.keep} \
             --double-id --vcf-half-call m --allow-extra-chr \
             --snps-only just-acgt --max-alleles 2 \
             --set-all-var-ids '@:#' \
@@ -5104,12 +5414,26 @@ rule r11i_genocheck_remap:
 
         COMP = {"A": "T", "T": "A", "C": "G", "G": "C", "0": "0"}
 
+        def _key(contig, pos):
+            """Normalised chrom:pos key.
+
+            r11h builds the interim variant IDs with plink2's
+            --set-all-var-ids '@:#', and plink2 normalises the chromosome code
+            -- so a site on 'chr11' comes back as '11:12345', not
+            'chr11:12345', depending on build and --output-chr. Normalising
+            both sides makes the lookup independent of that. Getting this wrong
+            is silent: every lookup misses, every variant is dropped, and the
+            failure only surfaces two rules later as "no variants remaining".
+            """
+            c = contig[3:] if contig.lower().startswith("chr") else contig
+            return f"{c}:{pos}"
+
         xw = {}
         with open(input.table) as fh:
             next(fh)
             for line in fh:
                 f = line.rstrip("\n").split("\t")
-                xw[f[0] + ":" + f[1]] = {
+                xw[_key(f[0], f[1])] = {
                     "vid": f[4], "chrom": f[5], "bp": f[6], "flip": f[9] == "1"}
 
         n_in = n_mapped = n_flipped = 0
@@ -5118,7 +5442,8 @@ rule r11i_genocheck_remap:
             for line in fin:
                 chrom, vid, cm, bp, a1, a2 = line.rstrip("\n").split("\t")
                 n_in += 1
-                rec = xw.get(vid)
+                c, _, pos = vid.partition(":")
+                rec = xw.get(_key(c, pos)) if pos else None
                 if rec is None:
                     # Not in the crosswalk: keep the row (the .bed matrix must
                     # stay aligned) but mark it so r11j can drop it.
@@ -5157,6 +5482,14 @@ rule r11i_genocheck_remap:
         with open(output.keep, "w") as fh:
             fh.write("\n".join(kept_ids) + "\n")
 
+        if n_in and not kept_ids:
+            raise ValueError(
+                f"none of the {n_in} variants matched the crosswalk. The "
+                f"interim variant IDs look like "
+                f"{open(input.bim).readline().split()[1]!r} and the crosswalk "
+                f"keys like {next(iter(xw))!r} -- a chromosome-naming mismatch "
+                "between plink2's --set-all-var-ids and the site table.")
+
         stats = {"bim_rows_in": n_in, "remapped_to_chip_build": n_mapped,
                  "alleles_complemented": n_flipped,
                  "dropped_not_in_crosswalk": n_in - n_mapped,
@@ -5183,17 +5516,33 @@ rule r11j_genocheck_plink_final:
         bim = GENOCHECK_OUT + "/rnaseq_genotypes.bim",
         fam = GENOCHECK_OUT + "/rnaseq_genotypes.fam",
     params:
-        in_prefix  = GENOCHECK_OUT + "/_remap/rna_remap",
-        out_prefix = GENOCHECK_OUT + "/rnaseq_genotypes",
+        in_prefix     = GENOCHECK_OUT + "/_remap/rna_remap",
+        sorted_prefix = GENOCHECK_OUT + "/_remap/rna_sorted",
+        out_prefix    = GENOCHECK_OUT + "/rnaseq_genotypes",
     threads: 4
     singularity: PLINK2_CONTAINER
     shell:
         r"""
         set -euo pipefail
+        # TWO PASSES, deliberately. plink2 refuses to sort while writing a
+        # fixed-width .bed ("Fixed-width .bed/.pgen output doesn't support
+        # sorting yet. Generate a regular sorted .pgen first, and then reformat
+        # it."), so the sort lands in a .pgen and the .bed is written from that
+        # -- the workaround plink2's own error message prescribes.
+        #
+        # The sort is not optional: r11i rewrote every coordinate into the chip
+        # build, and hg38 order is not hg19 order. An unsorted .bim is accepted
+        # by some tools and silently mishandled by others, and plink1.9's merge
+        # in r11n is one of the ones that cares.
         plink2 --bfile {params.in_prefix} \
             --extract {input.keep} \
             --allow-extra-chr --sort-vars \
+            --threads {threads} --make-pgen --out {params.sorted_prefix}
+        plink2 --pfile {params.sorted_prefix} \
+            --allow-extra-chr \
             --threads {threads} --make-bed --out {params.out_prefix}
+        rm -f {params.sorted_prefix}.pgen {params.sorted_prefix}.pvar \
+              {params.sorted_prefix}.psam {params.sorted_prefix}.log
         """
 
 
@@ -5245,6 +5594,8 @@ rule r11k_genocheck_kinship_rna:
     """
     input:
         bed = GENOCHECK_OUT + "/rnaseq_genotypes.bed",
+        bim = GENOCHECK_OUT + "/rnaseq_genotypes.bim",
+        fam = GENOCHECK_OUT + "/rnaseq_genotypes.fam",
     output:
         kin = GENOCHECK_OUT + "/00_kinship_rna.kin0",
     params:
@@ -5276,13 +5627,14 @@ rule r11k_genocheck_kinship_rna:
 
 rule r11l_genocheck_rna_report:
     """
-    Per-sample QC plus the RNA-internal kinship report.
+    The RNA-internal kinship report. Per-sample numbers and the fit/excluded
+    verdict are produced by r11g2 and read from 00_genocheck_site_stats.tsv --
+    read that file FIRST, since a sample with few genotypes has too few shared
+    sites for any kinship estimate to mean much, and a low het rate marks the
+    dropout regime where even a correct match looks only partly related.
+    Excluded samples do not appear in the kinship table at all, because r11h
+    kept them out of the fileset.
 
-      site_stats    call rate, mean depth, heterozygosity per RNA sample. Read
-                    this FIRST -- a sample with a low call rate has too few
-                    shared sites for any kinship estimate to mean much, and a
-                    low het rate marks the dropout regime where even a correct
-                    match looks only partly related.
       kinship_rna_report  every RNA pair, labelled, with the expected
                     same-donor status if donor_map.tsv is present. Unexpected
                     duplicate-level pairs (two "different" donors that are
@@ -5290,61 +5642,20 @@ rule r11l_genocheck_rna_report:
                     donor that are not related) both surface here.
     """
     input:
-        vcf = GENOCHECK_OUT + "/rnaseq_genotypes.hg38.vcf.gz",
-        kin = GENOCHECK_OUT + "/00_kinship_rna.kin0",
+        kin   = GENOCHECK_OUT + "/00_kinship_rna.kin0",
+        stats = GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
     output:
-        site_stats = GENOCHECK_OUT + "/00_genocheck_site_stats.tsv",
-        report     = GENOCHECK_OUT + "/00_kinship_rna_report.tsv",
+        report = GENOCHECK_OUT + "/00_kinship_rna_report.tsv",
     params:
         donor_map = GENOCHECK_DONOR_MAP,
         dup_cut   = GENOCHECK_DUP_KINSHIP,
     run:
-        import gzip
         import pandas as pd
 
-        # ---------- per-sample stats, parsed straight from the VCF
-        with gzip.open(input.vcf, "rt") as fh:
-            for line in fh:
-                if line.startswith("#CHROM"):
-                    vcf_samples = line.rstrip("\n").split("\t")[9:]
-                    break
-            n_sites = 0
-            called = {s: 0 for s in vcf_samples}
-            hets   = {s: 0 for s in vcf_samples}
-            dp_sum = {s: 0.0 for s in vcf_samples}
-            dp_n   = {s: 0 for s in vcf_samples}
-            for line in fh:
-                if line[0] == "#":
-                    continue
-                f = line.rstrip("\n").split("\t")
-                n_sites += 1
-                fmt = f[8].split(":")
-                dp_i = fmt.index("DP") if "DP" in fmt else None
-                for s, col in zip(vcf_samples, f[9:]):
-                    parts = col.split(":")
-                    gt = parts[0]
-                    if gt in ("./.", ".", ".|."):
-                        continue
-                    called[s] += 1
-                    if gt in ("0/1", "1/0", "0|1", "1|0"):
-                        hets[s] += 1
-                    if dp_i is not None and len(parts) > dp_i:
-                        v = parts[dp_i]
-                        if v not in (".", ""):
-                            dp_sum[s] += float(v); dp_n[s] += 1
+        # Per-sample numbers and the fit/excluded verdict come from r11g2;
+        # there is no second pass over the VCF here.
+        stats = pd.read_csv(input.stats, sep="\t")
 
-        stats = pd.DataFrame({
-            "sample": vcf_samples,
-            "n_sites": n_sites,
-            "n_called": [called[s] for s in vcf_samples],
-            "call_rate": [called[s] / n_sites if n_sites else 0 for s in vcf_samples],
-            "mean_dp": [dp_sum[s] / dp_n[s] if dp_n[s] else 0 for s in vcf_samples],
-            "n_het": [hets[s] for s in vcf_samples],
-            "het_rate": [hets[s] / called[s] if called[s] else 0 for s in vcf_samples],
-        })
-        stats.to_csv(output.site_stats, sep="\t", index=False, float_format="%.4f")
-
-        # ---------- RNA-internal kinship
         kin = _genocheck_read_kin0(input.kin)
         kcol = kin.attrs["kinship"]
         kin["label"] = [
@@ -5369,9 +5680,9 @@ rule r11l_genocheck_rna_report:
         kin.sort_values(kcol, ascending=False).to_csv(
             output.report, sep="\t", index=False, float_format="%.5f")
 
-        print(f"[genocheck][report] {len(vcf_samples)} RNA samples, {n_sites} "
-              f"sites, median call rate {stats['call_rate'].median():.3f}",
-              file=sys.stderr)
+        print(f"[genocheck][report] {len(stats)} RNA samples "
+              f"({int((stats['verdict'] == 'fit').sum())} fit), median call "
+              f"rate {stats['call_rate'].median():.3f}", file=sys.stderr)
         if donors and "agrees_with_donor_map" in kin:
             # the column is mixed bool/"NA", so `~` would raise -- count the
             # genuine False entries only
@@ -5390,15 +5701,19 @@ rule r11m_genocheck_chip_subset:
     """Array fileset restricted to the variants the RNA calls actually cover."""
     input:
         chip_bed = GENOCHECK_CHIP_PREFIX + ".bed",
+        chip_bim = GENOCHECK_CHIP_PREFIX + ".bim",
+        chip_fam = GENOCHECK_CHIP_PREFIX + ".fam",
         bim      = GENOCHECK_OUT + "/rnaseq_genotypes.bim",
+        fam      = GENOCHECK_OUT + "/rnaseq_genotypes.fam",
     output:
         bed = temp(GENOCHECK_OUT + "/_merge/chip_shared.bed"),
         bim = temp(GENOCHECK_OUT + "/_merge/chip_shared.bim"),
         fam = temp(GENOCHECK_OUT + "/_merge/chip_shared.fam"),
     params:
-        chip_prefix = GENOCHECK_CHIP_PREFIX,
-        out_prefix  = GENOCHECK_OUT + "/_merge/chip_shared",
-        wd          = GENOCHECK_OUT + "/_merge",
+        chip_prefix   = GENOCHECK_CHIP_PREFIX,
+        sorted_prefix = GENOCHECK_OUT + "/_merge/chip_sorted",
+        out_prefix    = GENOCHECK_OUT + "/_merge/chip_shared",
+        wd            = GENOCHECK_OUT + "/_merge",
     threads: 4
     singularity: PLINK2_CONTAINER
     shell:
@@ -5406,13 +5721,20 @@ rule r11m_genocheck_chip_subset:
         set -euo pipefail
         mkdir -p {params.wd}
         cut -f2 {input.bim} > {params.wd}/shared_ids.txt
+        # Same two-pass sort as r11j, for the same plink2 restriction. The array
+        # fileset is usually already in positional order, but it is not this
+        # workflow's file and may have been lifted over by someone else.
         plink2 --bfile {params.chip_prefix} \
             --extract {params.wd}/shared_ids.txt \
             --snps-only just-acgt --max-alleles 2 \
             --allow-extra-chr --sort-vars \
+            --threads {threads} --make-pgen --out {params.sorted_prefix}
+        plink2 --pfile {params.sorted_prefix} \
+            --allow-extra-chr \
             --threads {threads} --make-bed --out {params.out_prefix}
+        rm -f {params.sorted_prefix}.pgen {params.sorted_prefix}.pvar \
+              {params.sorted_prefix}.psam {params.sorted_prefix}.log
         """
-
 
 rule r11n_genocheck_merge:
     """
@@ -5495,6 +5817,8 @@ rule r11o_genocheck_kinship_merged:
     """KING-robust kinship across the merged RNA + array set, all pairs."""
     input:
         bed = GENOCHECK_OUT + "/_merge/merged.bed",
+        bim = GENOCHECK_OUT + "/_merge/merged.bim",
+        fam = GENOCHECK_OUT + "/_merge/merged.fam",
     output:
         kin = GENOCHECK_OUT + "/00_kinship_merged.kin0",
     params:
@@ -5536,6 +5860,8 @@ rule r11p_genocheck_ibs:
     """
     input:
         bed = GENOCHECK_OUT + "/_merge/merged.bed",
+        bim = GENOCHECK_OUT + "/_merge/merged.bim",
+        fam = GENOCHECK_OUT + "/_merge/merged.fam",
     output:
         genome = GENOCHECK_OUT + "/_merge/merged.genome",
     params:
