@@ -25,7 +25,7 @@ sudo lpb-exome-prioritisation-collect-data.sh
 # collects to a different directory
 sudo lpb-exome-prioritisation-collect-data.sh --root /mnt/bigdisk/exome_pipe
 # also collects data for deconvolution, requires data recipes and the deconv driver to be
-# stored at /<collection_script_location>/scripts_to_make_deconv_reference
+# stored at /<collection_script_location>/scripts/scripts_to_make_deconv_reference
 sudo env BUILD_DECONV_REFERENCE=1 bash lpb-exome-prioritisation-collect-data.sh --deconv-dir /rnaseq_pipe_path/00_additional_files/deconv
 ```
 The disk space requirement: ~350GB for the reference data (without scRNA-seq for deconvolution, expect ~40GB per sc dataset) + ~12GB per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
@@ -39,15 +39,13 @@ Download Ensembl VEP cache release 112 from ftp.ensembl.org. VEP plugin source c
 
 #### 3a. Plugin data resources
 
-| resource | link | tier | description |
-| - | - | - | - |
-| LOFTEE | [Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7) | A | LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) to be obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against "intermittent peering issues" so to speak.|
-| SpliceAI | [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015) | A | Single-nucleotide-variant scores to be downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license |
-| SpliceAI indel scores | [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015) | A | To be obtained *manually* due to licensing constraints via the Illumina BaseSpace CLI (project 66029966, academic use).|
-| AlphaMissense | [Cheng et al. 2023](https://doi.org/10.1126/science.adg7492) | B | The scores (AlphaMissense_hg38.tsv.gz) to be obtained from the DeepMind public bucket and tabix-indexed. |
-| REVEL | [Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016) | B | The scores (May 2021 release with Ensembl transcript IDs) to be downloaded *manually* from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data is used under a non-commercial research license. |
-| CADD v1.7 SNV and indel scores | [Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)| | The scores to be retrieved from the University of Washington's CADD non-commercial license distribution.|
-| dbNSFP v5.3.1a (academic-use branch) | [Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9) | | A collection of functional annotations and mutation effect prediction scores. The collection to be supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).|
+- **LOFTEE** [Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7) supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) to be obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against "intermittent peering issues" so to speak. Used for the tier A assignment (see section Ib #10).
+- **SpliceAI** [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015) single-nucleotide-variant scores to be downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Used for the tier A assignment.
+- **SpliceAI indel scores** [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015). To be obtained *manually* due to licensing constraints via the Illumina BaseSpace CLI (project 66029966, academic use). Used for the tier A assignment.
+- **AlphaMissense** [Cheng et al. 2023](https://doi.org/10.1126/science.adg7492). The scores (AlphaMissense_hg38.tsv.gz) to be obtained from the DeepMind public bucket and tabix-indexed. Used for the tier B assignment.
+- **REVEL** [Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016) The scores (May 2021 release with Ensembl transcript IDs) need to be downloaded *manually* from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data is used under a non-commercial research license. Used for the tier B assignment.
+- **CADD** v1.7 SNV and indel scores [Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016). The scores to be retrieved from the University of Washington's CADD non-commercial license distribution.
+- **dbNSFP** v5.3.1a (academic-use branch) [Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9). A collection of functional annotations and mutation effect prediction scores. The collection to be supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).
 
 #### 3b. Custom Singularity image for the VEP annotation
 This workflow uses a custom Singularity image for the VEP annotation step instead of the stock `ensemblorg/ensembl-vep:release_112.0` container. The image is built from the official Ensembl VEP 112 container, with samtools added for LOFTEE support. LOFTEE requires samtools faidx during annotation, especially for checks involving the ancestral allele FASTA. Without samtools, VEP may still run, but LOFTEE can emit warnings such as "Can't exec `samtools`" and may produce incomplete or incorrect `LoF`, `LoF_filter`, and `LoF_flags` annotations. In particular, variants that should be downgraded by LOFTEE filters such as `ANC_ALLELE` may otherwise remain incorrectly classified as high-confidence LoF. The custom image is built once and stored as a local `.simg` file. The image preserves the official VEP 112 environment and only adds the missing runtime dependency required by LOFTEE.
@@ -675,11 +673,11 @@ Confidence filters: single-letter ACGT biallelic SNPs only, strand-ambiguous A/T
 |---|---|---|
 | `*.bim` | yes | site list; anchors fileset discovery, will be attempted to download from [UCSC](https://hgdownload.soe.ucsc.edu/goldenPath/hg19/database/hapmapSnpsCEU.txt.gz) if absent |
 | `*.bed`, `*.fam` | no | enables finding DNA identitiy |
-| `hg19ToHg38.over.chain.gz` | if array is hg19 | liftover, will be attempted to dowload from [UCSC](https://hgdownload.gi.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz) if absent |
-| `sample_map.tsv` | no | `rna_sample → array_id`, catches RNA/DNA mismatches |
-| `donor_map.tsv` | no | `rna_sample → donor_id`, catches different samples supposed to be from the same donor |
+| `hg19ToHg38.over.chain.gz` | if array is hg19 | liftover chain, will be attempted to dowload from [UCSC](https://hgdownload.gi.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz) if absent |
+| `sample_map.tsv` | no | `rna_sample → array_id`, used to catch RNA/DNA mismatches |
+| `donor_map.tsv` | no | `rna_sample → donor_id`, used to check whether different samples supposed to be from the same donor |
 
-Sample names are never assumed to correspond. RNA IDs are suffixed `_RNA` before the merge, and every RNA sample is scored against every array sample and ranked, so the assignment is discovered from the genotypes. A supplied `sample_map.tsv` is treated as a hypothesis: the report states whether the data-driven best match agrees with it. Donor IDs in the `donor_map.tsv` are arbitrary. Both correspondence tables are optional and don't need to be complete.
+Sample names are never assumed to correspond. RNA IDs are suffixed `_RNA` before the merge, and every RNA sample is scored against every array sample and ranked, so the assignment is discovered from the genotypes. A supplied `sample_map.tsv` is treated as a hypothesis: the report states whether the data-driven best match agrees with it. Donor IDs in the `donor_map.tsv` could be arbitrary. Both correspondence tables are optional and don't need to be complete.
 
 **Mixture detection** (`r11r`–`r11t`)
 
