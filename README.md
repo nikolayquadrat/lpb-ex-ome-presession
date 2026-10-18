@@ -38,13 +38,16 @@ Obtain the GRCh38 reference assembly with ALT contigs (Homo_sapiens_assembly38.f
 Download Ensembl VEP cache release 112 from ftp.ensembl.org. VEP plugin source code to be cloned from two repositories: the official Ensembl VEP_plugins repository pinned to release/115 (required for dbNSFP v5 column-layout compatibility), and the LOFTEE plugin from the konradjk/loftee repository on the grch38 branch. To accommodate VEP's single-directory plugin-loading model, all .pm files from both repositories should be copied into a single canonical directory (plugins/flat/); copies (rather than symlinks) avoid Singularity bind-mount path-resolution failures.
 
 #### 3a. Plugin data resources
-- **LOFTEE** ([Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7)). LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) to be obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues. Used for Tier A classification (see below, Ib, section 10).
-- **SpliceAI** ([Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015)). Single-nucleotide-variant scores to be downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license. Used for Tier A classification.
-- **SpliceAI indel scores** to be obtained *manually* due to licensing constraints via the Illumina BaseSpace CLI (project 66029966, academic use). Used for Tier A classification.
-- **AlphaMissense** ([Cheng et al. 2023](https://doi.org/10.1126/science.adg7492)) scores (AlphaMissense_hg38.tsv.gz) to be obtained from the DeepMind public bucket and tabix-indexed. Used for Tier B classification.
-- **REVEL** ([Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016)) **scores (May 2021 release with Ensembl transcript IDs)** to be downloaded *manually* from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data is used under a non-commercial research license. Used for Tier B classification.
-- **CADD** v1.7 SNV and indel scores ([Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)) to be retrieved from the University of Washington's CADD non-commercial license distribution.
-- **dbNSFP** v5.3.1a (academic-use branch) ([Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9)). A collection of functional annotations and mutation effect prediction scores. The collection to be supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).
+
+| resource | link | tier | description |
+| - | - | - | - |
+| LOFTEE | [Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7) | A | LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) to be obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues.|
+| SpliceAI | [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015) | A | Single-nucleotide-variant scores to be downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license |
+| SpliceAI indel scores | [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015) | A | To be obtained *manually* due to licensing constraints via the Illumina BaseSpace CLI (project 66029966, academic use).|
+| AlphaMissense | [Cheng et al. 2023](https://doi.org/10.1126/science.adg7492) | B | The scores (AlphaMissense_hg38.tsv.gz) to be obtained from the DeepMind public bucket and tabix-indexed. |
+| REVEL | [Ioannidis et al. 2016](https://doi.org/10.1016/j.ajhg.2016.08.016) | B | The scores (May 2021 release with Ensembl transcript IDs) to be downloaded *manually* from https://sites.google.com/site/revelgenomics/downloads. The panel requires explicit transformation to be readable by VEP's REVEL plugin: (i) the published CSV is converted to TSV, (ii) chromosome names are prefixed with "chr" to match the reference assembly's UCSC-style naming, (iii) the column-header line is prefixed with "#" and the file is indexed via tabix -c '#' rather than tabix -S 1, ensuring tabix -h queries return the header line as expected by the plugin's column-detection routine. Two automated sanity checks validate the resulting file: a BRCA1 lookup at chr17:43106478 and a header-retrieval test. Data is used under a non-commercial research license. |
+| CADD v1.7 SNV and indel scores | [Rentzsch et al. 2019](https://doi.org/10.1093/nar/gky1016)| | The scores to be retrieved from the University of Washington's CADD non-commercial license distribution.|
+| dbNSFP v5.3.1a (academic-use branch) | [Liu et al. 2011](https://doi.org/10.1002/humu.21517) & [Liu et al. 2020](https://doi.org/10.1186/s13073-020-00803-9) | | A collection of functional annotations and mutation effect prediction scores. The collection to be supplied *manually* from genos.us (registration [here](https://www.dbnsfp.org/download)).|
 
 #### 3b. Custom Singularity image for the VEP annotation
 This workflow uses a custom Singularity image for the VEP annotation step instead of the stock `ensemblorg/ensembl-vep:release_112.0` container. The image is built from the official Ensembl VEP 112 container, with samtools added for LOFTEE support. LOFTEE requires samtools faidx during annotation, especially for checks involving the ancestral allele FASTA. Without samtools, VEP may still run, but LOFTEE can emit warnings such as "Can't exec `samtools`" and may produce incomplete or incorrect `LoF`, `LoF_filter`, and `LoF_flags` annotations. In particular, variants that should be downgraded by LOFTEE filters such as `ANC_ALLELE` may otherwise remain incorrectly classified as high-confidence LoF. The custom image is built once and stored as a local `.simg` file. The image preserves the official VEP 112 environment and only adds the missing runtime dependency required by LOFTEE.
@@ -86,7 +89,7 @@ Visualisation if the obtatined gene-level information:<br>
 
 **What each builder does.** Reads one or more large single-cell `.h5ad` source files (staged locally under `$DECONV_SOURCE_DIR`, or resolved from CELLxGENE when networked), backed so the expression matrix is never fully loaded; filters and subsamples cells; collapses the source annotations into the target cell classes via an explicit, auditable mapping; and writes a uniform "canonical" reference — `matrix.mtx.gz`, `features.tsv.gz`, `cells.tsv.gz`, `provenance.json` — that the downstream deconvolution consumes identically regardless of which reference it came from. Each builder is internally idempotent (skips its own download and build if the outputs already exist), so re-runs are cheap.
 
-The section produces reference data in its own folder under `$DECONV_OUT_ROOT` (e.g. `.../<rnaseq folder>/00_additional_files/deconv/reference_canonical`):
+The section produces reference data in its own folder under `$DECONV_OUT_ROOT` (e.g. `../<rnaseq folder>/00_additional_files/deconv/reference_canonical`):
 - `siletti_cortex.py` — adult human neocortex, neuronal vs non-neuronal, for the SZ07 composition analysis from the [Siletti et al (2023)](https://doi.org/10.1126/science.add7046) dataset.
 - `siletti_glia_plus.py` — same, but for non-neuronal (super)clusters separately. For cluster codes, [consult Table S3 from the original study](https://www.science.org/doi/10.1126/science.add7046#supplementary-materials).
 
@@ -315,6 +318,29 @@ flowchart LR
 	id31[r10b_expression_xlsx]
 	id32[r10a_expression_tables]
 
+	id38[r11j_genocheck_plink_final]
+	id39[r11i_genocheck_remap]
+	id40[r11h_genocheck_plink_hg38]
+	id41[r11g_genocheck_filter]
+	id42[r11f_genocheck_call_chrom]
+	id43[r11e2_genocheck_depth_screen]
+	id44[r11e_genocheck_alleles]
+	id45[r11c_genocheck_crosswalk]
+	id46[r11b_genocheck_liftover]
+	id47[r11a_genocheck_sites]
+	id48[r11d_genocheck_refbase]
+	id49[r11g2_genocheck_sample_qc]
+	id50[r11l_genocheck_rna_report]
+	id51[r11k_genocheck_kinship_rna]
+	id52[r11s_genocheck_mixture]
+	id53[r11r_genocheck_vaf_counts]
+	id54[r11t_genocheck_mixture_plots]
+	id55[r11q_genocheck_identity]
+	id56[r11p_genocheck_ibs]
+	id57[r11n_genocheck_merge]
+	id58[r11m_genocheck_chip_subset]
+	id59[r11o_genocheck_kinship_merged]
+
 	style id12 stroke-width:2px,color:#35ed12
 	style id13 stroke-width:2px,color:#35ed12
 	style id14 stroke-width:2px,color:#35ed12
@@ -344,6 +370,29 @@ flowchart LR
 	style id35 stroke-width:2px,color:#1235ed
 	style id36 stroke-width:2px,color:#1235ed
 	style id37 stroke-width:2px,color:#1235ed
+
+	style id38 stroke-width:2px,color:#af8850
+	style id39 stroke-width:2px,color:#af8850
+	style id40 stroke-width:2px,color:#af8850
+	style id41 stroke-width:2px,color:#af8850
+	style id42 stroke-width:2px,color:#af8850
+	style id43 stroke-width:2px,color:#af8850
+	style id44 stroke-width:2px,color:#af8850
+	style id45 stroke-width:2px,color:#af8850
+	style id46 stroke-width:2px,color:#af8850
+	style id47 stroke-width:2px,color:#af8850
+	style id48 stroke-width:2px,color:#af8850
+	style id49 stroke-width:2px,color:#af8850
+	style id50 stroke-width:2px,color:#af8850
+	style id51 stroke-width:2px,color:#af8850
+	style id52 stroke-width:2px,color:#af8850
+	style id53 stroke-width:2px,color:#af8850
+	style id54 stroke-width:2px,color:#af8850
+	style id55 stroke-width:2px,color:#af8850
+	style id56 stroke-width:2px,color:#af8850
+	style id57 stroke-width:2px,color:#af8850
+	style id58 stroke-width:2px,color:#af8850
+	style id59 stroke-width:2px,color:#af8850
 
 	id17 --> id0
 	id28 --> id0
@@ -406,6 +455,39 @@ flowchart LR
 	id36 --> id35
 	id2 --> id36
 	id36 --> id37
+
+	id39 --> id38
+	id40 --> id39
+	id44 --> id39
+	id49 --> id40
+	id41 --> id40
+	id42 --> id41
+	id9 --> id42
+	id43 --> id42
+	id1 --> id42
+	id9 --> id43
+	id44 --> id43
+	id1 --> id43
+	id45 --> id44
+	id48 --> id44
+	id46 --> id45
+	id47 --> id46
+	id45 --> id48
+	id41 --> id49
+	id51 --> id50
+	id49 --> id50
+	id38 --> id51
+	id53 --> id52
+	id41 --> id53
+	id52 --> id54
+	id49 --> id55
+	id59 --> id55
+	id56 --> id55
+	id57 --> id56
+	id58 --> id57
+	id38 --> id57
+	id38 --> id58
+	id57 --> id59
 ```
 
 #### 1. Reference assembly and annotation
@@ -454,10 +536,6 @@ Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical dupl
 |PCT_CORRECT_STRAND_READS|For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.|
 |Uniquely_mapped|Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; below 10M, autoencoder denoising breaks down and outlier detection becomes unreliable.|
 |Uniquely_mapped_pct|STAR's reported percentage of input reads that mapped uniquely (e.g., 90.10%). Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).|
-|flag_3prime_bias_high|Fires when a sample's MEDIAN_3PRIME_BIAS exceeds the cohort median plus three median-absolute-deviations (cohort-relative outlier detection that adapts to the protocol's baseline).|
-|flag_rrna_high|Fires when PCT_RIBOSOMAL_BASES exceeds 10% (depletion-failure threshold).|
-|flag_mrna_low|Fires when PCT_MRNA_BASES falls below 60% (genomic-DNA or pre-mRNA contamination threshold).|
-|flag_low_complexity|Boolean absolute-threshold flag: True if Uniquely_mapped < 10,000,000. Catches samples that look clean by RNA-quality metrics but lack enough reads for reliable outlier detection. Samples with this flag True should be excluded from the OUTRIDER reference panel; including them as the test sample is fine but will yield lower-power results.|
 
 These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
 
@@ -573,10 +651,12 @@ Checks for cell-composition bias in RNA-seq samples using estimates from marker-
 
 #### 11. Genotype identity check, kinship and mixture detection
 
+Enabled automatically, `GENOCHECK_ENABLED=0` disables it.
+
 Calls genotypes from the RNA-seq BAMs at the sites of an existing SNP-array fileset, producing a PLINK fileset that can be compared directly against it to
 verify sample identity and donor relationships.
-- With a `.bim` alone (*sites*): RNA genotypes, the PLINK deliverable, per-sample QC and RNA-vs-RNA kinship.
-- With `.bed`/`.bim`/`.fam` (*identity*): additionally the merge, cross-dataset kinship, all-pairs IBS and the similarity report.
+- With a `.bim` alone (*used for SNP sites detection*): RNA genotypes, the PLINK deliverable, per-sample QC and RNA-vs-RNA kinship.
+- With `.bed`/`.bim`/`.fam` (*used for checking identity*): additionally the merge, cross-dataset kinship, all-pairs IBS and the similarity report.
 
 Genotyping is **targeted, not de novo**: the array `.bim` supplies the site list, and `bcftools call -C alleles` is constrained to the array's own REF/ALT pair at each position. The two filesets therefore carry identical alleles at identical positions and need no post-hoc allele reconciliation. This also
 sidesteps de novo RNA calling artefacts (splice-junction mispairing, ADAR A-to-I editing read as A>G).
@@ -627,30 +707,7 @@ positive favouring two donors.
 Verdicts: `mixture` (ΔBIC ≥ 10 and α̂ ≥ 0.03), `single_donor` (ΔBIC < 10),
 `inconclusive_low_alpha`, `insufficient_sites`.
 
-##### **Outputs** — `11_genocheck/`:
-
-| File | Contents |
-|---|---|
-| `rnaseq_genotypes.{bed,bim,fam}` | the deliverable, array build and IDs |
-| `rnaseq_genotypes.hg38.vcf.gz` | raw calls in hg38 |
-| `00_genocheck_site_stats.tsv` | per-sample call rate, depth, heterozygosity |
-| `00_genocheck_crosswalk.tsv.gz` | hg19 ↔ hg38 site table used |
-| `00_kinship_rna{.kin0,_report.tsv}` | KING within RNA (donor structure) |
-| `00_kinship_merged.kin0` | KING across RNA + array |
-| `00_similarity_pairs.tsv` | every pair: concordance, kinship, IBS0 |
-| `00_similarity_report.tsv` | per RNA sample: best match, margin, verdict |
-| `00_mixture_report.tsv` | per sample: α̂, both log-likelihoods, ΔBIC, verdict |
-| `00_mixture_alpha_profile.tsv.gz` | ΔBIC against α, per sample |
-| `00_mixture_vaf_histogram.tsv.gz` | VAF histogram counts, per sample |
-| `00_mixture_vaf_histogram.svg` | the histograms, small multiples, sidebands marked |
-| `00_mixture_alpha_profile.svg` | ΔBIC vs α, small multiples, threshold marked |
-
-Similarity is genotype concordance, `IBS2 / (IBS0 + IBS1 + IBS2)` from `plink --genome full`, preferred over PI_HAT because it needs no allele-frequency estimates.
-
-**Interpreting the numbers.** Allele dropout at modest depth turns true heterozygotes into apparent homozygotes and biases concordance and kinship downward, so the usual thresholds do not transfer. A correct RNA-vs-array pairing typically shows concordance 0.85–0.97 and kinship 0.30–0.45 rather than 0.5; two regions of one donor often sit nearer 0.5, because they express the same genes and so drop out at the same sites, partly cancelling the error. Judge by rank, by the margin to the runner-up, and by IBS0 — dropout produces IBS1, not IBS0, so the opposite-homozygote rate stays near zero for a true match even when kinship has been deflated.
-
-Enabled automatically when a `00_additional_files/genetics/<any_name>.bim` is present; `GENOCHECK_ENABLED=0` disables it.
-Requires `bcftools`, `plink`, `plink2` and `CrossMap`.
+**Interpreting the numbers.** Allele dropout at modest depth turns true heterozygotes into apparent homozygotes and biases concordance and kinship downward, so the usual thresholds do not transfer. A correct RNA-vs-array pairing typically shows concordance 0.85–0.97 and kinship 0.30–0.45 rather than 0.5; two regions of one donor often sit nearer 0.5, because they express the same genes and so drop out at the same sites, partly cancelling the error. Judge by rank, by the margin to the runner-up, and by IBS0 — dropout produces IBS1, not IBS0, so the opposite-homozygote rate stays near zero for a true match even when kinship has been deflated. Similarity is genotype concordance, `IBS2 / (IBS0 + IBS1 + IBS2)` from `plink --genome full`, preferred over PI_HAT because it needs no allele-frequency estimates.
 
 #### 10. Pipeline outputs
 Per sample:
@@ -665,7 +722,12 @@ Cohort-level:
  - `../04_qc/00_inferred_sex.tsv` (sex inference),
  - `../04_qc/00_cell_marker_expression.tsv` (cell-composition markers),
  - `../04_qc/00_expression_summary.xlsx` (counts and TPM tables),
- - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files)
+ - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files),
+ - `../11_genocheck/rnaseq_genotypes.{bed,bim,fam}` reliable RNA-seq inferred genotypes in the PLINK format,
+ - `../11_genocheck/00_genocheck_site_stats.tsv` genotypes calling report,
+ - `../11_genocheck/00_similarity_pairs.tsv` reports which reference DNA match RNA genotypes,
+ - `../11_genocheck/00_kinship_rna_report.tsv`  reports RNA-derived kinship,
+ - `../11_genocheck/00_mixture_report.tsv` reports whether RNA data correspond better with a single or a mixture of two samples.
 
 ## III. DROP pipeline
 ```mermaid
