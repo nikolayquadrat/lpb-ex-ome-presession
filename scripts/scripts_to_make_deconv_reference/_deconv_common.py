@@ -119,6 +119,392 @@ def sha256(path, buf=1 << 20):
 
 
 # --------------------------------------------------------------------------- #
+# GEO: 10x MTX triplet + cell metadata -> one h5ad
+# --------------------------------------------------------------------------- #
+# For references published as CellRanger output rather than as an h5ad (e.g.
+# GSE164378). GEO's supplementary layout is programmatic, so a recipe can fetch
+# and assemble without anything staged by hand:
+#   https://ftp.ncbi.nlm.nih.gov/geo/series/<GSEnnnNNN>/<ACC>/suppl/<FILE>
+# where the directory is the accession with its last three digits replaced by
+# "nnn" (GSE164378 -> GSE164nnn).
+
+def geo_suppl_url(accession, filename):
+    """Supplementary-file URL for a GEO SERIES. The 'nnn' directory rule is
+    GEO's own and has been stable for years, but it is a convention, not an
+    API -- every recipe using this should let the caller override the URL.
+
+    NOTE a series' suppl/ directory usually holds only series-level files (the
+    metadata tables) plus <ACC>_RAW.tar. Per-sample files listed in that
+    directory's filelist.txt are MEMBERS OF THE TAR, not files sitting beside
+    it: the first column of filelist.txt says 'Archive' for the tar and 'File'
+    for each member. Fetch per-sample files with geo_sample_suppl_url, or
+    extract them from the tar."""
+    acc = accession.strip().upper()
+    if not acc.startswith("GSE") or not acc[3:].isdigit():
+        sys.exit(f"[ERR] not a GSE accession: {accession}")
+    return (f"https://ftp.ncbi.nlm.nih.gov/geo/series/{acc[:-3]}nnn/{acc}"
+            f"/suppl/{filename}")
+
+
+def geo_sample_suppl_url(gsm, filename):
+    """Supplementary-file URL for a GEO SAMPLE (per-GSM tree). Same 'nnn'
+    convention: GSM5008737 -> /geo/samples/GSM5008nnn/GSM5008737/suppl/."""
+    g = gsm.strip().upper()
+    if not g.startswith("GSM") or not g[3:].isdigit():
+        sys.exit(f"[ERR] not a GSM accession: {gsm}")
+    return (f"https://ftp.ncbi.nlm.nih.gov/geo/samples/{g[:-3]}nnn/{g}"
+            f"/suppl/{filename}")
+
+
+def try_fetch(url, target, expect_min_bytes=1 << 10):
+    """fetch() that returns None instead of exiting, for callers with a
+    fallback. Keeps a partially-written file from being mistaken for a good
+    one."""
+    if os.path.isfile(target) and os.path.getsize(target) > expect_min_bytes:
+        eprint(f"[fetch] present, skip: {target}")
+        return target
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    tmp = target + ".partial"
+    eprint(f"[fetch] {url}")
+    try:
+        with urllib.request.urlopen(url) as r, open(tmp, "wb") as out:
+            total = int(r.headers.get("Content-Length", 0))
+            got = 0
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+                got += len(chunk)
+                if total:
+                    eprint(f"\r[fetch]   {got/1e9:5.1f} / {total/1e9:5.1f} GB",
+                           end="")
+        if total:
+            eprint("")
+    except Exception as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        eprint(f"[fetch] failed: {e}")
+        return None
+    if os.path.getsize(tmp) < expect_min_bytes:
+        os.remove(tmp)
+        eprint(f"[fetch] failed: {target} suspiciously small")
+        return None
+    os.replace(tmp, target)
+    return target
+
+
+def extract_tar_members(tar_path, members, outdir):
+    """Extract exactly `members` (exact names) from tar_path into outdir.
+
+    Streams, never extracts the whole archive, and refuses any member whose
+    name is not one of those asked for -- a downloaded archive is untrusted
+    input, and a member called '../../etc/thing' is how that bites."""
+    import tarfile
+    want = set(members)
+    os.makedirs(outdir, exist_ok=True)
+    out = {}
+    eprint(f"[tar] extracting {len(want)} member(s) from "
+           f"{os.path.basename(tar_path)}")
+    with tarfile.open(tar_path, "r|*") as tf:      # stream mode
+        for m in tf:
+            if m.name not in want or not m.isfile():
+                continue
+            dst = os.path.join(outdir, os.path.basename(m.name))
+            src = tf.extractfile(m)
+            if src is None:
+                continue
+            tmp = dst + ".partial"
+            with open(tmp, "wb") as fo:
+                while True:
+                    chunk = src.read(1 << 22)
+                    if not chunk:
+                        break
+                    fo.write(chunk)
+            os.replace(tmp, dst)
+            out[m.name] = dst
+            eprint(f"[tar]   {m.name} -> {dst} "
+                   f"({os.path.getsize(dst)/1e6:.0f} MB)")
+            if len(out) == len(want):
+                break
+    missing = want - set(out)
+    if missing:
+        sys.exit(f"[ERR] {tar_path} lacks member(s): {sorted(missing)}")
+    return out
+
+
+def gunzip_to(src_gz, dst, keep=False):
+    """Stream-decompress src_gz -> dst (atomic). Returns dst.
+
+    The matrix is decompressed to a real file rather than read through a gzip
+    handle because scipy's fast C MatrixMarket reader only engages for a path;
+    handed a file object it falls back to parsing in Python, which on a
+    200M-entry matrix is the difference between minutes and hours."""
+    if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+        eprint(f"[gunzip] present, skip: {dst} "
+               f"({os.path.getsize(dst)/1e9:.1f} GB)")
+        return dst
+    tmp = dst + ".partial"
+    eprint(f"[gunzip] {os.path.basename(src_gz)} -> {dst}")
+    with gzip.open(src_gz, "rb") as fi, open(tmp, "wb") as fo:
+        while True:
+            chunk = fi.read(1 << 22)
+            if not chunk:
+                break
+            fo.write(chunk)
+    os.replace(tmp, dst)
+    if not keep:
+        pass            # caller decides whether to remove the .gz
+    return dst
+
+
+def _read_tsv_gz_column(path, col=0, min_cols=1):
+    """One column out of a gzipped TSV with no header (10x barcodes/features)."""
+    out, ncol = [], None
+    with gzip.open(path, "rt") as fh:
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if ncol is None:
+                ncol = len(f)
+                if ncol < min_cols:
+                    sys.exit(f"[ERR] {path}: expected >= {min_cols} columns, "
+                             f"found {ncol}: {f}")
+            out.append(f[col] if col < len(f) else f[0])
+    if not out:
+        sys.exit(f"[ERR] {path} is empty")
+    return out, ncol
+
+
+def _normalise_barcodes(bcs):
+    """Candidate normalisations for joining matrix barcodes to a metadata index.
+
+    The two sides routinely disagree by a lane suffix or prefix, and a naive
+    join then drops most cells SILENTLY -- which looks like a small reference
+    rather than a broken one. Each candidate is tried and the best overlap wins,
+    with the overlap reported."""
+    import re
+    return {
+        "as-is": list(bcs),
+        "strip_-N_suffix": [re.sub(r"-\d+$", "", b) for b in bcs],
+        "strip_prefix_before_underscore": [b.split("_", 1)[-1] for b in bcs],
+        "strip_prefix_and_-N": [re.sub(r"-\d+$", "", b.split("_", 1)[-1])
+                                for b in bcs],
+    }
+
+
+def assemble_10x_h5ad(out_h5ad, mtx_gz, barcodes_gz, features_gz, meta_gz,
+                      required_obs=(), work_dir=None, min_join_rate=0.90,
+                      feature_symbol_col=1, provenance=None):
+    """Assemble a CellRanger MTX triplet + a cell-metadata CSV into one h5ad.
+
+    Raw counts are written to X (a single copy -- writing them to BOTH X and a
+    'counts' layer would double a multi-GB file, and an h5ad with X=None breaks
+    backed reads: anndata raises KeyError on .X). Recipes built from this
+    therefore pass --counts-layer X; build_reference still warns if those values
+    are not integers, which is what catches a normalised matrix.
+
+    Fails loud on: dimension mismatch, poor barcode join, missing required obs
+    columns. Every one of those is a silent wrong reference otherwise.
+    """
+    import numpy as np
+    import pandas as pd
+    import scipy.io as sio
+    import scipy.sparse as sp
+    import anndata as ad
+
+    work_dir = work_dir or os.path.dirname(os.path.abspath(out_h5ad))
+    os.makedirs(work_dir, exist_ok=True)
+
+    barcodes, _ = _read_tsv_gz_column(barcodes_gz, col=0)
+    feat_rows, nfeat_cols = _read_tsv_gz_column(features_gz, col=0)
+    if nfeat_cols > feature_symbol_col:
+        symbols, _ = _read_tsv_gz_column(features_gz, col=feature_symbol_col)
+    else:                      # single-column features: ids are all we have
+        symbols = list(feat_rows)
+    eprint(f"[assemble] {len(barcodes):,} barcodes, {len(symbols):,} features "
+           f"({nfeat_cols}-column features file)")
+
+    mtx = gunzip_to(mtx_gz, os.path.join(work_dir, "_matrix.mtx"))
+    eprint("[assemble] reading MatrixMarket (this is the slow part) ...")
+    M = sio.mmread(mtx)
+    M = sp.csr_matrix(M)
+    if M.dtype != np.float32:
+        M = M.astype(np.float32)
+
+    # Orientation from the dimensions, never assumed: CellRanger writes
+    # genes x cells, but a re-exported matrix may be the other way round.
+    if M.shape == (len(symbols), len(barcodes)):
+        eprint("[assemble] matrix is genes x cells -> transposing")
+        M = M.T.tocsr()
+    elif M.shape == (len(barcodes), len(symbols)):
+        eprint("[assemble] matrix is already cells x genes")
+    else:
+        sys.exit(f"[ERR] matrix {M.shape} matches neither "
+                 f"(genes={len(symbols)}, cells={len(barcodes)}) nor its "
+                 "transpose. Wrong file triplet?")
+    os.remove(mtx)
+
+    meta = pd.read_csv(meta_gz, low_memory=False)
+    idx_col = meta.columns[0]
+    if not (str(idx_col).startswith("Unnamed") or
+            str(idx_col).lower() in ("barcode", "cell", "cell_id", "index",
+                                     "cellname", "cell_barcode")):
+        eprint(f"[WARN] using '{idx_col}' as the metadata barcode column "
+               "(first column); pass a different file if that is wrong")
+    meta = meta.set_index(meta[idx_col].astype(str)).drop(columns=[idx_col])
+    eprint(f"[assemble] metadata: {meta.shape[0]:,} rows x {meta.shape[1]} "
+           f"columns; index e.g. {list(meta.index[:2])}")
+
+    # Join, trying the usual suffix/prefix disagreements on BOTH sides: either
+    # file may be the one carrying a lane prefix or a '-1' suffix, so
+    # normalising only the matrix side fails exactly half the time.
+    mat_cands = _normalise_barcodes(barcodes)
+    meta_cands = _normalise_barcodes(list(meta.index))
+    best = None       # (rate, matrix_key_name, meta_key_name, keys, lookup)
+    for mk_name, mk in mat_cands.items():
+        for dk_name, dk in meta_cands.items():
+            # a normalisation that collapses distinct metadata rows onto one key
+            # would join cells to the wrong row -- skip it
+            if len(set(dk)) != len(dk):
+                continue
+            lookup = {k: i for i, k in enumerate(dk)}
+            rate = sum(1 for b in mk if b in lookup) / len(mk)
+            if best is None or rate > best[0]:
+                best = (rate, mk_name, dk_name, mk, lookup)
+    if best is None:
+        sys.exit("[ERR] every metadata-index normalisation collapsed distinct "
+                 "rows onto the same key; cannot join safely.")
+    best_rate, mk_name, dk_name, mkeys, lookup = best
+    eprint(f"[assemble] best barcode join: matrix '{mk_name}' x metadata "
+           f"'{dk_name}' -> {best_rate:.2%} matched")
+    if best_rate < min_join_rate:
+        sys.exit(
+            f"[ERR] best barcode join was only {best_rate:.2%} "
+            f"(floor {min_join_rate:.0%}).\n"
+            f"  matrix barcodes e.g. {barcodes[:3]}\n"
+            f"  metadata index   e.g. {list(meta.index[:3])}\n"
+            "Joining anyway would build a reference from whichever fraction "
+            "happened to line up. Check that the metadata file belongs to this "
+            "matrix (3' metadata with the 3' matrix, not the 5').")
+
+    rows = np.array([lookup.get(b, -1) for b in mkeys])
+    obs = meta.iloc[np.where(rows >= 0, rows, 0)].copy()
+    obs.index = pd.Index(barcodes, name="barcode")   # keep the matrix's own ids
+    if (rows < 0).any():                 # unmatched cells -> all-NaN, dropped below
+        obs.iloc[rows < 0, :] = np.nan
+    keep = obs.notna().any(axis=1).values
+    n_drop = int((~keep).sum())
+    if n_drop:
+        eprint(f"[assemble] dropping {n_drop:,} cells absent from the metadata")
+        M = M[keep]
+        obs = obs.loc[keep]
+
+    missing = [c for c in required_obs if c not in obs.columns]
+    if missing:
+        sys.exit(f"[ERR] metadata lacks required column(s) {missing}. "
+                 f"available: {list(obs.columns)}")
+
+    var = pd.DataFrame({"gene_ids": feat_rows}, index=pd.Index(symbols,
+                                                              name="feature_name"))
+    A = ad.AnnData(X=M, obs=obs, var=var)
+    A.uns["assembled_from"] = {
+        "matrix": os.path.basename(mtx_gz),
+        "barcodes": os.path.basename(barcodes_gz),
+        "features": os.path.basename(features_gz),
+        "metadata": os.path.basename(meta_gz),
+        "barcode_join": f"matrix:{mk_name} x metadata:{dk_name}",
+        "join_rate": round(best_rate, 6),
+        "counts_in": "X",
+    }
+    if provenance:
+        A.uns["assembled_from"].update(provenance)
+    tmp = out_h5ad + ".partial"
+    eprint(f"[assemble] writing {A.shape[0]:,} cells x {A.shape[1]:,} genes "
+           f"-> {out_h5ad}")
+    A.write_h5ad(tmp, compression="gzip")
+    os.replace(tmp, out_h5ad)
+    eprint(f"[assemble] done ({os.path.getsize(out_h5ad)/1e9:.1f} GB)")
+    return out_h5ad
+
+
+def ensure_geo_10x_h5ad(target, accession, urls, required_obs=(),
+                        tar_url=None, tar_members=None, keep_parts=False):
+    """Local-first: use `target` if staged, else fetch the four parts and
+    assemble them into it.
+
+    urls maps 'matrix'/'barcodes'/'features'/'metadata' -> full URL (build them
+    with geo_suppl_url / geo_sample_suppl_url in the recipe, which is where the
+    accession and GSM knowledge belongs).
+
+    tar_url + tar_members give a FALLBACK for the per-sample files: GEO lists
+    them in the series filelist.txt as members of <ACC>_RAW.tar, and whether
+    they are also served individually under /geo/samples/ varies. Any role whose
+    direct URL fails is taken from the tar instead, which is downloaded once and
+    streamed. tar_members maps role -> exact member name inside the archive.
+    """
+    if os.path.isfile(target) and os.path.getsize(target) > 0:
+        eprint(f"[source] using staged file: {target} "
+               f"({os.path.getsize(target)/1e9:.1f} GB)")
+        return target
+
+    parts_dir = os.path.join(os.path.dirname(os.path.abspath(target)),
+                             f"_{accession}_parts")
+    os.makedirs(parts_dir, exist_ok=True)
+
+    got, failed = {}, []
+    for role in ("matrix", "barcodes", "features", "metadata"):
+        if role not in urls:
+            sys.exit(f"[ERR] no URL given for '{role}'")
+        dst = os.path.join(parts_dir, os.path.basename(urls[role]))
+        p = try_fetch(urls[role], dst)
+        if p:
+            got[role] = p
+        else:
+            failed.append(role)
+
+    if failed:
+        if not (tar_url and tar_members):
+            sys.exit(f"[ERR] could not fetch {failed} and no tar fallback was "
+                     f"configured. URLs tried:\n  " +
+                     "\n  ".join(f"{r}: {urls[r]}" for r in failed))
+        eprint(f"[source] {failed} not served individually; falling back to "
+               f"{os.path.basename(tar_url)}")
+        need = {r: tar_members[r] for r in failed if r in tar_members}
+        if len(need) != len(failed):
+            sys.exit(f"[ERR] no tar member mapped for "
+                     f"{[r for r in failed if r not in tar_members]}")
+        tar_path = fetch(tar_url, os.path.join(parts_dir,
+                                               os.path.basename(tar_url)))
+        extracted = extract_tar_members(tar_path, set(need.values()), parts_dir)
+        for role, member in need.items():
+            got[role] = extracted[member]
+        try:
+            os.remove(tar_path)          # ~1.5 GB, not needed once extracted
+        except OSError:
+            pass
+
+    assemble_10x_h5ad(
+        out_h5ad=target, mtx_gz=got["matrix"], barcodes_gz=got["barcodes"],
+        features_gz=got["features"], meta_gz=got["metadata"],
+        required_obs=required_obs, work_dir=parts_dir,
+        provenance={"geo_accession": accession})
+
+    if not keep_parts:
+        # The raw parts are ~1.2 GB for GSE164378 and are not needed once the
+        # h5ad exists; a rebuild re-downloads them.
+        for p in got.values():
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            os.rmdir(parts_dir)
+        except OSError:
+            pass
+    return target
+
+
+# --------------------------------------------------------------------------- #
 # label construction helpers (used by the scripts to build the class Series)
 # --------------------------------------------------------------------------- #
 def load_mapping(path):
