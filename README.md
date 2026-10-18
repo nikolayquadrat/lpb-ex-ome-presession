@@ -41,7 +41,7 @@ Download Ensembl VEP cache release 112 from ftp.ensembl.org. VEP plugin source c
 
 | resource | link | tier | description |
 | - | - | - | - |
-| LOFTEE | [Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7) | A | LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) to be obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against intermittent peering issues.|
+| LOFTEE | [Karczewski et al. 2020](https://doi.org/10.1038/s41586-020-2308-7) | A | LOFTEE supporting data (human ancestor reference, GERP conservation BigWig, and SQL conservation database) to be obtained from personal.broadinstitute.org, with aria2 used preferentially for resilience against "intermittent peering issues" so to speak.|
 | SpliceAI | [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015) | A | Single-nucleotide-variant scores to be downloaded from the Ensembl FTP (Ensembl MANE GRCh38 release 110 mirror) under Illumina's research-use license |
 | SpliceAI indel scores | [Jaganathan et al. 2019](https://doi.org/10.1016/j.cell.2018.12.015) | A | To be obtained *manually* due to licensing constraints via the Illumina BaseSpace CLI (project 66029966, academic use).|
 | AlphaMissense | [Cheng et al. 2023](https://doi.org/10.1126/science.adg7492) | B | The scores (AlphaMissense_hg38.tsv.gz) to be obtained from the DeepMind public bucket and tabix-indexed. |
@@ -488,6 +488,8 @@ flowchart LR
 	id38 --> id57
 	id38 --> id58
 	id57 --> id59
+    id52 --> id0
+	id55 --> id0
 ```
 
 #### 1. Reference assembly and annotation
@@ -842,11 +844,11 @@ Helper functions:<br>
 
 ### Second pass
 *scripts/lpb-post-drop-outrider-2nd-pass.R*<br>
-For candidate-gene prioritisation, pathway and leading-edge membership were first defined from the pass 1 GSEA performed on the complete ranked gene list. To prevent circular support arising from a candidate's own expression statistic, GSEA was then repeated separately for each candidate after removing that gene from both the ranked list and the corresponding pathway gene sets (*this leave-one-out procedure is the key difference from the first-pass analysis*). Candidate–pathway relationships, including leading-edge membership, were retained from the original analysis, whereas pathway enrichment used to evaluate functional convergence was taken from the leave-one-gene-out analysis.
+For candidate-gene prioritisation, pathway and leading-edge membership are first defined from the pass 1 GSEA performed on the complete ranked gene list. To prevent circular support arising from a candidate's own expression statistic, GSEA is then repeated separately for each candidate after removing that gene from both the ranked list and the corresponding pathway gene sets (*this leave-one-out procedure is the key difference from the first-pass analysis*). Candidate–pathway relationships, including leading-edge membership, are retained from the original analysis, whereas pathway enrichment used to evaluate functional convergence is taken from the leave-one-gene-out analysis.
 
-Candidate significance was assessed against an empirical null distribution of exome-testable genes matched for pathway-annotation profile. For each gene, this profile was defined by the number of associated pathways falling within predefined effective pathway-size classes, thereby accounting jointly for pathway annotation burden and the distribution of specific versus broad pathways. Two definitions of candidate–pathway association were evaluated independently. Under set membership, a candidate was associated with all tested pathways containing that gene; under leading-edge membership, it was associated only with significantly enriched pathways in which the gene occurred in the pass 1 GSEA leading edge. For each candidate, the minimum leave-one-gene-out enrichment p-value across the relevant pathways was used as the test statistic and compared with the corresponding minimum-p distribution among background genes matched on pathway-size profile. Separate null distributions and matching strata were constructed for the set-membership and leading-edge analyses.
+Candidate significance is assessed against an empirical null distribution of exome-testable genes matched for pathway-annotation profile. For each gene, this profile is defined by the number of associated pathways falling within predefined effective pathway-size classes, thereby accounting jointly for pathway annotation burden and the distribution of specific versus broad pathways. Two definitions of candidate–pathway association are evaluated independently. Under set membership, a candidate is associated with all tested pathways containing that gene; under leading-edge membership, it is associated only with significantly enriched pathways in which the gene occurred in the pass 1 GSEA leading edge. For each candidate, the minimum leave-one-gene-out enrichment p-value across the relevant pathways is used as the test statistic and compared with the corresponding minimum-p distribution among background genes matched on pathway-size profile. Separate null distributions and matching strata are constructed for the set-membership and leading-edge analyses.
 
-Empirical p-values were calculated with a +1 correction as
+Empirical p-values are calculated with a +1 correction as
 ```math
 p_{\mathrm{emp}}
 =
@@ -857,7 +859,7 @@ p_{\mathrm{emp}}
 1+n_{\mathrm{null}}
 }
 ```
-and were Benjamini–Hochberg adjusted separately within the two test classes.
+and are Benjamini–Hochberg adjusted separately within the two test classes.
 
 *scripts/lpb-post-drop-minp-size-matched-test.R*<br> The core function of the analysis.
 
