@@ -2,30 +2,24 @@
 ## The original study
 <img src="images/fig1.png" alt="SZ-PGS distribution with SZ07 highlighted as the red dot + method" width="65%"><br>
 
-This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on single-case (n-of-1) analysis against cohort and reference data.
+This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on single-case (n-of-1) analysis against cohort and reference data. Although the study was motivated by the availability of transcriptome data for a low SZ-PRS brain, this repository focuses on exome mutation prioritisation and the joint use of RNA-seq and exome data in the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). Brain-specific context appears throughout the workflow but is not required.
 
 Link to the study: TBA
 
-Although the study was motivated by the availability of transcriptome data for a low SZ-PRS brain, this repository focuses on exome mutation prioritisation and the joint use of RNA-seq and exome data in the DROP pipeline ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)). Brain-specific context appears throughout the workflow but is not required.
-
 ## Overview
-This repository provides an integrated workflow for identifying and prioritising potentially relevant rare coding variants and evaluating their transcriptomic consequences using matched whole-exome sequencing and RNA-seq data, with a focus on **single-case (n=1) analysis against cohort and reference data**.
-
 The exome workflow performs variant calling, annotation, quality control, and prioritisation of rare variants into candidate tiers based on predicted functional impact, gene constraint, population frequency, and disease-relevant gene sets. The RNA-seq workflow generates analysis-ready alignments and quality-control metrics for the DROP framework, enabling detection of aberrant expression, aberrant splicing, and monoallelic expression. Additional components support HLA typing, contamination screening, sex inference, cell-composition assessment, and cell-type deconvolution.
 
 ## Ia. Variant-calling and annotation: reference data acquisition and post-processing
-*scripts/lpb-exome-priritisation-collect-data.sh*<br>
+*scripts/lpb-exome-prioritisation-collect-data.sh*<br>
 A bash pipeline designed to assemble all reference and annotation resources required by the variant-calling and annotation workflow. The script is idempotent, supports atomic resumption after interruption, and produces a manifest (TSV format) recording each managed file's path, size, SHA-256 hash, source URL, and validation status. Tested on Ubuntu in an environment with 6 vCPUs and 96 GB RAM.
 
 Usage:
 ```sh
 sudo chmod +x lpb-exome-prioritisation-collect-data.sh 
-# the script collects data into the script's directory by default
-sudo lpb-exome-prioritisation-collect-data.sh
-# collects to a different directory
-sudo lpb-exome-prioritisation-collect-data.sh --root /mnt/bigdisk/exome_pipe
+sudo lpb-exome-prioritisation-collect-data.sh # the script collects data into the script's directory by default
+sudo lpb-exome-prioritisation-collect-data.sh --root /mnt/bigdisk/exome_pipe # collects to a different directory
 # also collects data for deconvolution, requires data recipes and the deconv driver to be
-# stored at /<collection_script_location>/scripts/scripts_to_make_deconv_reference
+# stored at ./scripts/scripts_to_make_deconv_reference
 sudo env BUILD_DECONV_REFERENCE=1 bash lpb-exome-prioritisation-collect-data.sh --deconv-dir /rnaseq_pipe_path/00_additional_files/deconv
 ```
 The disk space requirement: ~350GB for the reference data (without scRNA-seq for deconvolution, expect ~40GB per sc dataset) + ~12GB per exome. Root priveledges are required only to run apptainer for building the arcasHLA reference.
@@ -237,7 +231,7 @@ A Python script classifies per-sample variants into three tiers (rule `r12_tier_
 
 ## II. RNA-seq alignment and QC pipeline for DROP
 *scripts/lpb-rnaseq-pipe.smk*<br>
-A Snakemake workflow processes paired-end (or single-end) RNA-seq FASTQ files into STAR-aligned, duplicate-marked BAM files suitable as input to the DROP framework ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)) for monoallelic-expression, expression-outlier, and splicing-outlier detection. Alignment parameters and reference files match the GTEx Analysis V11 RNA-seq pipeline exactly, allowing direct merging of the resulting gene-level read counts with the GTEx V11 expression matrix for OUTRIDER reference-panel expansion.
+A Snakemake workflow processes paired-end (or single-end) RNA-seq FASTQ files into STAR-aligned, duplicate-marked BAM files suitable as input to the DROP framework ([Yépez et al. 2021](https://doi.org/10.1038/s41596-020-00462-5)) for monoallelic-expression, expression-outlier, and splicing-outlier detection. Alignment used GTEx-compatible reference resources (V11) and closely matched alignment settings.
 
 ### Usage
 ```sh
@@ -534,7 +528,7 @@ Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical dupl
 |MEDIAN_3PRIME_BIAS|Median ratio of coverage at the 3' end vs. the middle. The single most diagnostic degradation signature for poly-A libraries. Values near 0.5 = balanced; >0.7 = significant 3' enrichment from RNA degradation (poly-A primers pulled coverage toward the 3' end as transcripts fragmented); >0.8 = severe degradation.|
 |MEDIAN_5PRIME_TO_3PRIME_BIAS|Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.|
 |PCT_CORRECT_STRAND_READS|For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.|
-|Uniquely_mapped|Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; below 10M, autoencoder denoising breaks down and outlier detection becomes unreliable.|
+|Uniquely_mapped|Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; Lower usable sequencing depth reduces coverage and power, particularly for weakly expressed genes.|
 |Uniquely_mapped_pct|STAR's reported percentage of input reads that mapped uniquely (e.g., 90.10%). Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).|
 
 These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
@@ -713,7 +707,7 @@ Verdicts: `mixture` (ΔBIC ≥ 10 and α̂ ≥ 0.03), `single_donor` (ΔBIC < 10
 Per sample:
  - `../03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam` + index (canonical DROP input),
  - `../03_bam_star/{sample}/{sample}.SJ.out.tab` (FRASER input),
- - `../03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab` (OUTRIDER input, mergeable with GTEx V11 counts),
+ - `../03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab` (STAR counts, note that GTEx v11 uses RNA-SeQC for gene quantification),
  - `../03_bam_star/{sample}/{sample}.Aligned.toTranscriptome.out.bam` (RSEM input if needed)
  
 Cohort-level:
@@ -759,12 +753,6 @@ Yépez, Vicente A., Christian Mertes, Michaela F. Müller, Daniela Klaproth-Andr
 “Detection of Aberrant Gene Expression Events in RNA Sequencing Data.”
 Nature Protocols 16 (2): 1276–96. https://doi.org/10.1038/s41596-020-00462-5.
 
-Installation and manual are described here:<br>
-https://gagneurlab-drop.readthedocs.io/en/latest/installation.html
-```sh
-mamba create -n drop_env -c conda-forge -c bioconda drop --override-channels
-```
-
 Input files:
 - BAM files and their respective index files from the RNA-seq pipeline (`../03_bam_star`)
 - VCF files from the exome pipeline and their respective index files (`../10_per_sample_vcf`). Only used for the MAE module.
@@ -776,31 +764,43 @@ Input files:
 https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression<br>
 https://gtexportal.org/home/downloads/adult-gtex/metadata (contains data for age at death and sex covariates)
 
-The GTEx data should be harmonised with the data in the experiment (the script *lpb-drop-align_gtex_counts.R*), for example:
+The GTEx data should be harmonised with the data in the experiment (the script *lpb-drop-align-gtex-counts.R*), for example:
 ```sh
 cd /path/to/drop/project/folder/Data
-wget https://storage.googleapis.com/adult-gtex/bulk-gex/v11/rna-seq/counts-by-tissue/gene_reads_adult_gtex_v11_brain_cortex.gct.gz
-sudo chmod +x /path/to/script/lpb-drop-align_gtex_counts.R
+wget https://storage.googleapis.com/adult-gtex/bulk-gex/v11/rna-seq/counts-by-tissue/gene_reads_adult_gtex_v11_brain_frontal_cortex_ba9.gct.gz
+sudo chmod +x /path/to/script/lpb-drop-align-gtex-counts.R
 # needs R to be installed
-sudo Rscript /path/to/script/lpb-drop-align_gtex_counts.R \
+sudo Rscript /path/to/script/lpb-drop-align-gtex-counts.R \
     /path/to/rnaseq-drop/00_additional_files/gtex_v11_refs/gencode.v47.GRCh38.annotation.gtf \
-    gene_reads_adult_gtex_v11_brain_cortex.gct.gz \
-    gene_reads_adult_gtex_v11_brain_cortex.txt
+    gene_reads_adult_gtex_v11_brain_frontal_cortex_ba9.gct.gz \
+    gene_reads_adult_gtex_v11_brain_frontal_cortex_ba9.txt
 ```
 
 Helpful notes:
 - in the mixed in-house and external sample table, annotation should be set as NAs for the in-house samples for some reason.
 - for the external counts matrix, set "geneID" as a gene identifier name.
 
+Installation and manual are described here:<br>
+https://gagneurlab-drop.readthedocs.io/en/latest/installation.html
+
+Basically:
+```sh
+mamba create -n drop_env -c conda-forge -c bioconda drop --override-channels
+conda activate drop_env
+cd /path/to/drop/project/folder
+drop init
+snakemake -j 6
+```
+
 ## IV. System analysis on top of the OUTRIDER results
-OUTRIDER results allow to investigate whether genes with unusually high or low expression in a sample are enriched in specific biological processes by applying gene set enrichment analysis (GSEA) to OUTRIDER-derived z-scores, analogous to the application of GSEA to gene-level statistics from differential expression analyses. It has advantages over other ssPA methods since the ranking metric removes confounders far more thoroughly (OUTRIDER autoencoder vs simple standardization) and preserves signals from sample-level outliers, which is exactly what we need for VUSs interrogation.
+OUTRIDER results allow to investigate whether genes with unusually high or low expression in a sample are enriched in specific biological processes by applying gene set enrichment analysis (GSEA) to OUTRIDER-derived z-scores, analogous to the application of GSEA to gene-level statistics from differential expression analyses. In the dataset used in the study pathway enrichment based on OUTRIDER-derived z-scores showed weaker associations with neuronal specificity than conventional GSVA scores. This suggests reduced sensitivity to the assessed compositional axis.
 
 The analysis is organised into three passes (P1: discovery, P2: gene-specific, trying find support for VUS, P3: cohort-level comparison).
 
 ### First pass
 *scripts/lpb-post-drop-outrider-1st-pass.R*<br>
 Initial GSEA based on the OUTRIDER results. Here you can use a variety of zScore-based metrics, but one that makes sense:
-1. should be conservative is a sense that it prioritises weak effects,
+1. should be conservative in a sense that it limits the combined magnitude to the weakest sample-level effect,
 2. should penalise sign discordance,
 3. does not introduce bias when using different sample sizes, and
 4. does not introduce additional hyperparameters.
@@ -837,7 +837,7 @@ Helper functions:<br>
 *scripts/lpb-post-drop-fgsea-emap.R* — analagous to the `emapplot()` function from [`enrichplot`](https://doi.org/10.18129/B9.bioc.enrichplot).<br>
 <img src="images/ba9_gtex_SZ07_emapplot_all.png" alt="Reconstructed emap" width="65%"><br>
 
-*scripts/lpb-drop-post-outrider-plot-gsea-highlighted.R* — similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
+*scripts/lpb-post-drop-outrider-plot-gsea-highlighted.R* — similar to `fgsea::plotGseaTable()` that prints GSEA results table with tier-gene highlights (the fgsea tool is from [Korotkevich et al 2016](https://www.biorxiv.org/content/10.1101/060012v3)).<br>
 <img src="images/ba9_gtex_SZ07_gsea_kegg_plot.png" alt="Compact GSEA visualisation" width="65%"><br>
 
 ### Second pass
