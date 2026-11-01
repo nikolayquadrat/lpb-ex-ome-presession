@@ -87,7 +87,8 @@
 #   B. SpliceAI INDEL VCF - via Illumina BaseSpace CLI (free account)
 #   C. dbNSFP v5.3.1a - via genos.us (license form per session)
 #   D. REVEL - via Google Sites (license form). Auto-converted on re-run.
-#   E. SCHEMA / BipEx / ASC TSVs - via web-app "Download" buttons
+#   E. SCHEMA 1.0 / BipEx / ASC TSVs - via web-app "Download" buttons
+#      SCHEMA 2.0 is downloaded automatically from a pinned release.
 #   F. LOFTEE supporting data - if peering to personal.broadinstitute.org
 #      fails, see end-of-run notes for AWS-staging workaround
 #
@@ -107,6 +108,11 @@ DBNSFP_VERSION="5.3.1a"           # current academic dbNSFP release
 GNOMAD_RELEASE="4.1"              # gnomAD VCF release line
 CADD_VERSION="v1.7"               # CADD score version
 CLINVAR_DATE="20260420"           # dated ClinVar archive snapshot (see notes)
+SCHEMA2_RELEASE="2026-08-21"      # official SCHEMA 2.0 gene-results snapshot
+SCHEMA2_URL="https://storage.googleapis.com/exome-results-browsers-public/downloads/${SCHEMA2_RELEASE}/SCHEMA/SCHEMA_v2_gene_results.tsv.bgz"
+# Locally verified hash of the decompressed official snapshot, not an upstream
+# checksum file. Update together with SCHEMA2_RELEASE when changing releases.
+SCHEMA2_TSV_SHA256="fa5f02b6a65e1865c908fe67452c9e4e008380c5dfb727b1df72559975364b16"
 GENCODE_VERSION="47"              # GENCODE gene model (GRCh38, chr-prefixed);
                                   # basic annotation. Used to build the per-gene
                                   # coding BED for exome callability / the
@@ -1436,11 +1442,68 @@ section "7. Gene panels & gnomAD constraint"
 cd "$DATA_DIR"
 
 manual_needed "SCHEMA_gene_results.tsv" \
-    "https://schema.broadinstitute.org/results -> 'Download' button -> save into $DATA_DIR. Re-run THIS script - it auto-joins HGNC symbols."
+    "https://schema.broadinstitute.org/downloads -> Previous SCHEMA release -> SCHEMA 1.0 gene results (TSV); decompress to $DATA_DIR/SCHEMA_gene_results.tsv. Re-run THIS script - it auto-joins HGNC symbols."
 manual_needed "BipEx_gene_results.tsv" \
     "https://bipex.broadinstitute.org/downloads -> 'BipEx gene results (TSV)' -> save into $DATA_DIR. Re-run THIS script - it auto-joins HGNC symbols and filters to the canonical group (BIPEX_GROUP, default 'Bipolar Disorder')."
 manual_needed "ASC_gene_results.tsv" \
     "https://asc.broadinstitute.org/downloads -> 'ASC gene results (TSV)' -> save into $DATA_DIR. Re-run THIS script - it auto-joins HGNC symbols."
+
+# SCHEMA 2.0 is separate from the legacy SCHEMA 1.0 HGNC-joined panel.
+# It already contains gene_symbol. Keep all rows: Tier C selects the published
+# FDR5 genes downstream using schema_case_control_p_value (not a q-value).
+schema2_prepare_tsv() {
+    python3 - "$1" "$2" "$SCHEMA2_TSV_SHA256" <<'PYEOF'
+import csv, gzip, hashlib, io, os, sys
+from pathlib import Path
+source, target = map(Path, sys.argv[1:3])
+expected = sys.argv[3]
+try:
+    data = source.read_bytes()
+    if source.suffix == ".bgz":
+        data = gzip.decompress(data)
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise ValueError("SCHEMA 2.0 snapshot checksum mismatch; inspect/remove the invalid file before retrying")
+    reader = csv.DictReader(io.StringIO(data.decode("utf-8")), delimiter="\t")
+    required = {"gene_id", "gene_symbol", "group", "schema_case_control_p_value"}
+    if not required.issubset(reader.fieldnames or []):
+        raise ValueError("SCHEMA 2.0 table lacks required Tier C columns")
+    rows = list(reader)
+    if not rows or not any(r["group"] == "meta" for r in rows):
+        raise ValueError("SCHEMA 2.0 table has no meta-analysis rows")
+    if source != target:
+        partial = target.with_name(target.name + ".partial")
+        try:
+            partial.write_bytes(data)
+            os.replace(partial, target)
+        finally:
+            if partial.exists():
+                partial.unlink()
+    print(f"SCHEMA 2.0: validated {len(rows)} rows; SHA-256 matches pinned snapshot")
+except Exception as exc:
+    print(f"SCHEMA 2.0 preparation failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+}
+
+SCHEMA2_TSV="$DATA_DIR/SCHEMA_v2_gene_results.tsv"
+SCHEMA2_BGZ="$DATA_DIR/SCHEMA_v2_gene_results.${SCHEMA2_RELEASE}.tsv.bgz"
+if (( HAVE_PYTHON == 0 )); then
+    log ERROR "python3 unavailable; cannot validate/decompress SCHEMA 2.0"
+    FAILED_ITEMS+=("post:SCHEMA 2.0 (no python)"); N_FAIL+=1
+elif [[ -s "$SCHEMA2_TSV" ]]; then
+    if post_process_step "validate existing SCHEMA 2.0 TSV" \
+            schema2_prepare_tsv "$SCHEMA2_TSV" "$SCHEMA2_TSV"; then
+        log SKIP "SCHEMA 2.0 TSV already present and valid"
+        N_SKIP+=1
+        manifest_record "$SCHEMA2_TSV" "verified_ok" "$SCHEMA2_URL"
+    fi
+elif get "$SCHEMA2_URL" -- "$SCHEMA2_BGZ"; then
+    if post_process_step "decompress and validate SCHEMA 2.0 TSV" \
+            schema2_prepare_tsv "$SCHEMA2_BGZ" "$SCHEMA2_TSV"; then
+        manifest_record "$SCHEMA2_TSV" "post-processed" "$SCHEMA2_URL"
+    fi
+fi
+expect_file "$SCHEMA2_TSV"
 
 # DDG2P via PanelApp
 PANELAPP_TSV="https://panelapp.genomicsengland.co.uk/panels/484/download/All/"
@@ -2231,13 +2294,15 @@ D. REVEL
    2. Drop revel_with_transcript_ids.zip into $VEP_PLUGIN_DATA
    3. Re-run THIS script - it auto-converts.
 
-E. SCHEMA / BipEx / ASC TSVs
+E. SCHEMA 1.0 / BipEx / ASC TSVs
    Path: $DATA_DIR/{SCHEMA,BipEx,ASC}_gene_results.tsv
    Web-app "Download" buttons:
-     SCHEMA: https://schema.broadinstitute.org/results
+     SCHEMA 1.0: https://schema.broadinstitute.org/downloads (Previous SCHEMA release)
      BipEx:  https://bipex.broadinstitute.org/results
      ASC:    https://asc.broadinstitute.org/results
    The script auto-creates SCHEMA_gene_results_with_hgnc.tsv on next run.
+   SCHEMA 2.0 is AUTOMATIC: $SCHEMA2_TSV
+   It already has gene symbols and is kept separate from SCHEMA 1.0.
 
 F. gnomAD strip + concat (auto-runs by default)
    The strip+concat helper auto-runs at the end of section 6 unless you
@@ -2285,7 +2350,9 @@ ALSO AUTOMATED
   - SpliceAI SNV: Ensembl mirror, no auth
   - LOFTEE supporting data: aria2 from Broad
   - DDG2P: TSV with JSON->TSV fallback
-  - SCHEMA HGNC join: auto-runs once SCHEMA TSV is in place
+  - SCHEMA 1.0 HGNC join: auto-runs once the legacy TSV is in place
+  - SCHEMA 2.0: pinned download, checksum validation and atomic decompression;
+      output $SCHEMA2_TSV (no HGNC join needed)
   - REVEL conversion: auto-runs once the ZIP is in place
   - dbNSFP md5 verification: auto-runs once .md5 is in place
   - gnomAD strip+concat: auto-runs after per-chromosome downloads complete;
