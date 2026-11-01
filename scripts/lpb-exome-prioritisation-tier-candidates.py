@@ -24,8 +24,9 @@ Tier B  (Missense, rank-only)
     splicing); this tier feeds downstream hand-curation.
 
 Tier C  (Gene-panel long-shots)
-    * ANY rare protein-altering variant in SCHEMA FDR<0.25 / BipEx / ASC /
-      DDG2P gene sets, regardless of predicted impact.
+    * ANY rare protein-altering variant in SCHEMA 1.0 FDR<=0.25,
+      SCHEMA 2.0 published FDR 5% genes, or the other configured gene sets,
+      regardless of predicted impact (unless already assigned Tier A/B).
     Rationale: prior-probability boost for known psychiatric / NDD genes.
 
 Common filters applied to all tiers:
@@ -84,7 +85,13 @@ SPLICEAI_THRESHOLD   = 0.20     # min of max(AG,AL,DG,DL) to flag splice
 ALPHAMIS_LIKELY_PATH = 0.564    # AlphaMissense likely_pathogenic threshold
 REVEL_THRESHOLD      = 0.773    # ClinGen-endorsed thresholds (0.773 for moderate evidence, 0.932 for strong evidence under ACMG PP3 criteria).
 LOEUF_THRESHOLD      = 0.60     # gnomAD constraint: constrained genes (from gnomAD v4.0+ (2024))
-SCHEMA_FDR_MAX       = 0.25     # include sub-significant SCHEMA genes
+SCHEMA_FDR_MAX       = 0.25     # include sub-significant SCHEMA 1.0 genes
+# Sealock et al. 2026, Figure 1 / authors' figures/figure1.r: the published
+# global FDR 5% cutoff across PTV and PTV+damaging-missense burden tests.
+# This reproduces 40 genes in the official 2026-08-21 browser download.
+# Do not treat the minimum per-gene p-value as an FDR-adjusted value.
+SCHEMA2_FDR5_P_MAX   = 6.84e-5
+SCHEMA2_EXOME_P_MAX  = 1.31e-6
 ASC_FDR_MAX          = 0.25     # include sub-significant ASC genes
 
 LOF_CONSEQUENCES = {
@@ -531,6 +538,56 @@ def load_gene_annotations(path, prefix,
     return genes, annot
 
 
+
+def load_schema2_annotations(path):
+    """Load the official SCHEMA 2.0 browser TSV using the published FDR5 cutoff.
+
+    The optional CLI argument can be omitted for legacy standalone runs.
+    A supplied file must be readable and have the expected meta-analysis
+    columns; fail rather than silently adding every gene when fields differ.
+    Input is the full uncompressed TSV, not a prefiltered significant list.
+    Source: https://schema.broadinstitute.org/downloads
+    Cutoff: https://github.com/jsealock1/schema2/blob/main/figures/figure1.r
+    """
+    if path is None:
+        return set(), pd.DataFrame()
+    df = pd.read_csv(path, sep="\t", low_memory=False)
+    p_col = "schema_case_control_p_value"
+    required = {"gene_id", "gene_symbol", "group", p_col}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"SCHEMA 2.0 table missing required columns: {sorted(missing)}")
+    df = df.loc[df["group"] == "meta"].copy()
+    if df.empty:
+        raise ValueError("SCHEMA 2.0 table contains no meta-analysis rows")
+    symbols = df["gene_symbol"].astype("string").str.strip()
+    if symbols.isna().any() or symbols.eq("").any():
+        raise ValueError("SCHEMA 2.0 meta-analysis rows have missing gene symbols")
+    df["gene_symbol"] = symbols
+    if df["gene_id"].duplicated().any() or symbols.duplicated().any():
+        raise ValueError("SCHEMA 2.0 meta-analysis rows must be unique per gene")
+    pvals = pd.to_numeric(df[p_col], errors="coerce")
+    invalid = (df[p_col].notna() & pvals.isna()) | (pvals.notna() & ~pvals.between(0, 1))
+    if invalid.any():
+        raise ValueError("SCHEMA 2.0 case-control p-values must be numeric in [0, 1]")
+    if not pvals.notna().any():
+        raise ValueError("SCHEMA 2.0 table has no valid case-control p-values")
+    df[p_col] = pvals
+    df = df.loc[pvals <= SCHEMA2_FDR5_P_MAX].copy()
+    df["evidence_level"] = np.where(df[p_col] <= SCHEMA2_EXOME_P_MAX,
+                                    "exome_wide", "FDR5")
+    df["selection_p_cutoff"] = SCHEMA2_FDR5_P_MAX
+    columns = ["gene_id", p_col, "evidence_level", "selection_p_cutoff",
+               "ptv_p_value", "ptv_odds_ratio", "ptv_case_carrier", "ptv_control_carrier",
+               "ptv_mis_p_value", "ptv_mis_odds_ratio", "ptv_mis_case_carrier",
+               "ptv_mis_control_carrier", "n_cases", "n_controls"]
+    columns = [col for col in columns if col in df.columns]
+    annot = df.set_index("gene_symbol")[columns].add_prefix("SCHEMA2_")
+    genes = set(annot.index)
+    print(f"  SCHEMA 2.0 published FDR5 panel: {len(genes)} genes from {path}",
+          file=sys.stderr)
+    return genes, annot
+
 def aggregate_panel_rows(path, prefix, gene_col=None, agg_columns=None,
                          joiner="; "):
     """
@@ -718,6 +775,8 @@ def main():
     ap.add_argument("--sample_vcf", required=True)
     ap.add_argument("--sample_id", required=True)
     ap.add_argument("--schema_genes", required=True)
+    ap.add_argument("--schema2_genes", default=None,
+                    help="Official uncompressed SCHEMA 2.0 gene-results TSV; adds published FDR5 genes")
     ap.add_argument("--bipex_genes", required=True)
     ap.add_argument("--asc_genes", required=True)
     ap.add_argument("--ndd_genes", required=True)
@@ -881,6 +940,8 @@ def main():
                         "Case PTV", "Ctrl PTV"],
     )
 
+    schema2_set, schema2_annot = load_schema2_annotations(args.schema2_genes)
+
     # BipEx and ASC: the public exome-browser TSVs use slightly different
     # column conventions across releases. We list several common candidates
     # and let load_gene_annotations skip the ones that don't exist in the
@@ -949,7 +1010,7 @@ def main():
     else:
         ndd_annot = pd.DataFrame()
 
-    panel_set = schema_set | bipex_set | asc_set | ndd_set
+    panel_set = schema_set | schema2_set | bipex_set | asc_set | ndd_set
     print(f"  combined panel gene set: {len(panel_set)} genes",
           file=sys.stderr)
 
@@ -994,7 +1055,8 @@ def main():
     n_tier_c = int(tier_c_mask.sum())
 
     # Per-panel boolean membership flags -- handy for filtering reports
-    rare["in_SCHEMA"] = rare["SYMBOL"].isin(schema_set)
+    rare["in_SCHEMA"] = rare["SYMBOL"].isin(schema_set)  # SCHEMA 1.0 (legacy name)
+    rare["in_SCHEMA2"] = rare["SYMBOL"].isin(schema2_set)
 
     # Annotation-only flag: gene is present in the BipEx browser/result table.
     rare["has_BipEx_annotation"] = rare["SYMBOL"].isin(bipex_set)
@@ -1007,6 +1069,7 @@ def main():
     # that panel's columns, which is the correct semantics.
     panel_annotations = []
     for name, annot in (("SCHEMA", schema_annot),
+                        ("SCHEMA2", schema2_annot),
                         ("BipEx",  bipex_annot),
                         ("ASC",    asc_annot),
                         ("DDG2P",  ndd_annot)):
@@ -1216,11 +1279,11 @@ def main():
     group4 = [
         "is_panel_gene",
         # Per-panel boolean membership flags
-        "in_SCHEMA", "has_BipEx_annotation", "in_ASC", "in_DDG2P",
+        "in_SCHEMA", "in_SCHEMA2", "has_BipEx_annotation", "in_ASC", "in_DDG2P",
     ]
     # Per-panel annotation columns (already panel-prefixed). Add them in
     # panel order so columns from the same panel stay grouped together.
-    for prefix in ("SCHEMA", "BipEx", "ASC", "DDG2P"):
+    for prefix in ("SCHEMA", "SCHEMA2", "BipEx", "ASC", "DDG2P"):
         group4 += [c for c in rare.columns
                    if c.startswith(prefix + "_") and c not in group4]
     # ClinVar fields
