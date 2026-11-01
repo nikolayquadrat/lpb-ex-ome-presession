@@ -32,6 +32,7 @@ import gzip
 import math
 import pandas as pd
 import numpy as np
+from textwrap import dedent
 
 # -----------------------------------------------------------------------------
 # User-tunable parameters
@@ -599,6 +600,50 @@ if not DECONV_ACTIVE:
     else:
         _reason = "disabled (set -e DECONV_ENABLED=1 at container start to turn on)"
     print(f"[r09] deconvolution stage inactive: {_reason}")
+
+# =============================================================================
+# r10c-r10f -- RNA-SeQC expression quantification for comparison with GTEx V11
+#
+# Uses:
+#   - existing duplicate-marked, coordinate-sorted STAR BAMs
+#   - RNA-SeQC 2.4.3 from the pinned GTEx V11 container
+#   - the exact GTEx V11 collapsed GENCODE v47 gene annotation
+#
+#   unstranded     : default for comparison with GTEx
+#   rf             : reverse-stranded local libraries
+#   fr             : forward-stranded libraries -- not implemented
+#
+# Complementary to the existing STAR-based r10a/r10b outputs.
+# =============================================================================
+
+RNASEQC_CONTAINER = (
+    "docker://broadinstitute/gtex_rnaseq@sha256:"
+    "9f4901789e527cdf0f8436e30cc1474ecad467b9251efeb0a0de3b8130fb45ad"
+)
+
+RNASEQC_GTF = REF_DIR + "/gencode.v47.genes.gtf"
+RNASEQC_GTF_URL = (
+    "https://storage.googleapis.com/adult-gtex/"
+    "references/v11/reference-tables/gencode.v47.genes.gtf"
+)
+RNASEQC_GTF_MD5 = "a1d46cd2cc851d94a0a14eb07fb5788e"
+
+RNASEQC_OUT = "/tmp/data/10_rnaseqc"
+
+if not samples or len(samples) != len(set(samples)):
+    raise ValueError("RNA-SeQC requires nonempty, unique sample names.")
+
+_RNASEQC_SAMPLE_TABLE = sample_data.set_index("name")
+
+def _r10_rnaseqc_unpaired(wc):
+    """Match the pipeline's dataset2 convention for single-end samples."""
+    mate2 = _RNASEQC_SAMPLE_TABLE.loc[wc.sample, "dataset2"]
+    single_end = (
+        pd.isna(mate2)
+        or str(mate2).strip().lower() in ("", "nan", "none")
+    )
+    return "--unpaired" if single_end else ""
+
 
 # =============================================================================
 # 11. RNA-seq genotype extraction, chip concordance and kinship  (r11a .. r11t)
@@ -1298,7 +1343,11 @@ rule all:
         *(["/tmp/data/06_hla/00_hla_summary_classII.tsv"] if ARCASHLA_ENABLED else []),
         "/tmp/data/04_qc/00_inferred_sex.tsv",
         "/tmp/data/04_qc/00_cell_marker_expression.tsv",
+        
         "/tmp/data/04_qc/00_expression_summary.xlsx",
+        "/tmp/data/10_rnaseqc/00_drop_gene_counts.unstranded.tsv",
+        "/tmp/data/10_rnaseqc/00_drop_gene_counts.rf.tsv",
+
         ((expand(f"{DECONV_OUT}/{{ref}}.tsv", ref=DECONV_REFERENCES)
           + expand(f"{DECONV_OUT}/{{ref}}/{{sample}}/proportions.tsv",
                    ref=DECONV_REFERENCES, sample=samples)) if DECONV_ACTIVE else [])
@@ -2128,11 +2177,10 @@ rule r04b_make_rrna_intervals:
 
 rule r04c_picard_rnaseq_metrics:
     """
-    Per-sample CollectRnaSeqMetrics. Strand-specificity could be set to NONE
-    update this to SECOND_READ_TRANSCRIPTION_STRAND (TruSeq dUTP/Stranded mRNA) or
-    FIRST_READ_TRANSCRIPTION_STRAND. Wrong strand setting inflates the
-    PCT_CORRECT_STRAND_READS metric but does NOT affect 3'/5' bias - so
-    NONE is safe for primary QC purpose.
+    Collect RNA-seq QC metrics for reverse-stranded libraries:
+    R1 is antisense and R2 is sense relative to the transcript.
+    STRAND_SPECIFICITY controls correct/incorrect-strand metrics;
+    base-distribution and transcript-coverage metrics are unaffected.
     """
     input:
         bam = "/tmp/data/03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam",
@@ -4564,6 +4612,244 @@ rule r10b_expression_xlsx:
         ls -l {output.xlsx}
         """
 
+# =============================================================================
+# r10c-r10f -- RNA-SeQC expression quantification for comparison with GTEx V11
+# =============================================================================
+
+rule r10c_rnaseqc_annotation:
+    """Download the published collapsed gene model, not the STAR GTF."""
+    output:
+        gtf = RNASEQC_GTF,
+    params:
+        url = RNASEQC_GTF_URL,
+        md5 = RNASEQC_GTF_MD5,
+        refdir = REF_DIR,
+    log:
+        RNASEQC_OUT + "/logs/annotation.log",
+    threads: 1
+    singularity:
+        RNASEQC_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.refdir:q} "$(dirname {log:q})"
+        exec > {log:q} 2>&1
+
+        wget --tries=5 --timeout=60 \
+            -O {output.gtf:q}.part {params.url:q}
+
+        printf '%s  %s\n' \
+            {params.md5:q} {output.gtf:q}.part \
+            | md5sum --check -
+
+        mv {output.gtf:q}.part {output.gtf:q}
+        """
+
+rule r10d_rnaseqc_quantify:
+    """RNA-SeQC on the same marked BAMs supplied to DROP."""
+    input:
+        bam = (
+            "/tmp/data/03_bam_star/{sample}/"
+            "{sample}.Aligned.sortedByCoord.out.patched.md.bam"
+        ),
+        bai = (
+            "/tmp/data/03_bam_star/{sample}/"
+            "{sample}.Aligned.sortedByCoord.out.patched.md.bam.bai"
+        ),
+        gtf = rules.r10c_rnaseqc_annotation.output.gtf,
+    output:
+        counts = RNASEQC_OUT + "/{sample}.{mode}.gene_reads.gct.gz",
+        tpm = RNASEQC_OUT + "/{sample}.{mode}.gene_tpm.gct.gz",
+        exons = RNASEQC_OUT + "/{sample}.{mode}.exon_reads.gct.gz",
+        metrics = RNASEQC_OUT + "/{sample}.{mode}.metrics.tsv",
+        version = RNASEQC_OUT + "/{sample}.{mode}.version.txt",
+    params:
+        outdir = RNASEQC_OUT,
+        prefix = lambda wc: (
+            RNASEQC_OUT + "/" + wc.sample + "." + wc.mode
+        ),
+        strand = lambda wc: (
+            "" if wc.mode == "unstranded" else "--stranded rf"
+        ),
+        unpaired = _r10_rnaseqc_unpaired,
+    wildcard_constraints:
+        mode = "unstranded|rf",
+    log:
+        RNASEQC_OUT + "/{sample}.{mode}.log",
+    threads: 1
+    resources:
+        mem_mb = 8000,
+    singularity:
+        RNASEQC_CONTAINER
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p {params.outdir:q} "$(dirname {log:q})"
+        exec > {log:q} 2>&1
+
+        rnaseqc --version > {output.version:q} 2>&1
+        cat {output.version:q}
+        grep -Eq '(^|[^0-9])2[.]4[.]3([^0-9]|$)' {output.version:q}
+
+        # Follow GTEx's RNA-SeQC wrapper: standard counting defaults,
+        # sample identifier and verbose output. No --legacy mode.
+        rnaseqc \
+            {input.gtf:q} \
+            {input.bam:q} \
+            {params.outdir:q} \
+            -s {wildcards.sample:q}.{wildcards.mode:q} \
+            {params.strand} \
+            {params.unpaired} \
+            -vv
+
+        test -s {output.metrics:q}
+        test -s {params.prefix:q}.gene_reads.gct
+        test -s {params.prefix:q}.gene_tpm.gct
+        test -s {params.prefix:q}.exon_reads.gct
+
+        gzip -f \
+            {params.prefix:q}.gene_reads.gct \
+            {params.prefix:q}.gene_tpm.gct \
+            {params.prefix:q}.exon_reads.gct
+        """
+
+rule r10e_rnaseqc_expression_tables:
+    """
+    Merge per-sample GCT files without modifying counts or recomputing TPM.
+
+    Expression tables: gene_id, gene_name, then sample columns.
+    DROP table: geneID, then sample columns; unnormalised integer counts.
+    """
+    input:
+        counts = expand(
+            RNASEQC_OUT + "/{sample}.{{mode}}.gene_reads.gct.gz",
+            sample=samples,
+        ),
+        tpm = expand(
+            RNASEQC_OUT + "/{sample}.{{mode}}.gene_tpm.gct.gz",
+            sample=samples,
+        ),
+    output:
+        counts = RNASEQC_OUT + "/00_expression_counts.{mode}.tsv.gz",
+        tpm = RNASEQC_OUT + "/00_expression_tpm.{mode}.tsv.gz",
+        drop_counts = RNASEQC_OUT + "/00_drop_gene_counts.{mode}.tsv",
+    params:
+        sample_names = samples,
+    wildcard_constraints:
+        mode = "unstranded|rf",
+    log:
+        RNASEQC_OUT + "/00_merge.{mode}.log",
+    threads: 1
+    resources:
+        mem_mb = 4000,
+    singularity:
+        RNASEQC_CONTAINER
+    shell:
+        dedent(r"""
+        set -euo pipefail
+        mkdir -p "$(dirname {output.counts:q})" "$(dirname {log:q})"
+
+        python3 - \
+            {output.counts:q} {output.tpm:q} {output.drop_counts:q} \
+            --counts {input.counts:q} \
+            --tpm {input.tpm:q} \
+            --samples {params.sample_names:q} \
+            --mode {wildcards.mode:q} \
+            > {log:q} 2>&1 <<'PY'
+        import argparse
+        import csv
+        import gzip
+        import math
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("counts_out")
+        parser.add_argument("tpm_out")
+        parser.add_argument("drop_out")
+        parser.add_argument("--counts", nargs="+", required=True)
+        parser.add_argument("--tpm", nargs="+", required=True)
+        parser.add_argument("--samples", nargs="+", required=True)
+        parser.add_argument("--mode", choices=["unstranded", "rf"], required=True)
+        args = parser.parse_args()
+
+        if not (
+            len(args.counts) == len(args.tpm) == len(args.samples)
+        ):
+            raise ValueError("Input file lists and sample list differ in length.")
+
+        def read_gct(path, sample, integer_counts):
+            with gzip.open(path, "rt") as handle:
+                if handle.readline().strip() != "#1.2":
+                    raise ValueError("Expected GCT 1.2: " + path)
+                n_genes, n_samples = map(int, handle.readline().split())
+                reader = csv.reader(handle, delimiter="\t")
+                header = next(reader)
+                rows = list(reader)
+
+            if n_samples != 1 or header != ["Name", "Description", sample]:
+                raise ValueError("Unexpected GCT header/sample: " + path)
+            if len(rows) != n_genes or any(len(row) != 3 for row in rows):
+                raise ValueError("GCT dimensions do not match its contents: " + path)
+
+            ids = [row[0] for row in rows]
+            symbols = [row[1] for row in rows]
+            values = [float(row[2]) for row in rows]
+
+            if not ids or len(ids) != len(set(ids)):
+                raise ValueError("Empty or duplicate gene identifiers: " + path)
+            if not all(math.isfinite(x) and x >= 0 for x in values):
+                raise ValueError("Non-finite or negative expression values: " + path)
+            if integer_counts:
+                if not all(x.is_integer() for x in values):
+                    raise ValueError("Non-integer RNA-SeQC read counts: " + path)
+                values = [int(x) for x in values]
+
+            return ids, symbols, values
+
+        gene_ids = gene_names = None
+        count_columns = []
+        tpm_columns = []
+
+        for sample, counts_path, tpm_path in zip(
+            args.samples, args.counts, args.tpm
+        ):
+            gct_sample = sample + "." + args.mode
+            ids, symbols, counts = read_gct(counts_path, gct_sample, True)
+            tids, tsymbols, tpms = read_gct(tpm_path, gct_sample, False)
+
+            if ids != tids or symbols != tsymbols:
+                raise ValueError("Counts/TPM annotation mismatch for " + sample)
+
+            if gene_ids is None:
+                gene_ids, gene_names = ids, symbols
+            elif ids != gene_ids or symbols != gene_names:
+                raise ValueError(
+                    "Gene annotation/order differs between samples: " + sample
+                )
+
+            count_columns.append(counts)
+            tpm_columns.append(tpms)
+
+        for path, columns in (
+            (args.counts_out, count_columns),
+            (args.tpm_out, tpm_columns),
+        ):
+            with gzip.open(path, "wt", newline="") as handle:
+                writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+                writer.writerow(["gene_id", "gene_name"] + args.samples)
+                writer.writerows(zip(gene_ids, gene_names, *columns))
+
+        # DROP input contains no gene-symbol column and no GCT preamble.
+        # Preserve the versioned Ensembl identifiers from the GTEx annotation.
+        with open(args.drop_out, "w", newline="") as handle:
+            writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+            writer.writerow(["geneID"] + args.samples)
+            writer.writerows(zip(gene_ids, *count_columns))
+
+        print("Merged %d genes across %d samples." %
+              (len(gene_ids), len(args.samples)))
+        print("DROP counts: " + args.drop_out)
+        PY
+        """)
 
 # -----------------------------------------------------------------------------
 # r11a: chip .bim -> filtered site list, in chip coordinates
@@ -5751,7 +6037,11 @@ rule r11n_genocheck_merge:
     """
     input:
         rna_bed  = GENOCHECK_OUT + "/rnaseq_genotypes.bed",
+        rna_bim  = GENOCHECK_OUT + "/rnaseq_genotypes.bim",
+        rna_fam  = GENOCHECK_OUT + "/rnaseq_genotypes.fam",
         chip_bed = GENOCHECK_OUT + "/_merge/chip_shared.bed",
+        chip_bim = GENOCHECK_OUT + "/_merge/chip_shared.bim",
+        chip_fam = GENOCHECK_OUT + "/_merge/chip_shared.fam",
     output:
         bed = GENOCHECK_OUT + "/_merge/merged.bed",
         bim = GENOCHECK_OUT + "/_merge/merged.bim",
