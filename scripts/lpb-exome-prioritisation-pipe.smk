@@ -68,6 +68,9 @@ clinvar_vcf         = "/tmp/annotation/vep/custom/clinvar.vcf.gz"
 
 # Gene panels for Tier C prioritization
 schema_genes        = "/tmp/data/SCHEMA_gene_results_with_hgnc.tsv"
+# Official SCHEMA 2.0 download (2026-08-21); already contains gene_symbol.
+# Adds the 40 published FDR5 genes alongside the legacy SCHEMA FDR<=0.25 panel.
+schema2_genes       = "/tmp/data/SCHEMA_v2_gene_results.tsv"
 bipex_genes         = "/tmp/data/BipEx_gene_results_with_hgnc.tsv"
 asc_genes           = "/tmp/data/ASC_gene_results_with_hgnc.tsv"
 ndd_genes           = "/tmp/data/DDG2P_panel.tsv"
@@ -77,8 +80,9 @@ loeuf_table         = "/tmp/data/gnomad_v4.1_constraint_metrics.tsv"
 # Internal-recurrence (artifact) filtering -- relatedness-aware
 # -----------------------------------------------------------------------------
 # Joint-called variants are scanned for sites that recur in multiple unrelated
-# samples but are absent or ultra-rare in gnomAD. Such sites are almost always
-# batch / mapping / sample-prep artifacts. Relatedness is estimated by PLINK2
+# samples but are absent or ultra-rare in gnomAD. These are potential
+# batch / mapping / sample-prep artifacts; genuine recurrent variants can
+# also meet this criterion. Relatedness is estimated by PLINK2
 # (KING-style kinship), and one representative is kept per family before the
 # recurrence count is taken.
 # -----------------------------------------------------------------------------
@@ -89,11 +93,12 @@ loeuf_table         = "/tmp/data/gnomad_v4.1_constraint_metrics.tsv"
 KINSHIP_THRESHOLD       = 0.0442 # 3rd degree
 
 # A site is flagged as a recurrent artifact when:
-#   - it is called in >= ARTIFACT_AC_MIN unrelated representatives, AND
+#   - it is carried by >= ARTIFACT_MIN_CARRIERS unrelated representatives, AND
 #   - its gnomAD AF is < ARTIFACT_GNOMAD_AF_MAX (i.e. ultra-rare or absent)
-# With ~24 representatives, AC>=3 is conservative; tighten to 2 for a stricter
-# filter or loosen to 4 if you suspect related-cohort contamination of AC.
-ARTIFACT_AC_MIN         = 2
+# Each representative counts once, including homozygous ALT and haploid ALT
+# genotypes. Raising the threshold excludes fewer variants. This heuristic
+# can also exclude genuine rare variants shared by unrelated individuals.
+ARTIFACT_MIN_CARRIERS   = 2
 ARTIFACT_GNOMAD_AF_MAX  = 0.001
 
 # Helper script for picking unrelated representatives (greedy graph algorithm).
@@ -661,7 +666,7 @@ rule r09_normalize:
 # extraction. The job: detect which samples are related, pick one
 # representative per family, then flag (CHROM, POS, REF, ALT) tuples that
 # recur in unrelated representatives but are absent / rare in gnomAD --
-# almost certainly batch / sample-prep / mapping artifacts. The tier
+# potential batch / sample-prep / mapping artifacts. The tier
 # script consumes this blacklist and drops matched variants before tier
 # classification.
 # =============================================================================
@@ -750,10 +755,12 @@ rule r09e_artifact_blacklist:
     # Compute the artifact blacklist as a TSV of (CHROM, POS, REF, ALT)
     # tuples. Steps:
     #   1. subset the cohort VCF to representatives only
-    #   2. recompute INFO/AC across just those representatives
-    #   3. keep sites where AC >= ARTIFACT_AC_MIN
-    #   4. annotate with gnomAD AF
-    #   5. keep only sites with AF < ARTIFACT_GNOMAD_AF_MAX or AF missing
+    #   2. keep alleles carried by >= ARTIFACT_MIN_CARRIERS representatives
+    #   3. annotate with gnomAD AF
+    #   4. keep only sites with AF < ARTIFACT_GNOMAD_AF_MAX or AF missing
+    # r09_normalize splits multiallelic records, so carriers are counted per
+    # ALT allele. N_PASS counts samples, not allele copies: one 1/1 is one
+    # carrier. Subset in a separate command before evaluating the expression.
     # The output is the blacklist; intermediate files are removed.
     #
     # NOTES on past bugs avoided here:
@@ -774,23 +781,22 @@ rule r09e_artifact_blacklist:
         sites    = "/tmp/qc/internal_artifact_sites.tsv",
         n_sites  = "/tmp/qc/internal_artifact_count.txt",
     params:
-        ac_min   = ARTIFACT_AC_MIN,
+        min_carriers = ARTIFACT_MIN_CARRIERS,
         af_max   = ARTIFACT_GNOMAD_AF_MAX,
     threads: 2
     singularity: "docker://quay.io/biocontainers/bcftools:1.19--h8b25389_0"
     shell:
         r"""
-        # Step 1+2+3: subset to representatives, recompute AC, keep recurrent
+        # Step 1+2: subset to representatives, then count ALT-carrying samples
         bcftools view --threads {threads} \
                       -S {input.reps} \
                       --force-samples \
                       -Ou {input.vcf} \
-        | bcftools +fill-tags -Ou - -- -t AC,AN \
-        | bcftools view -i 'INFO/AC >= {params.ac_min}' \
+        | bcftools view -i 'N_PASS(GT="alt") >= {params.min_carriers}' \
                       -Oz -o /tmp/qc/_recurrent.vcf.gz
         bcftools index -t /tmp/qc/_recurrent.vcf.gz
 
-        # Step 4: annotate with gnomAD AF.
+        # Step 3: annotate with gnomAD AF.
         # The gnomAD reference here must be a bgzipped VCF (not BCF) so it
         # can be read both by bcftools and downstream by VEP --custom.
         bcftools annotate --threads {threads} \
@@ -800,7 +806,7 @@ rule r09e_artifact_blacklist:
             /tmp/qc/_recurrent.vcf.gz
         bcftools index -t /tmp/qc/_recurrent_with_gnomad.vcf.gz
 
-        # Step 5: keep only sites where gnomAD AF is rare or absent, and
+        # Step 4: keep only sites where gnomAD AF is rare or absent, and
         # write the blacklist as plain tab-separated tuples.
         bcftools view -i 'INFO/gnomAD_AF < {params.af_max} || INFO/gnomAD_AF = "."' \
             -Ou /tmp/qc/_recurrent_with_gnomad.vcf.gz \
@@ -1064,6 +1070,7 @@ rule r12_tier_candidates:
         vep_tsv         = "/tmp/fastq/11_vep/cohort.vep.tsv.gz",
         per_sample_vcf  = "/tmp/fastq/10_per_sample_vcf/{sample}.vcf.gz",
         schema_genes    = schema_genes,
+        schema2_genes   = schema2_genes,
         bipex_genes     = bipex_genes,
         asc_genes       = asc_genes,
         ndd_genes       = ndd_genes,
@@ -1084,6 +1091,7 @@ rule r12_tier_candidates:
             --sample_vcf {input.per_sample_vcf} \
             --sample_id {wildcards.sample} \
             --schema_genes {input.schema_genes} \
+            --schema2_genes {input.schema2_genes} \
             --bipex_genes {input.bipex_genes} \
             --asc_genes {input.asc_genes} \
             --ndd_genes {input.ndd_genes} \
