@@ -30,6 +30,7 @@ Tier C  (Gene-panel long-shots)
     Rationale: prior-probability boost for known psychiatric / NDD genes.
 
 Common filters applied to all tiers:
+    * ALT allele depth >= 4 (exclude AD[ALT] <= 3 or missing/invalid AD)
     * gnomAD v4 popmax AF < 0.001 (ultra-rare; rare-large-effect hypothesis)
     * Sample genotype is heterozygous or homozygous-alt (ALT present)
     * Canonical / MANE-Select transcript only (collapsed upstream by VEP
@@ -81,6 +82,7 @@ import numpy as np
 # Thresholds
 # ---------------------------------------------------------------------------
 AF_MAX               = 0.001    # gnomAD v4 popmax cutoff (ultra-rare)
+MIN_ALT_AD           = 4        # require more than three ALT-supporting reads
 SPLICEAI_THRESHOLD   = 0.20     # min of max(AG,AL,DG,DL) to flag splice
 ALPHAMIS_LIKELY_PATH = 0.564    # AlphaMissense likely_pathogenic threshold
 REVEL_THRESHOLD      = 0.773    # ClinGen-endorsed thresholds (0.773 for moderate evidence, 0.932 for strong evidence under ACMG PP3 criteria).
@@ -766,6 +768,14 @@ def load_gnomad_constraint_per_gene(path):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def alt_allele_depth(ad):
+    """ALT depth for a normalized biallelic VCF row; NaN if unverifiable."""
+    parts = str(ad).split(",")
+    if len(parts) != 2 or any(re.fullmatch(r"[0-9]+", p) is None for p in parts):
+        return np.nan
+    return int(parts[1])
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -831,6 +841,18 @@ def main():
 
     merged = vep.merge(gt, on=["CHROM", "POS", "REF", "ALT"], how="inner")
     print(f"  {len(merged)} variants merged with VEP annotations",
+          file=sys.stderr)
+
+    # Common read-support gate, before any rarity or tier classification.
+    # AD is allele-specific after upstream multiallelic splitting. Do not
+    # substitute total DP, GQ, or the sum of depths for other ALT alleles.
+    alt_depth = merged["AD"].map(alt_allele_depth)
+    missing_ad = alt_depth.isna()
+    low_ad = alt_depth.notna() & (alt_depth < MIN_ALT_AD)
+    merged = merged[~missing_ad & ~low_ad].copy()
+    print(f"  ALT AD filter: dropped {int(low_ad.sum())} annotation rows "
+          f"with ALT AD < {MIN_ALT_AD} and {int(missing_ad.sum())} "
+          f"with missing/invalid AD; retained {len(merged)} rows",
           file=sys.stderr)
 
     # ------------------------------------------------------------------
