@@ -53,7 +53,7 @@ ClinVar GRCh38 is to be retrieved from a dated NCBI archive snapshot (archive_2.
 #### 6. Gene panels
 *all need to be downloaded manually*<br>
 - **SureSelectXT Human All Exon V8 capture-kit BED file** (S33266436_Regions.bed & S33266436_Regions.padded100.interval_list). The capture-kit BED file is supplied externally from [the wet-laboratory provider](https://earray.chem.agilent.com/suredesign/search/entity.htm).
-- **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results are to be obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results should be joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering (tier C).
+- **SCHEMA, BipEx, and ASC**. Schizophrenia ([Singh et al. 2022](https://doi.org/10.1038/s41586-022-04556-w)), bipolar ([Palmer et al. 2022](https://doi.org/10.1038/s41588-022-01034-x)), and ASD ([Satterstrom et al. 2020](https://doi.org/10.1016/j.cell.2019.12.036)) gene-burden results are to be obtained as TSV files from the [SCHEMA](https://atgu-exome-browser-data.s3.amazonaws.com/SCHEMA/SCHEMA_gene_results.tsv.bgz), [BipEx](https://atgu-exome-browser-data.s3.amazonaws.com/BipEx/BipEx_gene_results.tsv.bgz), and [ASC](https://atgu-exome-browser-data.s3.amazonaws.com/ASC/ASC_gene_results.tsv.bgz) web applications, respectively. The gene results should be joined to HGNC symbols via the gnomAD constraint table (Ensembl gene-ID match) for downstream gene-symbol-based filtering (tier C). Data from [SCHEMAv2](https://storage.googleapis.com/exome-results-browsers-public/downloads/2026-08-21/SCHEMA/SCHEMA_v2_gene_results.tsv.bgz) ([Sealock et al. 2026](https://doi.org/10.64898/2026.09.18.752670) are provided too.
 - **The DDG2P / Genomics England PanelApp panel (ID 484)**. The panel is to be retrieved via [the panel's TSV download endpoint](https://panelapp.genomicsengland.co.uk/api/v1/panels/484/), with a JSON-API fallback and automated JSON-to-TSV conversion. Used for Tier C classification.
 
 #### 7. (optional) scRNA-seq reference for deconvolution
@@ -331,76 +331,76 @@ flowchart LR
 	id61[r11m_genocheck_chip_subset]
 	id62[r11o_genocheck_kinship_merged]
 
-	style id0 fill:#D95757,stroke-width:2px,color:#333333
-	style id1 fill:#D98057,stroke-width:2px,color:#333333
-	style id2 fill:#D96F57,stroke-width:2px,color:#333333
-	style id3 fill:#D95F57,stroke-width:2px,color:#333333
-	style id4 fill:#D96757,stroke-width:2px,color:#333333
-	style id5 fill:#D97857,stroke-width:2px,color:#333333
-	style id6 fill:#D99157,stroke-width:2px,color:#333333
-	style id7 fill:#D9B257,stroke-width:2px,color:#333333
-	style id8 fill:#D9A957,stroke-width:2px,color:#333333
-	style id9 fill:#D98857,stroke-width:2px,color:#333333
-	style id10 fill:#D99957,stroke-width:2px,color:#333333
-	style id11 fill:#D9A157,stroke-width:2px,color:#333333
+	style id0 stroke-width:2px,color:#333333
+	style id1 stroke-width:2px,color:#333333
+	style id2 stroke-width:2px,color:#333333
+	style id3 stroke-width:2px,color:#333333
+	style id4 stroke-width:2px,color:#333333
+	style id5 stroke-width:2px,color:#333333
+	style id6 stroke-width:2px,color:#333333
+	style id7 stroke-width:2px,color:#333333
+	style id8 stroke-width:2px,color:#333333
+	style id9 stroke-width:2px,color:#333333
+	style id10 stroke-width:2px,color:#333333
+	style id11 stroke-width:2px,color:#333333
 
-	style id12 fill:#D7D957,stroke-width:2px,color:#35ed12
-	style id13 fill:#D9D357,stroke-width:2px,color:#35ed12
-	style id14 fill:#D9CA57,stroke-width:2px,color:#35ed12
-	style id15 fill:#D9C257,stroke-width:2px,color:#35ed12
-	style id16 fill:#D9BA57,stroke-width:2px,color:#35ed12
-	style id17 fill:#CED957,stroke-width:2px,color:#35ed12
-	style id18 fill:#C6D957,stroke-width:2px,color:#35ed12
-	style id19 fill:#BED957,stroke-width:2px,color:#35ed12
+	style id12 stroke-width:2px,color:#35ed12
+	style id13 stroke-width:2px,color:#35ed12
+	style id14 stroke-width:2px,color:#35ed12
+	style id15 stroke-width:2px,color:#35ed12
+	style id16 stroke-width:2px,color:#35ed12
+	style id17 stroke-width:2px,color:#35ed12
+	style id18 stroke-width:2px,color:#35ed12
+	style id19 stroke-width:2px,color:#35ed12
 
-	style id20 fill:#A5D957,stroke-width:2px,color:#ed1235
-	style id21 fill:#ADD957,stroke-width:2px,color:#ed1235
-	style id22 fill:#B6D957,stroke-width:2px,color:#ed1235
-	style id23 fill:#95D957,stroke-width:2px,color:#ed1235
-	style id24 fill:#9DD957,stroke-width:2px,color:#ed1235
+	style id20 stroke-width:2px,color:#ed1235
+	style id21 stroke-width:2px,color:#ed1235
+	style id22 stroke-width:2px,color:#ed1235
+	style id23 stroke-width:2px,color:#ed1235
+	style id24 stroke-width:2px,color:#ed1235
 
-	style id25 fill:#7CD957,stroke-width:2px,color:#ca12ed
-	style id26 fill:#84D957,stroke-width:2px,color:#ca12ed
-	style id27 fill:#8CD957,stroke-width:2px,color:#ca12ed
+	style id25 stroke-width:2px,color:#ca12ed
+	style id26 stroke-width:2px,color:#ca12ed
+	style id27 stroke-width:2px,color:#ca12ed
 
-	style id28 fill:#63D957,stroke-width:2px,color:#0073ff
-	style id29 fill:#6BD957,stroke-width:2px,color:#0073ff
-	style id30 fill:#74D957,stroke-width:2px,color:#0073ff
+	style id28 stroke-width:2px,color:#0073ff
+	style id29 stroke-width:2px,color:#0073ff
+	style id30 stroke-width:2px,color:#0073ff
 
-	style id31 fill:#57D984,stroke-width:2px,color:#333333
-	style id32 fill:#57D97C,stroke-width:2px,color:#333333
-	style id33 fill:#57D99D,stroke-width:2px,color:#333333
-	style id34 fill:#57D995,stroke-width:2px,color:#333333
-	style id35 fill:#57D98C,stroke-width:2px,color:#333333
+	style id31 stroke-width:2px,color:#333333
+	style id32 stroke-width:2px,color:#333333
+	style id33 stroke-width:2px,color:#333333
+	style id34 stroke-width:2px,color:#333333
+	style id35 stroke-width:2px,color:#333333
 
-	style id36 fill:#57D96B,stroke-width:2px,color:#0073ff
-	style id37 fill:#57D963,stroke-width:2px,color:#0073ff
-	style id38 fill:#57D95B,stroke-width:2px,color:#0073ff
-	style id39 fill:#5BD957,stroke-width:2px,color:#0073ff
-	style id40 fill:#57D974,stroke-width:2px,color:#0073ff
+	style id36 stroke-width:2px,color:#0073ff
+	style id37 stroke-width:2px,color:#0073ff
+	style id38 stroke-width:2px,color:#0073ff
+	style id39 stroke-width:2px,color:#0073ff
+	style id40 stroke-width:2px,color:#0073ff
 
-	style id41 fill:#57B2D9,stroke-width:2px,color:#af8850
-	style id42 fill:#57BAD9,stroke-width:2px,color:#af8850
-	style id43 fill:#57C2D9,stroke-width:2px,color:#af8850
-	style id44 fill:#57CAD9,stroke-width:2px,color:#af8850
-	style id45 fill:#57D9D7,stroke-width:2px,color:#af8850
-	style id46 fill:#57D9C6,stroke-width:2px,color:#af8850
-	style id47 fill:#57D9CE,stroke-width:2px,color:#af8850
-	style id48 fill:#57D9B6,stroke-width:2px,color:#af8850
-	style id49 fill:#57D9AD,stroke-width:2px,color:#af8850
-	style id50 fill:#57D9A5,stroke-width:2px,color:#af8850
-	style id51 fill:#57D9BE,stroke-width:2px,color:#af8850
-	style id52 fill:#57D3D9,stroke-width:2px,color:#af8850
-	style id53 fill:#57A1D9,stroke-width:2px,color:#af8850
-	style id54 fill:#57A9D9,stroke-width:2px,color:#af8850
-	style id55 fill:#5767D9,stroke-width:2px,color:#af8850
-	style id56 fill:#576FD9,stroke-width:2px,color:#af8850
-	style id57 fill:#575FD9,stroke-width:2px,color:#af8850
-	style id58 fill:#5778D9,stroke-width:2px,color:#af8850
-	style id59 fill:#5780D9,stroke-width:2px,color:#af8850
-	style id60 fill:#5791D9,stroke-width:2px,color:#af8850
-	style id61 fill:#5799D9,stroke-width:2px,color:#af8850
-	style id62 fill:#5788D9,stroke-width:2px,color:#af8850
+	style id41 stroke-width:2px,color:#af8850
+	style id42 stroke-width:2px,color:#af8850
+	style id43 stroke-width:2px,color:#af8850
+	style id44 stroke-width:2px,color:#af8850
+	style id45 stroke-width:2px,color:#af8850
+	style id46 stroke-width:2px,color:#af8850
+	style id47 stroke-width:2px,color:#af8850
+	style id48 stroke-width:2px,color:#af8850
+	style id49 stroke-width:2px,color:#af8850
+	style id50 stroke-width:2px,color:#af8850
+	style id51 stroke-width:2px,color:#af8850
+	style id52 stroke-width:2px,color:#af8850
+	style id53 stroke-width:2px,color:#af8850
+	style id54 stroke-width:2px,color:#af8850
+	style id55 stroke-width:2px,color:#af8850
+	style id56 stroke-width:2px,color:#af8850
+	style id57 stroke-width:2px,color:#af8850
+	style id58 stroke-width:2px,color:#af8850
+	style id59 stroke-width:2px,color:#af8850
+	style id60 stroke-width:2px,color:#af8850
+	style id61 stroke-width:2px,color:#af8850
+	style id62 stroke-width:2px,color:#af8850
 
 	id1 --> id0
 	id20 --> id0
