@@ -224,7 +224,7 @@ Genetic sex is inferred from sequencing coverage over the capture targets of the
 
 #### 10. Tier classification
 *scripts/lpb-exome-prioritisation-tier-candidates.py*<br>
-A Python script classifies per-sample variants into three tiers (rule `r12_tier_candidates`). Common variants (gnomAD popmax AF ≥ 0.001) and internal artifact sites are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
+A Python script classifies per-sample variants into three tiers (rule `r12_tier_candidates`). Common variants (gnomAD popmax AF ≥ 0.001), internal artifact sites, and alleles with support less than 4 reads are filtered first. Outputs comprise three tier-specific TSVs and a master TSV containing all rare-variant calls with the tier label as the leading column.
 - **Tier A** captures DROP-testable predicted loss-of-function and splice-disrupting variants (LOFTEE high-confidence LoF, or SpliceAI max delta ≥ 0.20).
 - **Tier B** captures rank-only damaging missense candidates in constrained genes (LOEUF < 0.6, from gnomAD v4.0+ (2024) paper) by AlphaMissense likely-pathogenic class (score ≥ 0.564) or ClinGen-endorsed REVEL ≥ 0.773 ([Pejaver et al. 2022](https://doi.org/10.1016/j.ajhg.2022.10.013)). Note that the definition of constrained genes is tightened in the recent gnomAD v4.1.1 release (LOEUF < 0.45).
 - **Tier C** captures any rare protein-altering variant in a curated gene set (SCHEMA at FDR ≤ 0.25, ASC at FDR ≤ 0.25, or DDG2P confidence ≥ 2). Per-panel boolean membership flags and panel-specific annotation columns (e.g., SCHEMA Q meta, OR for protein-truncating variants; DDG2P mode-of-inheritance and aggregated phenotypes) are appended to all output tables. BipEx burden statistics are reported as annotation only and do not define Tier C panel membership.
@@ -243,6 +243,7 @@ sudo docker container run --rm --privileged -it \
     -v "${PWD}/sing_tmp:/tmp/sing_tmp" \
     -v "${PWD}/00_additional_files/arcashla_ref/dat:/usr/local/share/arcas-hla-0.6.0-2/dat" \
 	-e USE_TRIMMING=1 \
+	-e READ_LENGTH=150 \
     -e CONTAMINATION_ENABLED=1 \
     -e ARCASHLA_ENABLED=1 \
 	-e DECONV_ENABLED=1 \
@@ -278,7 +279,6 @@ flowchart LR
 	id9[r03g_index_md_bam]
 	id10[r04a_make_refflat]
 	id11[r04b_make_rrna_intervals]
-
 	id12[r05d_contamination_screen]
 	id13[r05c_entropy_filter]
 	id14[r05b_extract_unmapped]
@@ -287,138 +287,161 @@ flowchart LR
 	id17[r05e_contamination_summary]
 	id18[r05f_contamination_uniformity]
 	id19[r05g_contamination_fractions]
-	
 	id20[r06c_hla_summary]
 	id21[r06b_arcashla_genotype]
 	id22[r06a_arcashla_extract]
 	id23[r06e_hla_summary_classII]
 	id24[r06d_arcashla_genotype_classII]
-
 	id25[r07c_infer_sex]
 	id26[r07b_sex_counts_per_sample]
 	id27[r07a_sex_marker_regions]
-
 	id28[r08c_cell_marker_expression]
 	id29[r08b_cell_marker_counts_per_sample]
 	id30[r08a_cell_marker_regions]
-	id33[r09d_summary]
-	id34[r09c_run_hspe]
-	id35[r09b_reference]
-	id36[r09a_mixture]
-	id37[r09e_cibersortx_prep]
-
 	id31[r10b_expression_xlsx]
 	id32[r10a_expression_tables]
+	id33[r10e_rnaseqc_expression_tables]
+	id34[r10d_rnaseqc_quantify]
+	id35[r10c_rnaseqc_annotation]
+	id36[r09d_summary]
+	id37[r09c_run_hspe]
+	id38[r09b_reference]
+	id39[r09a_mixture]
+	id40[r09e_cibersortx_prep]
+	id41[r11j_genocheck_plink_final]
+	id42[r11i_genocheck_remap]
+	id43[r11h_genocheck_plink_hg38]
+	id44[r11g_genocheck_filter]
+	id45[r11f_genocheck_call_chrom]
+	id46[r11e2_genocheck_depth_screen]
+	id47[r11e_genocheck_alleles]
+	id48[r11c_genocheck_crosswalk]
+	id49[r11b_genocheck_liftover]
+	id50[r11a_genocheck_sites]
+	id51[r11d_genocheck_refbase]
+	id52[r11g2_genocheck_sample_qc]
+	id53[r11l_genocheck_rna_report]
+	id54[r11k_genocheck_kinship_rna]
+	id55[r11s_genocheck_mixture]
+	id56[r11r_genocheck_vaf_counts]
+	id57[r11t_genocheck_mixture_plots]
+	id58[r11q_genocheck_identity]
+	id59[r11p_genocheck_ibs]
+	id60[r11n_genocheck_merge]
+	id61[r11m_genocheck_chip_subset]
+	id62[r11o_genocheck_kinship_merged]
 
-	id38[r11j_genocheck_plink_final]
-	id39[r11i_genocheck_remap]
-	id40[r11h_genocheck_plink_hg38]
-	id41[r11g_genocheck_filter]
-	id42[r11f_genocheck_call_chrom]
-	id43[r11e2_genocheck_depth_screen]
-	id44[r11e_genocheck_alleles]
-	id45[r11c_genocheck_crosswalk]
-	id46[r11b_genocheck_liftover]
-	id47[r11a_genocheck_sites]
-	id48[r11d_genocheck_refbase]
-	id49[r11g2_genocheck_sample_qc]
-	id50[r11l_genocheck_rna_report]
-	id51[r11k_genocheck_kinship_rna]
-	id52[r11s_genocheck_mixture]
-	id53[r11r_genocheck_vaf_counts]
-	id54[r11t_genocheck_mixture_plots]
-	id55[r11q_genocheck_identity]
-	id56[r11p_genocheck_ibs]
-	id57[r11n_genocheck_merge]
-	id58[r11m_genocheck_chip_subset]
-	id59[r11o_genocheck_kinship_merged]
+	style id0 fill:#D95757,stroke-width:2px,color:#333333
+	style id1 fill:#D98057,stroke-width:2px,color:#333333
+	style id2 fill:#D96F57,stroke-width:2px,color:#333333
+	style id3 fill:#D95F57,stroke-width:2px,color:#333333
+	style id4 fill:#D96757,stroke-width:2px,color:#333333
+	style id5 fill:#D97857,stroke-width:2px,color:#333333
+	style id6 fill:#D99157,stroke-width:2px,color:#333333
+	style id7 fill:#D9B257,stroke-width:2px,color:#333333
+	style id8 fill:#D9A957,stroke-width:2px,color:#333333
+	style id9 fill:#D98857,stroke-width:2px,color:#333333
+	style id10 fill:#D99957,stroke-width:2px,color:#333333
+	style id11 fill:#D9A157,stroke-width:2px,color:#333333
 
-	style id12 stroke-width:2px,color:#35ed12
-	style id13 stroke-width:2px,color:#35ed12
-	style id14 stroke-width:2px,color:#35ed12
-	style id15 stroke-width:2px,color:#35ed12
-	style id16 stroke-width:2px,color:#35ed12
-	style id17 stroke-width:2px,color:#35ed12
-	style id18 stroke-width:2px,color:#35ed12
-	style id19 stroke-width:2px,color:#35ed12
+	style id12 fill:#D7D957,stroke-width:2px,color:#35ed12
+	style id13 fill:#D9D357,stroke-width:2px,color:#35ed12
+	style id14 fill:#D9CA57,stroke-width:2px,color:#35ed12
+	style id15 fill:#D9C257,stroke-width:2px,color:#35ed12
+	style id16 fill:#D9BA57,stroke-width:2px,color:#35ed12
+	style id17 fill:#CED957,stroke-width:2px,color:#35ed12
+	style id18 fill:#C6D957,stroke-width:2px,color:#35ed12
+	style id19 fill:#BED957,stroke-width:2px,color:#35ed12
 
-	style id20 stroke-width:2px,color:#ed1235
-	style id21 stroke-width:2px,color:#ed1235
-	style id22 stroke-width:2px,color:#ed1235
-	style id23 stroke-width:2px,color:#ed1235
-	style id24 stroke-width:2px,color:#ed1235
+	style id20 fill:#A5D957,stroke-width:2px,color:#ed1235
+	style id21 fill:#ADD957,stroke-width:2px,color:#ed1235
+	style id22 fill:#B6D957,stroke-width:2px,color:#ed1235
+	style id23 fill:#95D957,stroke-width:2px,color:#ed1235
+	style id24 fill:#9DD957,stroke-width:2px,color:#ed1235
 
-	style id25 stroke-width:2px,color:#ca12ed
-	style id26 stroke-width:2px,color:#ca12ed
-	style id27 stroke-width:2px,color:#ca12ed
+	style id25 fill:#7CD957,stroke-width:2px,color:#ca12ed
+	style id26 fill:#84D957,stroke-width:2px,color:#ca12ed
+	style id27 fill:#8CD957,stroke-width:2px,color:#ca12ed
 
-	style id28 stroke-width:2px,color:#1235ed
-	style id29 stroke-width:2px,color:#1235ed
-	style id30 stroke-width:2px,color:#1235ed
-	style id31 stroke-width:2px,color:#1235ed
-	style id32 stroke-width:2px,color:#1235ed
-	style id33 stroke-width:2px,color:#1235ed
-	style id34 stroke-width:2px,color:#1235ed
-	style id35 stroke-width:2px,color:#1235ed
-	style id36 stroke-width:2px,color:#1235ed
-	style id37 stroke-width:2px,color:#1235ed
+	style id28 fill:#63D957,stroke-width:2px,color:#0073ff
+	style id29 fill:#6BD957,stroke-width:2px,color:#0073ff
+	style id30 fill:#74D957,stroke-width:2px,color:#0073ff
 
-	style id38 stroke-width:2px,color:#af8850
-	style id39 stroke-width:2px,color:#af8850
-	style id40 stroke-width:2px,color:#af8850
-	style id41 stroke-width:2px,color:#af8850
-	style id42 stroke-width:2px,color:#af8850
-	style id43 stroke-width:2px,color:#af8850
-	style id44 stroke-width:2px,color:#af8850
-	style id45 stroke-width:2px,color:#af8850
-	style id46 stroke-width:2px,color:#af8850
-	style id47 stroke-width:2px,color:#af8850
-	style id48 stroke-width:2px,color:#af8850
-	style id49 stroke-width:2px,color:#af8850
-	style id50 stroke-width:2px,color:#af8850
-	style id51 stroke-width:2px,color:#af8850
-	style id52 stroke-width:2px,color:#af8850
-	style id53 stroke-width:2px,color:#af8850
-	style id54 stroke-width:2px,color:#af8850
-	style id55 stroke-width:2px,color:#af8850
-	style id56 stroke-width:2px,color:#af8850
-	style id57 stroke-width:2px,color:#af8850
-	style id58 stroke-width:2px,color:#af8850
-	style id59 stroke-width:2px,color:#af8850
+	style id31 fill:#57D984,stroke-width:2px,color:#333333
+	style id32 fill:#57D97C,stroke-width:2px,color:#333333
+	style id33 fill:#57D99D,stroke-width:2px,color:#333333
+	style id34 fill:#57D995,stroke-width:2px,color:#333333
+	style id35 fill:#57D98C,stroke-width:2px,color:#333333
 
-	id17 --> id0
-	id28 --> id0
-	id37 --> id0
-	id23 --> id0
-	id19 --> id0
-	id34 --> id0
+	style id36 fill:#57D96B,stroke-width:2px,color:#0073ff
+	style id37 fill:#57D963,stroke-width:2px,color:#0073ff
+	style id38 fill:#57D95B,stroke-width:2px,color:#0073ff
+	style id39 fill:#5BD957,stroke-width:2px,color:#0073ff
+	style id40 fill:#57D974,stroke-width:2px,color:#0073ff
+
+	style id41 fill:#57B2D9,stroke-width:2px,color:#af8850
+	style id42 fill:#57BAD9,stroke-width:2px,color:#af8850
+	style id43 fill:#57C2D9,stroke-width:2px,color:#af8850
+	style id44 fill:#57CAD9,stroke-width:2px,color:#af8850
+	style id45 fill:#57D9D7,stroke-width:2px,color:#af8850
+	style id46 fill:#57D9C6,stroke-width:2px,color:#af8850
+	style id47 fill:#57D9CE,stroke-width:2px,color:#af8850
+	style id48 fill:#57D9B6,stroke-width:2px,color:#af8850
+	style id49 fill:#57D9AD,stroke-width:2px,color:#af8850
+	style id50 fill:#57D9A5,stroke-width:2px,color:#af8850
+	style id51 fill:#57D9BE,stroke-width:2px,color:#af8850
+	style id52 fill:#57D3D9,stroke-width:2px,color:#af8850
+	style id53 fill:#57A1D9,stroke-width:2px,color:#af8850
+	style id54 fill:#57A9D9,stroke-width:2px,color:#af8850
+	style id55 fill:#5767D9,stroke-width:2px,color:#af8850
+	style id56 fill:#576FD9,stroke-width:2px,color:#af8850
+	style id57 fill:#575FD9,stroke-width:2px,color:#af8850
+	style id58 fill:#5778D9,stroke-width:2px,color:#af8850
+	style id59 fill:#5780D9,stroke-width:2px,color:#af8850
+	style id60 fill:#5791D9,stroke-width:2px,color:#af8850
+	style id61 fill:#5799D9,stroke-width:2px,color:#af8850
+	style id62 fill:#5788D9,stroke-width:2px,color:#af8850
+
 	id1 --> id0
-	id2 --> id0
-	id7 --> id0
 	id20 --> id0
-	id18 --> id0
-	id6 --> id0
+	id7 --> id0
 	id33 --> id0
-	id31 --> id0
+	id19 --> id0
+	id18 --> id0
+	id58 --> id0
+	id57 --> id0
 	id25 --> id0
-	id2 --> id1
+	id31 --> id0
+	id23 --> id0
+	id36 --> id0
+	id41 --> id0
+	id52 --> id0
+	id37 --> id0
+	id55 --> id0
+	id28 --> id0
+	id53 --> id0
+	id40 --> id0
+	id2 --> id0
+	id6 --> id0
+	id17 --> id0
 	id5 --> id1
+	id2 --> id1
 	id4 --> id2
 	id3 --> id2
 	id2 --> id5
 	id2 --> id6
-	id6 --> id7
-	id8 --> id7
 	id12 --> id7
-	id10 --> id8
+	id8 --> id7
+	id6 --> id7
+	id9 --> id8
 	id1 --> id8
 	id11 --> id8
-	id9 --> id8
+	id10 --> id8
 	id1 --> id9
 	id2 --> id11
-	id15 --> id12
 	id1 --> id12
 	id13 --> id12
+	id15 --> id12
 	id14 --> id13
 	id1 --> id14
 	id16 --> id15
@@ -427,61 +450,62 @@ flowchart LR
 	id12 --> id19
 	id21 --> id20
 	id22 --> id21
-	id1 --> id22
 	id9 --> id22
+	id1 --> id22
 	id24 --> id23
 	id22 --> id24
 	id26 --> id25
+	id9 --> id26
 	id1 --> id26
 	id27 --> id26
-	id9 --> id26
 	id29 --> id28
+	id9 --> id29
 	id1 --> id29
 	id30 --> id29
-	id9 --> id29
 	id32 --> id31
 	id2 --> id32
 	id34 --> id33
-	id36 --> id34
+	id9 --> id34
+	id1 --> id34
 	id35 --> id34
-	id36 --> id35
-	id2 --> id36
-	id36 --> id37
-
+	id37 --> id36
+	id38 --> id37
+	id39 --> id37
 	id39 --> id38
-	id40 --> id39
-	id44 --> id39
-	id49 --> id40
-	id41 --> id40
+	id2 --> id39
+	id39 --> id40
 	id42 --> id41
-	id9 --> id42
+	id47 --> id42
 	id43 --> id42
-	id1 --> id42
-	id9 --> id43
+	id52 --> id43
 	id44 --> id43
-	id1 --> id43
 	id45 --> id44
-	id48 --> id44
+	id9 --> id45
+	id1 --> id45
 	id46 --> id45
 	id47 --> id46
-	id45 --> id48
-	id41 --> id49
-	id51 --> id50
-	id49 --> id50
-	id38 --> id51
-	id53 --> id52
-	id41 --> id53
-	id52 --> id54
-	id49 --> id55
-	id59 --> id55
+	id1 --> id46
+	id9 --> id46
+	id48 --> id47
+	id51 --> id47
+	id49 --> id48
+	id50 --> id49
+	id48 --> id51
+	id44 --> id52
+	id52 --> id53
+	id54 --> id53
+	id41 --> id54
 	id56 --> id55
-	id57 --> id56
-	id58 --> id57
-	id38 --> id57
-	id38 --> id58
-	id57 --> id59
-    id52 --> id0
-	id55 --> id0
+	id44 --> id56
+	id55 --> id57
+	id62 --> id58
+	id52 --> id58
+	id59 --> id58
+	id60 --> id59
+	id41 --> id60
+	id61 --> id60
+	id41 --> id61
+	id60 --> id62
 ```
 
 #### 1. Reference assembly and annotation
@@ -510,7 +534,7 @@ Per-sample STAR Log.final.out files are parsed into a single TSV (rule `r03h_map
 Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical duplicates on the coordinate-sorted BAM, producing the canonical GTEx-style filename `{sample}.Aligned.sortedByCoord.out.patched.md.bam`. The "patched" suffix is retained for naming consistency with the GTEx convention even though bamsync (which would carry QC flags from a pre-existing CRAM in GTEx's own pipeline) is not applied here, since alignment starts from raw FASTQ. The MD'd BAM is the canonical input for the DROP MAE, OUTRIDER, and FRASER modules and is indexed by samtools (rule `r03g_index_md_bam`).
 
 #### 4. RNA-seq quality control
- Picard CollectRnaSeqMetrics 2.27.5 (rule `r04c_picard_rnaseq_metrics`) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using `ucsc-gtfToGenePred -genePredExt -geneNameAsName2` followed by column-reordering to refFlat format (rule `r04a_make_refflat`). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule `r04b_make_rrna_intervals`). CollectRnaSeqMetrics is run with STRAND_SPECIFICITY=NONE (preserving 3' bias and rRNA detection regardless of library protocol) and `VALIDATION_STRINGENCY=LENIENT` to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule `r04d_qc_summary`, `04_qc/00_qc_summary.tsv`) reporting:
+ Picard CollectRnaSeqMetrics 2.27.5 (rule `r04c_picard_rnaseq_metrics`) is run per-sample to produce comprehensive RNA-seq quality metrics. The required UCSC refFlat annotation is generated once from the GENCODE v47 GTF using `ucsc-gtfToGenePred -genePredExt -geneNameAsName2` followed by column-reordering to refFlat format (rule `r04a_make_refflat`). A Picard interval-list of ribosomal RNA loci is generated once from the same GTF by selecting gene_type "rRNA" and gene_type "Mt_rRNA" features and combining them with the BAM's @SQ header lines (rule `r04b_make_rrna_intervals`). CollectRnaSeqMetrics is run with `STRAND_SPECIFICITY=SECOND_READ_TRANSCRIPTION_STRAND` (affects only the strand corretness metrics) and `VALIDATION_STRINGENCY=LENIENT` to accommodate STAR-output BAMs. The resulting per-sample metrics are aggregated into a cohort summary table (rule `r04d_qc_summary`, `04_qc/00_qc_summary.tsv`) reporting:
 
 |flag|description|
 |-|-|
@@ -524,11 +548,11 @@ Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical dupl
 |PCT_MRNA_BASES|Combined PCT_CODING_BASES + PCT_UTR_BASES. The most important single quality metric for poly-A RNA-seq. Target: >85% for high-quality poly-A samples; <60% indicates a degraded or contaminated library.|
 |PCT_USABLE_BASES|Fraction of all PF bases (not just aligned) that landed in mRNA (PF_ALIGNED_BASES × PCT_MRNA_BASES / PF_BASES). Combines alignment rate and library purity into one number.|
 |MEDIAN_CV_COVERAGE|Median coefficient of variation in coverage across the 1000 most-expressed transcripts (CV = stdev/mean). Lower is better — uniform coverage means small CV. Values <0.6 are typical for good libraries; >0.8 indicates uneven coverage (often degradation-driven).|
-|MEDIAN_5PRIME_BIAS|Median ratio of coverage at the 5' end vs. the middle of the top-1000 transcripts. Values near 0.5 = balanced; <0.3 = 5' depleted; >0.7 = 5' enriched. 5' enrichment with poly-A selection is unusual and may suggest a library-prep issue.|
-|MEDIAN_3PRIME_BIAS|Median ratio of coverage at the 3' end vs. the middle. The single most diagnostic degradation signature for poly-A libraries. Values near 0.5 = balanced; >0.7 = significant 3' enrichment from RNA degradation (poly-A primers pulled coverage toward the 3' end as transcripts fragmented); >0.8 = severe degradation.|
-|MEDIAN_5PRIME_TO_3PRIME_BIAS|Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.5 = degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment. Often more interpretable than either bias metric alone — combines both into one summary.|
+|MEDIAN_5PRIME_BIAS|Median ratio of coverage at the 5' end vs. the middle of the top-1000 transcripts. Values near 1 = balanced; 5' enrichment with poly-A selection in unusual.|
+|MEDIAN_3PRIME_BIAS|Median ratio of coverage at the 3' end vs. the middle. Values near 1 = balanced. Note that MEDIAN_3PRIME_BIAS could also be <1.0 since fragmentation and size selection can underrepresent transcript ends.|
+|MEDIAN_5PRIME_TO_3PRIME_BIAS|Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.2 = possible degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment.|
 |PCT_CORRECT_STRAND_READS|For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.|
-|Uniquely_mapped|Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: read pairs, each pair counted once). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; Lower usable sequencing depth reduces coverage and power, particularly for weakly expressed genes.|
+|Uniquely_mapped|Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: *read pairs*). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; Lower usable sequencing depth reduces coverage and power, particularly for weakly expressed genes.|
 |Uniquely_mapped_pct|STAR's reported percentage of input reads that mapped uniquely (e.g., 90.10%). Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).|
 
 These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
@@ -643,6 +667,11 @@ cibersortx/fractions --username you@lab.org --token xxxxxxxx \
 Checks for cell-composition bias in RNA-seq samples using estimates from marker-based and CIBERSORTx analyses.<br>
 <img src="images/cell_type.png" alt="Cell types by samples" width="65%"><br>
 
+#### 10. RNA quantification
+Rules `r10a` and `r10b` produce counts and the corresponding TPM matrices, based on STAR's own quantification method.
+
+Rules `r10c–r10e` quantify duplicate-marked STAR BAMs using RNA-SeQC v2.4.3 and the published GTEx V11 **collapsed** GENCODE v47 annotation. Each sample is quantified in both unstranded mode, for comparison with GTEx (GTEx files come from earlier 2010s experiments), and reverse-stranded mode, matching the local library protocol. Outputs include per-sample counts, TPMs and QC metrics, merged expression matrices, and DROP-ready unnormalised count tables with the original sample identifiers.
+
 #### 11. Genotype identity check, kinship and mixture detection
 
 Enabled automatically, `GENOCHECK_ENABLED=0` disables it.
@@ -707,21 +736,23 @@ Verdicts: `mixture` (ΔBIC ≥ 10 and α̂ ≥ 0.03), `single_donor` (ΔBIC < 10
 Per sample:
  - `../03_bam_star/{sample}/{sample}.Aligned.sortedByCoord.out.patched.md.bam` + index (canonical DROP input),
  - `../03_bam_star/{sample}/{sample}.SJ.out.tab` (FRASER input),
- - `../03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab` (STAR counts, note that GTEx v11 uses RNA-SeQC for gene quantification),
- - `../03_bam_star/{sample}/{sample}.Aligned.toTranscriptome.out.bam` (RSEM input if needed)
+ - `../03_bam_star/{sample}/{sample}.ReadsPerGene.out.tab` (STAR counts),
+ - `../03_bam_star/{sample}/{sample}.Aligned.toTranscriptome.out.bam` (RSEM input if needed).
  
 Cohort-level:
  - `../03_bam_star/00_mapping_stat/mapping_stat.txt` (alignment summary),
  - `../04_qc/00_qc_summary.tsv` (RNA-seq QC summary with outlier flags),
  - `../04_qc/00_inferred_sex.tsv` (sex inference),
  - `../04_qc/00_cell_marker_expression.tsv` (cell-composition markers),
- - `../04_qc/00_expression_summary.xlsx` (counts and TPM tables),
+ - `../04_qc/00_expression_summary.xlsx` (STAR-produced counts and the corresponding TPM table),
  - `../06_hla/00_hla_summary.tsv` and `../06_hla/00_hla_summary_classII.tsv` (arcasHLA summary files),
- - `../11_genocheck/rnaseq_genotypes.{bed,bim,fam}` reliable RNA-seq inferred genotypes in the PLINK format,
- - `../11_genocheck/00_genocheck_site_stats.tsv` genotypes calling report,
- - `../11_genocheck/00_similarity_pairs.tsv` reports which reference DNA match RNA genotypes,
- - `../11_genocheck/00_kinship_rna_report.tsv`  reports RNA-derived kinship,
- - `../11_genocheck/00_mixture_report.tsv` reports whether RNA data correspond better with a single or a mixture of two samples.
+ - `../10_rnaseqc/00_drop_gene_counts.unstranded.tsv` (GTEx-compatible RNA-SeQC unstranded counts),
+ - `../10_rnaseqc/00_drop_gene_counts.rf.tsv"` (RNA-SeQC reverse-stranded counts),
+ - `../11_genocheck/rnaseq_genotypes.{bed,bim,fam}` (reliable RNA-seq inferred genotypes in the PLINK format),
+ - `../11_genocheck/00_genocheck_site_stats.tsv` (genotypes calling report),
+ - `../11_genocheck/00_similarity_pairs.tsv` (reports which reference DNA match RNA genotypes),
+ - `../11_genocheck/00_kinship_rna_report.tsv`  (reports RNA-derived kinship),
+ - `../11_genocheck/00_mixture_report.tsv` (reports whether RNA data correspond better with a single or a mixture of two samples).
 
 ## III. DROP pipeline
 ```mermaid
@@ -760,7 +791,7 @@ Input files:
 - a sample annotation file
 - a gene annotation file (gtf): Matching [GENCODE v47 annotation](https://www.gencodegenes.org/human/release_47.html) (used in the RNA-seq workflow earlier)
 - a reference genome fasta file and its respective index (used in the RNA-seq workflow earlier)
-- processed external count matrices for the OUTRIDER module. In this study, we used [GTEx V11](https://doi.org/10.1126/science.aaz1776) cortex BA9 count data and metadata:<br>
+- processed external count matrices for the OUTRIDER module. In the study, we used [GTEx V11](https://doi.org/10.1126/science.aaz1776) cortex BA9 count data and metadata:<br>
 https://gtexportal.org/home/downloads/adult-gtex/bulk_tissue_expression<br>
 https://gtexportal.org/home/downloads/adult-gtex/metadata (contains data for age at death and sex covariates)
 
