@@ -331,19 +331,6 @@ flowchart LR
 	id61[r11m_genocheck_chip_subset]
 	id62[r11o_genocheck_kinship_merged]
 
-	style id0 stroke-width:2px,color:#333333
-	style id1 stroke-width:2px,color:#333333
-	style id2 stroke-width:2px,color:#333333
-	style id3 stroke-width:2px,color:#333333
-	style id4 stroke-width:2px,color:#333333
-	style id5 stroke-width:2px,color:#333333
-	style id6 stroke-width:2px,color:#333333
-	style id7 stroke-width:2px,color:#333333
-	style id8 stroke-width:2px,color:#333333
-	style id9 stroke-width:2px,color:#333333
-	style id10 stroke-width:2px,color:#333333
-	style id11 stroke-width:2px,color:#333333
-
 	style id12 stroke-width:2px,color:#35ed12
 	style id13 stroke-width:2px,color:#35ed12
 	style id14 stroke-width:2px,color:#35ed12
@@ -366,12 +353,6 @@ flowchart LR
 	style id28 stroke-width:2px,color:#0073ff
 	style id29 stroke-width:2px,color:#0073ff
 	style id30 stroke-width:2px,color:#0073ff
-
-	style id31 stroke-width:2px,color:#333333
-	style id32 stroke-width:2px,color:#333333
-	style id33 stroke-width:2px,color:#333333
-	style id34 stroke-width:2px,color:#333333
-	style id35 stroke-width:2px,color:#333333
 
 	style id36 stroke-width:2px,color:#0073ff
 	style id37 stroke-width:2px,color:#0073ff
