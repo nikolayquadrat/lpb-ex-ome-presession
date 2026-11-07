@@ -534,7 +534,7 @@ Picard MarkDuplicates 2.27.5 (rule `r03f_markduplicates`) marks PCR/optical dupl
 |MEDIAN_5PRIME_TO_3PRIME_BIAS|Direct ratio of 5' to 3' coverage at top-1000 transcripts. Values near 1.0 = balanced library; <0.2 = possible degradation-driven 3' enrichment; >2.0 = unusual 5' enrichment.|
 |PCT_CORRECT_STRAND_READS|For stranded libraries, fraction of reads whose orientation matches the expected library protocol strand. Should be >90% for a properly stranded library (e.g., dUTP-based stranded protocols); ~50% for an unstranded library (no preferential strand). A stranded library showing ~50% indicates strand-info loss somewhere upstream.|
 |Uniquely_mapped|Number of read fragments STAR mapped to exactly one genomic location (for paired-end data: *read pairs*). The most important metric for library complexity. ENCODE's gold-standard bar is 30M; DROP/OUTRIDER reliably works down to ~10M; Lower usable sequencing depth reduces coverage and power, particularly for weakly expressed genes.|
-|Uniquely_mapped_pct|STAR's reported percentage of input reads that mapped uniquely (e.g., 90.10%). Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).|
+|Uniquely_mapped_pct|STAR's reported percentage of input reads that mapped uniquely. Typical brain-cortex RNA-seq: 85–95%. Values <70% indicate mapping problems (wrong reference, contamination, severe degradation).|
 
 These flags identify samples with degraded RNA, failed rRNA depletion, or DNA contamination — all of which compromise downstream DROP analyses, particularly OUTRIDER (where degradation-induced low expression of long transcripts produces false expression outliers) and MAE (where coverage non-uniformity invalidates allelic-ratio estimates at variant sites in poorly-covered transcript regions).
 
@@ -791,6 +791,7 @@ sudo Rscript /path/to/script/lpb-drop-align-gtex-counts.R \
 Helpful notes:
 - in the mixed in-house and external sample table, annotation should be set as NAs for the in-house samples for some reason.
 - for the external counts matrix, set "geneID" as a gene identifier name.
+- you can used combined GTEx/local count matrix as an input instead of the local BAM files and the external GTEX count matrix. Theoretically, that is better in terms of reproducing the workflow of GTEx which operates with unstranded data and quanify it with RNA-SeQC and the collapsed GENCODE GTF. But you loose information in the stranded local reads and it is unclear which way is better.
 
 Installation and manual are described here:<br>
 https://gagneurlab-drop.readthedocs.io/en/latest/installation.html
